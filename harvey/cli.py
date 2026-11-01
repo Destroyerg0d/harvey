@@ -430,25 +430,77 @@ def cmd_export(args):
     asyncio.run(_export())
 
 
+def _chosen_mailbox(config, wanted: str):
+    """The mailbox --mailbox names (none given: the primary), or exit with
+    the ones that are configured."""
+    from harvey import mailboxes as mb
+
+    if not mb.is_multi(config):
+        primary = mb.primary_mailbox(config)
+        if wanted and wanted.strip().lower() != primary.email:
+            print("\n  No mailboxes are configured (channels.email.mailboxes), so Harvey "
+                  f"sends from persona.email ({primary.email or 'not set'}) only.\n")
+            sys.exit(1)
+        return primary
+    chosen = mb.mailbox_for(config, wanted)
+    if chosen is None:
+        print(f"\n  {wanted} isn't one of the configured mailboxes:")
+        for m in mb.configured_mailboxes(config):
+            print(f"    {m.email}{'  (primary)' if m.is_primary else ''}")
+        print()
+        sys.exit(1)
+    return chosen
+
+
 def cmd_gmail(args):
     """Gmail provider utilities (auth / test)."""
-    from harvey.config import load_env
+    from harvey.config import ConfigFileNotFoundError, load_config, load_env
 
     env = load_env()
+    wanted = getattr(args, "mailbox", "") or ""
     if args.gmail_action == "auth":
+        from harvey import mailboxes as mb
         from harvey.integrations.gmail import run_auth_flow
-        ok = run_auth_flow(env.gmail_client_id, env.gmail_client_secret)
+        try:
+            config = load_config()
+        except ConfigFileNotFoundError:
+            # Not set up yet: sign in as before, with no address to check.
+            if wanted:
+                raise
+            config = None
+        if config is None:
+            ok = run_auth_flow(env.gmail_client_id, env.gmail_client_secret)
+        else:
+            # Only a sign-in as this mailbox is kept (persona.email when no
+            # mailboxes are configured; unchecked if that is empty too).
+            chosen = _chosen_mailbox(config, wanted)
+            ok = run_auth_flow(env.gmail_client_id, env.gmail_client_secret,
+                               token_path=chosen.token_path if mb.is_multi(config) else None,
+                               expected_email=chosen.email)
         sys.exit(0 if ok else 1)
 
     if args.gmail_action == "test":
-        from harvey.config import load_config
+        from harvey import mailboxes as mb
         from harvey.integrations.gmail import GmailProvider
 
         async def _test():
-            provider = GmailProvider(load_config(), env)
-            ok, detail = await provider.test_connection()
-            print(f"\n  {'✓' if ok else '✗'} {detail}\n")
-            sys.exit(0 if ok else 1)
+            config = load_config()
+            if not mb.is_multi(config):
+                _chosen_mailbox(config, wanted)
+                provider = GmailProvider(config, env)
+                ok, detail = await provider.test_connection()
+                print(f"\n  {'✓' if ok else '✗'} {detail}\n")
+                sys.exit(0 if ok else 1)
+            targets = ([_chosen_mailbox(config, wanted)] if wanted
+                       else mb.configured_mailboxes(config))
+            failed = 0
+            print()
+            for mailbox in targets:
+                ok, detail = await GmailProvider(config, env, mailbox=mailbox).test_connection()
+                failed += not ok
+                print(f"  {'✓' if ok else '✗'} {mailbox.email}: {'OK' if ok else detail}")
+            print()
+            sys.exit(1 if failed else 0)
         asyncio.run(_test())
 
 
@@ -925,9 +977,51 @@ def cmd_trulyinbox(args):
     raise SystemExit(asyncio.run(_run()))
 
 
+def _sending_one_mailbox(args, wanted: str):
+    """harvey sending pause|resume|status --mailbox: one mailbox's own
+    switch. The global one still stops every mailbox."""
+    from harvey import mailboxes as mb
+    from harvey.config import load_config
+    from harvey.state import StateManager
+
+    config = load_config()
+    if not mb.is_multi(config):
+        print("\n  No mailboxes are configured (channels.email.mailboxes); "
+              "use 'harvey sending pause' or 'resume' without --mailbox.\n")
+        sys.exit(1)
+    address = _chosen_mailbox(config, wanted).email
+
+    async def _run():
+        state = StateManager()
+        await state.init_db()
+        if args.sending_action == "pause":
+            await state.set_setting(mb.paused_key(address), "paused manually")
+            print(f"\n  Sending from {address} paused. The other mailboxes carry on.\n")
+        elif args.sending_action == "resume":
+            await state.set_setting(mb.paused_key(address), "")
+            await state.set_setting(mb.bounce_key(address), "0")
+            print(f"\n  Sending from {address} resumed (its bounce counter reset).\n")
+            if await state.get_setting("sending_paused"):
+                print("  All sending is still paused: 'harvey sending resume' lifts that.\n")
+        else:
+            paused = await state.get_setting(mb.paused_key(address))
+            everything = await state.get_setting("sending_paused")
+            print(f"\n  {address}: {'PAUSED — ' + paused if paused else 'active'}")
+            if everything:
+                print(f"  All sending: PAUSED — {everything}")
+            print()
+
+    asyncio.run(_run())
+
+
 def cmd_sending(args):
     """Pause/resume the sending kill switch."""
     from harvey.state import StateManager
+
+    wanted = getattr(args, "mailbox", "") or ""
+    if wanted:
+        _sending_one_mailbox(args, wanted)
+        return
 
     async def _run():
         state = StateManager()
@@ -1028,6 +1122,9 @@ def main():
     sub = subparsers.add_parser("gmail", help="Gmail provider setup")
     sub.add_argument("gmail_action", choices=["auth", "test"],
                      help="auth: one-time OAuth; test: verify connection")
+    sub.add_argument("--mailbox", default="", metavar="EMAIL",
+                     help="One of channels.email.mailboxes (auth: default the primary; "
+                          "test: default all of them)")
     sub.set_defaults(func=cmd_gmail)
 
     # harvey microsoft auth|test
@@ -1096,6 +1193,8 @@ def main():
     sub = subparsers.add_parser("sending", help="Kill switch: pause/resume sending")
     sub.add_argument("sending_action", nargs="?", default="status",
                      choices=["pause", "resume", "status"])
+    sub.add_argument("--mailbox", default="", metavar="EMAIL",
+                     help="Only this one of channels.email.mailboxes")
     sub.set_defaults(func=cmd_sending)
 
     sub = subparsers.add_parser(
