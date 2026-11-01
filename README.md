@@ -622,13 +622,64 @@ harvey status                # pipeline summary
 harvey usage                 # active provider's quota + per-agent tokens
 harvey outbox                # review queued email
 harvey export                # deliverable prospects → CSV
-harvey sending pause|resume  # kill switch
+harvey sending pause|resume  # kill switch (--mailbox EMAIL: just that mailbox)
 harvey warmup [domain]       # is the sending domain ready? (SPF/DKIM/DMARC, age, blocklists, warmup)
 harvey trulyinbox connect    # connect TrulyInbox so Harvey reads the mailbox's warmup
 harvey retry-writes          # retry prospects the Writer gave up on
-harvey gmail auth            # one-time Gmail OAuth
+harvey gmail auth            # one-time Gmail OAuth (--mailbox EMAIL: one of several)
+harvey gmail test            # check the Gmail sign-in (every mailbox, or --mailbox EMAIL)
 harvey microsoft auth|test  # one-time Microsoft 365 sign-in (docs/microsoft365.md)
 ```
+
+### Several mailboxes
+
+With Gmail, Harvey can send from more than one mailbox, each on its own sign-in
+and daily limit. List them under `channels.email.mailboxes`; `persona.email`
+must be one of them (the primary, which keeps `data/gmail_token.json`):
+
+```yaml
+persona:
+  email: alex@sender-one.example
+channels:
+  email:
+    provider: gmail
+    max_daily_sends: 30          # each mailbox's limit unless it sets its own
+    mailboxes:
+      - { email: alex@sender-one.example, name: Alex Example }
+      - { email: sam@sender-one.example,  name: Sam Sample, daily_limit: 20 }
+      - { email: robin@sender-two.example, name: Robin }
+```
+
+Then sign each one in, choosing that account in Google's window (a sign-in for
+any other account is refused), and check them:
+
+```bash
+harvey gmail auth --mailbox sam@sender-one.example
+harvey gmail test                      # every mailbox
+```
+
+What changes:
+
+- **A company hears from one sender.** A new prospect goes to the least busy
+  mailbox that is signed in and not paused; everyone at the same company (or
+  email domain) goes with them, and someone Harvey has already written to keeps
+  their mailbox for good. A mailbox down for a day (signed out, wrong account,
+  refused by Gmail) hands the prospects it hasn't emailed yet to another one.
+- **Each email signs as its mailbox.** The Writer ends every email with
+  `{{sender_first_name}}`, filled in with the mailbox's first name when it sends
+  (the Outbox shows it filled in). An email signed by someone else is held for
+  you. Replies go out from the mailbox the prospect wrote to, in its thread.
+- **Mailboxes take turns** (at most 3 sends each a cycle), each under its own
+  daily limit and warmup ramp, so one that is capped or signed out never holds
+  up the rest. Replies are never held by a cap.
+- **Every inbox is read.** If one can't be read, only the cold email a reply
+  there could stop waits (to its prospects and their companies).
+- **Bounces count per mailbox**: past `max_bounce_rate` only that mailbox
+  pauses. `harvey sending resume --mailbox EMAIL` (or the Outbox) resumes it;
+  `harvey sending pause` still stops all of them.
+- `harvey status` lists each mailbox (signed in, sent in 24 hours, queue, pause)
+  and says when a running Harvey needs a restart to pick up a changed list.
+  `harvey warmup` checks every mailbox's domain.
 
 Prospect CSV exports exclude opted-out contacts, including when using
 `--status` or `--email-status` filters. `harvey export --all` is an unfiltered

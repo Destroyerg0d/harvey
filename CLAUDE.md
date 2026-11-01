@@ -333,12 +333,12 @@ harvey status                # Pipeline summary
 harvey usage                 # Claude quota gauges + per-agent token usage (no dollar costs — subscription plans aren't billed per token)
 harvey export                # Deliverable prospects → sequencer-ready CSV (prospects.csv)
 harvey export --all          # Full raw list, no filters
-harvey gmail auth            # One-time Gmail OAuth (when provider: gmail)
-harvey gmail test            # Verify the Gmail connection
+harvey gmail auth            # One-time Gmail OAuth (when provider: gmail); --mailbox EMAIL for one of several
+harvey gmail test            # Verify the Gmail connection (every mailbox, or --mailbox EMAIL)
 harvey outbox                # Review queued emails; --approve <id> / --approve-all / --reject <id>
 harvey signals               # The signal vocabulary; --confirm / --reject CODES (or 'free' / 'all')
 harvey discover              # Find businesses; --providers / --estimate / --provider <key>
-harvey sending pause|resume  # Kill switch for all outbound
+harvey sending pause|resume  # Kill switch for all outbound (--mailbox EMAIL: just that mailbox)
 harvey warmup [domain]       # Sending-domain readiness: SPF/DKIM/DMARC, age, blocklists, ramp, TrulyInbox warmup
 harvey trulyinbox [connect|other]  # Warmup service: connect TrulyInbox, or record another service
 ```
