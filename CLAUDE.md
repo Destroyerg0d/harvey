@@ -92,7 +92,7 @@ HUNTER_API_KEY=             # 50 free/mo + pattern lookup
 BOUNCELESS_API_KEY=         # 1,000 free/mo (sign-up needs a work email); tried after the above
 EMAILVERIFY_API_KEY=        # 100 free/mo (EmailVerify.io)
 GETPROSPECT_API_KEY=        # 100 free/mo
-ABSTRACT_API_KEY=           # 100 free/mo (Abstract Email Validation)
+ABSTRACT_API_KEY=           # 100 free/mo (Abstract Email Reputation, or an older Email Validation key)
 # Harvey counts these four per month and stops at *_MONTHLY_CHECKS (defaults = the free tiers)
 
 # --- Discovery (optional — the free OpenStreetMap source needs no key) ---

@@ -792,19 +792,51 @@ async def _abstract_pace() -> None:
 
 
 async def verify_abstract(email: str, api_key: str) -> Optional[dict]:
-    """Abstract Email Validation: 100 free checks a month, about one a second.
+    """Abstract: 100 free checks a month, about one a second.
 
-    ``deliverability`` is DELIVERABLE, UNDELIVERABLE or UNKNOWN, with
-    ``is_catchall_email`` and ``is_disposable_email`` as {"value": bool}.
-    UNKNOWN on a domain that isn't a catch-all is inconclusive: None.
+    Abstract's keys belong to one API each. New sign-ups get its Email
+    Reputation API, older keys its Email Validation API, and the other one
+    answers 401. So Reputation is asked first and Validation only when
+    Reputation gives no answer at all (a rejected key costs no check).
     """
+    params = {"api_key": api_key, "email": email}
     await _abstract_pace()
     data = await _verifier_json(
-        "Abstract", "GET", "https://emailvalidation.abstractapi.com/v1/",
-        params={"api_key": api_key, "email": email},
-    )
-    if data is None:
-        return None
+        "Abstract", "GET", "https://emailreputation.abstractapi.com/v1/", params=params)
+    if data is not None:
+        return _abstract_reputation_verdict(data)
+    await _abstract_pace()
+    data = await _verifier_json(
+        "Abstract", "GET", "https://emailvalidation.abstractapi.com/v1/", params=params)
+    return None if data is None else _abstract_validation_verdict(data)
+
+
+def _abstract_reputation_verdict(data: dict) -> Optional[dict]:
+    """Email Reputation: ``email_deliverability.status`` is deliverable,
+    undeliverable or unknown; ``email_quality`` carries ``is_catchall`` and
+    ``is_disposable`` as plain booleans. Unknown on a domain that isn't a
+    catch-all is inconclusive: None."""
+    deliverability = data.get("email_deliverability")
+    quality = data.get("email_quality")
+    deliverability = deliverability if isinstance(deliverability, dict) else {}
+    quality = quality if isinstance(quality, dict) else {}
+    if _flag(quality.get("is_disposable")):
+        return {"status": "disposable", "catch_all": False}
+    status = _word(deliverability.get("status"))
+    if status == "undeliverable":
+        return {"status": "invalid", "catch_all": False}
+    if _flag(quality.get("is_catchall")):
+        return {"status": "catch_all", "catch_all": True}
+    if status == "deliverable":
+        return {"status": "valid", "catch_all": False}
+    return None
+
+
+def _abstract_validation_verdict(data: dict) -> Optional[dict]:
+    """Email Validation (older keys): ``deliverability`` is DELIVERABLE,
+    UNDELIVERABLE or UNKNOWN, with ``is_catchall_email`` and
+    ``is_disposable_email`` as {"value": bool}. UNKNOWN on a domain that
+    isn't a catch-all is inconclusive: None."""
     if _flag(data.get("is_disposable_email")):
         return {"status": "disposable", "catch_all": False}
     deliverability = _word(data.get("deliverability"))

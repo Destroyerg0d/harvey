@@ -203,17 +203,62 @@ def abstract_body(deliverability, catch_all=False, disposable=False):
     ({"error": {"message": "Invalid API key"}}, None),
 ])
 @pytest.mark.asyncio
-async def test_abstract_verdicts(monkeypatch, body, expected):
-    assert await graded(monkeypatch, ef.verify_abstract, answer(body)) == expected
+async def test_abstract_verdicts_from_an_older_validation_key(monkeypatch, body, expected):
+    # An older key: Reputation rejects it, Validation answers.
+    assert await graded(monkeypatch, ef.verify_abstract, abstract_by_host(validation=body)) == expected
+
+
+def reputation_body(status, catch_all=False, disposable=False):
+    return {
+        "email_address": ADDRESS,
+        "email_deliverability": {"status": status, "status_detail": "x", "is_smtp_valid": status == "deliverable"},
+        "email_quality": {"score": 0.5, "is_catchall": catch_all, "is_disposable": disposable},
+    }
+
+
+def abstract_by_host(reputation=None, validation=None):
+    """Abstract's two APIs: each answers its body, or 401 when given None."""
+    def handler(request):
+        body = reputation if request.url.host.startswith("emailreputation") else validation
+        if body is None:
+            return httpx.Response(401, json={"error": {"code": "unauthorized"}})
+        return httpx.Response(200, json=body)
+    return handler
+
+
+@pytest.mark.parametrize("body, expected", [
+    (reputation_body("deliverable"), "verified"),
+    (reputation_body("undeliverable"), "invalid"),
+    (reputation_body("deliverable", catch_all=True), "risky"),
+    (reputation_body("unknown", catch_all=True), "risky"),
+    (reputation_body("deliverable", disposable=True), "invalid"),
+    (reputation_body("unknown"), None),
+    ({"email_deliverability": "deliverable"}, None),
+    ({"email_deliverability": {"status": "deliverable"}, "email_quality": {"is_catchall": "true"}}, "verified"),
+])
+@pytest.mark.asyncio
+async def test_abstract_verdicts_from_a_reputation_key(monkeypatch, body, expected):
+    assert await graded(monkeypatch, ef.verify_abstract, abstract_by_host(reputation=body)) == expected
 
 
 @pytest.mark.asyncio
-async def test_abstract_request_shape(monkeypatch):
-    seen = mock_http(monkeypatch, answer(abstract_body("DELIVERABLE")))
-    await ef.verify_abstract(ADDRESS, "ab-test-key")
+async def test_abstract_asks_reputation_first_and_stops_when_it_answers(monkeypatch):
+    seen = mock_http(monkeypatch, abstract_by_host(reputation=reputation_body("unknown"),
+                                                  validation=abstract_body("DELIVERABLE")))
+    assert await ef.verify_abstract(ADDRESS, "ab-test-key") is None   # inconclusive, not retried
+    assert [r.url.host for r in seen] == ["emailreputation.abstractapi.com"]
     url = seen[0].url
-    assert (url.host, url.path) == ("emailvalidation.abstractapi.com", "/v1/")
+    assert url.path == "/v1/"
     assert url.params["api_key"] == "ab-test-key" and url.params["email"] == ADDRESS
+
+
+@pytest.mark.asyncio
+async def test_abstract_falls_back_to_validation_for_an_older_key(monkeypatch):
+    seen = mock_http(monkeypatch, abstract_by_host(validation=abstract_body("DELIVERABLE")))
+    assert await ef.verify_abstract(ADDRESS, "ab-test-key") == {"status": "valid", "catch_all": False}
+    assert [r.url.host for r in seen] == ["emailreputation.abstractapi.com",
+                                         "emailvalidation.abstractapi.com"]
+    assert seen[1].url.params["api_key"] == "ab-test-key"
 
 
 @pytest.mark.asyncio
