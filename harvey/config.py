@@ -204,6 +204,59 @@ def operator_timezone(config) -> str:
     return getattr(quiet, "timezone", "") or "UTC"
 
 
+# A sending address: plain enough to be a file name too (the mailbox's Gmail
+# token is stored as data/gmail_tokens/<address>.json).
+_MAILBOX_ADDRESS_RE = re.compile(r"^[a-z0-9._%+-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+$")
+
+
+class MailboxConfig(BaseModel):
+    """One Gmail mailbox Harvey sends from (channels.email.mailboxes).
+
+    ``name`` is the From name and the sign-off; ``daily_limit`` caps this
+    mailbox's sends a day (0: max_daily_sends). See harvey/mailboxes.py.
+    """
+
+    email: str
+    name: str
+    daily_limit: int = 0
+
+    @field_validator("email", "name", mode="before")
+    @classmethod
+    def _strip(cls, v, info):
+        if v is None:
+            return ""
+        if not isinstance(v, str):
+            raise ValueError(f"mailbox {info.field_name} must be text")
+        v = v.strip()
+        return v.lower() if info.field_name == "email" else v
+
+    @field_validator("email")
+    @classmethod
+    def _looks_like_address(cls, v: str) -> str:
+        if not _MAILBOX_ADDRESS_RE.match(v):
+            raise ValueError(f"'{v}' is not an email address, e.g. name@yourdomain.com")
+        return v
+
+    @field_validator("name")
+    @classmethod
+    def _has_name(cls, v: str) -> str:
+        if not v:
+            raise ValueError("every mailbox needs a name (the From name it signs with)")
+        return v
+
+    @field_validator("daily_limit", mode="before")
+    @classmethod
+    def _blank_limit(cls, v):
+        return 0 if v is None else v
+
+    @field_validator("daily_limit")
+    @classmethod
+    def _limit_non_negative(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("daily_limit must be >= 0 (0 means max_daily_sends)")
+        return v
+
+
 class EmailChannelConfig(BaseModel):
     enabled: bool = True
     # "instantly" (legacy), "gmail" (Gmail/Workspace via API — recommended),
@@ -233,11 +286,20 @@ class EmailChannelConfig(BaseModel):
     # zone (see SendWindowConfig). None: no window, as before. Native
     # providers only; Instantly schedules its own sends.
     send_window: SendWindowConfig | None = None
+    # More than one sending mailbox (Gmail only). Empty: Harvey sends from
+    # persona.email alone, as before. When set, persona.email must be one of
+    # them: it is the primary, which keeps data/gmail_token.json.
+    mailboxes: list[MailboxConfig] = []
 
     @field_validator("warmup", mode="before")
     @classmethod
     def _blank_warmup(cls, v):
         return WarmupConfig() if v is None else v
+
+    @field_validator("mailboxes", mode="before")
+    @classmethod
+    def _blank_mailboxes(cls, v):
+        return [] if v is None else v
 
     @field_validator("max_daily_sends")
     @classmethod
@@ -245,6 +307,25 @@ class EmailChannelConfig(BaseModel):
         if v < 0:
             raise ValueError("max_daily_sends must be >= 0")
         return v
+
+    @model_validator(mode="after")
+    def _mailboxes_fit(self):
+        if not self.mailboxes:
+            return self
+        seen: set[str] = set()
+        for mailbox in self.mailboxes:
+            if mailbox.email in seen:
+                raise ValueError(
+                    f"channels.email.mailboxes lists {mailbox.email} twice; "
+                    "each mailbox goes in once."
+                )
+            seen.add(mailbox.email)
+        if (self.provider or "").strip().lower() != "gmail":
+            raise ValueError(
+                "channels.email.mailboxes works with provider: gmail only "
+                f"(this config has provider: {self.provider or 'none'})."
+            )
+        return self
 
     def cold_daily_cap(self, today: _date | None = None) -> int:
         """Today's cap on cold (sequence) email: max_daily_sends, throttled
@@ -674,6 +755,20 @@ class HarveyConfig(BaseModel):
     # The file it was loaded from, so a running Harvey can re-read the
     # sending mode from that same file (refresh_sending_mode).
     _source_path: str | None = PrivateAttr(default=None)
+
+    @model_validator(mode="after")
+    def _primary_is_a_mailbox(self):
+        mailboxes = self.channels.email.mailboxes
+        if not mailboxes:
+            return self
+        primary = (self.persona.email or "").strip().lower()
+        if primary not in {m.email for m in mailboxes}:
+            raise ValueError(
+                f"persona.email ({self.persona.email or 'empty'}) must be one of "
+                "channels.email.mailboxes: it is the primary mailbox. Configured: "
+                + ", ".join(m.email for m in mailboxes) + "."
+            )
+        return self
 
 
 class EnvConfig(BaseModel):

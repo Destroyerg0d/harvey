@@ -8,6 +8,13 @@ Setup (one-time):
 3. Run ``harvey gmail auth`` — opens a browser, stores the refresh token
    in data/gmail_token.json. Done: Harvey can send and read.
 
+More than one mailbox (channels.email.mailboxes, see harvey/mailboxes.py):
+each one signs in with ``harvey gmail auth --mailbox <address>``. The
+primary (persona.email) keeps data/gmail_token.json; the others are stored
+in data/gmail_tokens/<address>.json. A sign-in for any other account is
+refused, and a provider built for a mailbox checks once which account its
+token belongs to before it sends or reads anything.
+
 Deliverability notes: use a mailbox on a dedicated SECONDARY domain (never
 your main one), configure SPF/DKIM/DMARC, ramp volume slowly, and watch
 Google Postmaster Tools. Harvey's outbox pacing + kill switches handle the
@@ -18,10 +25,14 @@ import base64
 import codecs
 import json
 import logging
+import os
+import subprocess
+import tempfile
 import time
 import webbrowser
 from email.message import EmailMessage, Message
 from email.utils import parseaddr
+from pathlib import Path
 
 import httpx
 
@@ -36,9 +47,14 @@ from harvey.integrations.mail_provider import (
 logger = logging.getLogger("harvey.gmail")
 
 TOKEN_FILE = PROJECT_ROOT / "data" / "gmail_token.json"
+# Tokens of the mailboxes besides the primary, one file per address.
+TOKENS_DIR = PROJECT_ROOT / "data" / "gmail_tokens"
 API_BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
+REVOKE_URL = "https://oauth2.googleapis.com/revoke"
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+# Consumer Gmail: no Workspace domain to pass Google as ``hd``.
+_CONSUMER_DOMAINS = frozenset({"gmail.com", "googlemail.com"})
 SCOPE = "https://www.googleapis.com/auth/gmail.modify"
 LOOPBACK_PORT = 8765
 MAX_INBOX_PAGES = 40
@@ -67,10 +83,12 @@ def _entry_id(entry, page: int) -> str:
 TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=30.0, pool=10.0)
 
 
-def _load_token() -> dict | None:
+def _load_token(path=None) -> dict | None:
+    """The stored sign-in at ``path`` (None: TOKEN_FILE, the primary's)."""
+    path = Path(path) if path is not None else TOKEN_FILE
     try:
-        if TOKEN_FILE.is_file():
-            data = json.loads(TOKEN_FILE.read_text(encoding="utf-8"))
+        if path.is_file():
+            data = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(data, dict) and data.get("refresh_token"):
                 return data
     except (OSError, json.JSONDecodeError) as e:
@@ -78,24 +96,80 @@ def _load_token() -> dict | None:
     return None
 
 
-def _save_token(data: dict):
-    TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-    TOKEN_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+def _save_token(data: dict, path=None):
+    """Store a sign-in at ``path`` (None: TOKEN_FILE). Written to a temporary
+    file beside it and moved into place, so a crash mid-write never leaves
+    half a token where a good one was."""
+    path = Path(path) if path is not None else TOKEN_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if _same_path(path.parent, TOKENS_DIR):
+        _restrict_folder(path.parent)
+    fd, tmp = tempfile.mkstemp(prefix=".gmail-token-", suffix=".tmp", dir=path.parent)
     try:
-        TOKEN_FILE.chmod(0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(data, indent=2))
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _same_path(a: Path, b: Path) -> bool:
+    try:
+        return Path(a).resolve() == Path(b).resolve()
     except OSError:
-        pass
+        return False
+
+
+def _restrict_folder(folder: Path):
+    """Windows: only the signed-in user may open the token folder (chmod
+    600 means nothing there). Best effort: a failure leaves the folder as it
+    was, and is logged without anything from inside it."""
+    if os.name != "nt":
+        return
+    user = os.environ.get("USERNAME", "")
+    if not user:
+        return
+    domain = os.environ.get("USERDOMAIN", "")
+    who = f"{domain}\\{user}" if domain else user
+    try:
+        done = subprocess.run(
+            ["icacls", str(folder), "/inheritance:r", "/grant:r", f"{who}:(OI)(CI)F"],
+            capture_output=True, timeout=20, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        logger.warning(f"Couldn't restrict {folder} to {who}: {type(e).__name__}")
+        return
+    if done.returncode != 0:
+        logger.warning(f"Couldn't restrict {folder} to {who} (icacls exit {done.returncode})")
 
 
 class GmailProvider(MailProvider):
     name = "gmail"
 
-    def __init__(self, config, env):
+    def __init__(self, config, env, mailbox=None):
+        """``mailbox`` (a harvey.mailboxes.Mailbox): send and read as that
+        mailbox, with its token and From name, after checking the token is
+        its account. None: persona.email's single mailbox, as before."""
         self.config = config
+        self.mailbox = mailbox
         self.client_id = getattr(env, "gmail_client_id", "")
         self.client_secret = getattr(env, "gmail_client_secret", "")
         self._access_token = ""
         self._access_expires = 0.0
+        # HTTP status of the last Gmail API answer (0: none, or no call made).
+        self.last_status = 0
+        # Why this mailbox must not be used ("" when it's fine): its token
+        # belongs to another account. Decided once, by _check_identity.
+        self.unavailable_reason = ""
+        self._identity_checked = False
         # Messages already read, by Gmail id (None: not a reply we use).
         # A Gmail message's content never changes, so each cycle's complete
         # read only downloads what's new. Memory only.
@@ -111,15 +185,67 @@ class GmailProvider(MailProvider):
         self._pending: tuple | None = None
 
     def is_configured(self) -> bool:
-        return bool(self.client_id and self.client_secret and _load_token())
+        return bool(self.client_id and self.client_secret and self._stored_token())
+
+    def _stored_token(self) -> dict | None:
+        # Called with no argument for the single mailbox: tests replace
+        # _load_token with a stand-in that takes none.
+        if self.mailbox is None:
+            return _load_token()
+        return _load_token(self.mailbox.token_path)
+
+    def _auth_command(self) -> str:
+        if self.mailbox is None:
+            return "harvey gmail auth"
+        return f"harvey gmail auth --mailbox {self.mailbox.email}"
+
+    def _expected_address(self) -> str:
+        """The account this provider's token must belong to, or ""."""
+        if self.mailbox is not None:
+            return self.mailbox.email
+        persona = getattr(self.config, "persona", None)
+        return (getattr(persona, "email", "") or "").strip().lower()
+
+    async def _check_identity(self) -> bool:
+        """With a mailbox: is its token for that mailbox's account? Asked of
+        Gmail once (/profile) and remembered; a wrong account is never used
+        (unavailable_reason says why). False also while it can't be asked
+        (no token, Gmail unreachable), which is tried again next time.
+        Without a mailbox there's nothing to check, as before."""
+        if self.mailbox is None:
+            return True
+        if self._identity_checked:
+            return not self.unavailable_reason
+        profile = await self._request("GET", "/profile")
+        address = profile.get("emailAddress") if isinstance(profile, dict) else None
+        if not isinstance(address, str) or not address.strip():
+            return False
+        self._identity_checked = True
+        if address.strip().lower() != self.mailbox.email:
+            self.unavailable_reason = (
+                f"the Gmail sign-in for {self.mailbox.email} is for {address.strip()}. "
+                f"Run '{self._auth_command()}' and sign in as {self.mailbox.email}."
+            )
+            logger.error("Gmail: " + self.unavailable_reason)
+            return False
+        return True
+
+    def _identity_problem(self) -> str:
+        return (self.unavailable_reason or self._token_problem
+                or f"couldn't confirm which account the Gmail sign-in for "
+                   f"{self.mailbox.email} belongs to; Harvey tries again next cycle.")
 
     async def _token(self) -> str | None:
         """Valid access token, refreshing via the stored refresh token."""
         if self._access_token and time.time() < self._access_expires - 60:
             return self._access_token
-        stored = _load_token()
+        stored = self._stored_token()
         if not stored:
-            self._token_problem = "not signed in to Gmail. Run 'harvey gmail auth'."
+            if self.mailbox is None:
+                self._token_problem = "not signed in to Gmail. Run 'harvey gmail auth'."
+            else:
+                self._token_problem = (f"{self.mailbox.email} is not signed in to Gmail. "
+                                       f"Run '{self._auth_command()}'.")
             logger.error("Gmail: " + self._token_problem)
             return None
         # Why there's no token, for whoever asked (get_replies says it).
@@ -138,10 +264,11 @@ class GmailProvider(MailProvider):
             self._token_problem = unreachable.format(f" ({type(e).__name__})")
             return None
         if resp.status_code in (400, 401, 403):
-            self._token_problem = (f"Google rejected the saved Gmail sign-in ({resp.status_code}). "
-                                   "Run 'harvey gmail auth'.")
-            logger.error(f"Gmail token refresh rejected ({resp.status_code}). "
-                         "Re-run 'harvey gmail auth'.")
+            whose = f" for {self.mailbox.email}" if self.mailbox is not None else ""
+            self._token_problem = (f"Google rejected the saved Gmail sign-in{whose} "
+                                   f"({resp.status_code}). Run '{self._auth_command()}'.")
+            logger.error(f"Gmail token refresh rejected{whose} ({resp.status_code}). "
+                         f"Re-run '{self._auth_command()}'.")
             return None
         if resp.status_code != 200:
             self._token_problem = unreachable.format(f" (HTTP {resp.status_code})")
@@ -170,6 +297,8 @@ class GmailProvider(MailProvider):
     async def _request(
         self, method: str, path: str, *, sending: bool = False, not_found=None, **kwargs
     ):
+        # last_status stays 0 unless Gmail answers: no token means no call.
+        self.last_status = 0
         token = await self._token()
         if not token:
             return None
@@ -185,6 +314,7 @@ class GmailProvider(MailProvider):
                 # The request may have reached Gmail before the connection failed.
                 raise RuntimeError("Gmail send outcome is unknown") from e
             return None
+        self.last_status = resp.status_code
         if sending and not (200 <= resp.status_code < 300
                             or 400 <= resp.status_code < 500):
             raise RuntimeError("Gmail send outcome is unknown")
@@ -214,10 +344,21 @@ class GmailProvider(MailProvider):
         thread_ref: str = "",
         in_reply_to: str = "",
     ) -> SendResult:
+        if not await self._check_identity():
+            # Nothing was sent: no send call is made for a mailbox whose
+            # account isn't confirmed (attempted=False, so it may retry).
+            reason = self._identity_problem()
+            logger.error(f"Gmail: not sending from {self.mailbox.email}: {reason}")
+            return SendResult(ok=False, error=reason[:300], status=self.last_status,
+                              attempted=False)
         msg = EmailMessage()
-        persona = self.config.persona
+        if self.mailbox is not None:
+            from_name, from_address = self.mailbox.name, self.mailbox.email
+        else:
+            persona = self.config.persona
+            from_name, from_address = persona.name, persona.email
         msg["To"] = to_email
-        msg["From"] = f"{persona.name} <{persona.email}>" if persona.email else persona.name
+        msg["From"] = f"{from_name} <{from_address}>" if from_address else from_name
         msg["Subject"] = subject
         if in_reply_to:
             msg["In-Reply-To"] = in_reply_to
@@ -231,7 +372,11 @@ class GmailProvider(MailProvider):
 
         data = await self._request("POST", "/messages/send", sending=True, json=payload)
         if data is None:
-            return SendResult(ok=False, error="gmail send failed")
+            # Gmail answered 4xx (status says which), or there was no token
+            # to call it with (status 0: never attempted).
+            return SendResult(ok=False, error="gmail send failed", status=self.last_status,
+                              attempted=self.last_status != 0)
+        sent_status = self.last_status
 
         # Fetch the assigned RFC Message-ID for bounce/thread matching later.
         message_id = ""
@@ -258,6 +403,7 @@ class GmailProvider(MailProvider):
             message_id=message_id or gmail_id,
             thread_ref=(data.get("threadId", "")
                         if isinstance(data.get("threadId", ""), str) else ""),
+            status=sent_status,
         )
 
     async def get_replies(self, limit: int = 500) -> list[InboundMessage]:
@@ -273,7 +419,16 @@ class GmailProvider(MailProvider):
         """
         if not await self._token():
             raise GmailError(self._token_problem
-                             or "not signed in to Gmail. Run 'harvey gmail auth'.")
+                             or f"not signed in to Gmail. Run '{self._auth_command()}'.")
+        if not await self._check_identity():
+            raise GmailError(self._identity_problem())
+        messages = await self._read_replies(limit)
+        if self.mailbox is not None:
+            for m in messages:
+                m.mailbox = self.mailbox.email
+        return messages
+
+    async def _read_replies(self, limit: int) -> list[InboundMessage]:
         self._pending = None
         recent_full = (self._last_full_read
                        and time.time() - self._last_full_read < FULL_READ_EVERY_SECONDS)
@@ -535,17 +690,116 @@ class GmailProvider(MailProvider):
     async def test_connection(self) -> tuple[bool, str]:
         if not self.client_id or not self.client_secret:
             return False, "GMAIL_CLIENT_ID / GMAIL_CLIENT_SECRET missing from .env"
-        if not _load_token():
-            return False, "Not authorized yet — run 'harvey gmail auth'"
+        if not self._stored_token():
+            return False, f"Not authorized yet — run '{self._auth_command()}'"
         data = await self._request("GET", "/profile")
         if data and data.get("emailAddress"):
+            actual = str(data["emailAddress"]).strip()
+            expected = self._expected_address()
+            if expected and actual.lower() != expected:
+                return False, (f"Signed in as {actual}, but this mailbox is {expected}. "
+                               f"Run harvey gmail auth --mailbox {expected} again.")
             return True, f"Connected as {data['emailAddress']}"
         return False, "Token refresh or profile fetch failed"
 
 
-def run_auth_flow(client_id: str, client_secret: str) -> bool:
+def _auth_url(client_id: str, redirect_uri: str, state: str, expected_email: str = "") -> str:
+    """Google's consent page. With an expected address Google is told who
+    should sign in (login_hint, and hd for a Workspace domain), and the
+    account chooser always shows, so a browser signed in elsewhere doesn't
+    pick the wrong account silently."""
+    import urllib.parse
+    params = {
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": SCOPE,
+        "access_type": "offline",
+        "prompt": "consent select_account",
+        "state": state,
+    }
+    expected = (expected_email or "").strip().lower()
+    if expected:
+        params["login_hint"] = expected
+        domain = expected.rpartition("@")[2]
+        if domain and domain not in _CONSUMER_DOMAINS:
+            params["hd"] = domain
+    return AUTH_URL + "?" + urllib.parse.urlencode(params)
+
+
+def _finish_auth(client_id: str, client_secret: str, code: str, redirect_uri: str,
+                 token_path=None, expected_email: str = "") -> bool:
+    """Exchange the browser's code for tokens, check whose they are, and
+    store them at ``token_path`` (None: TOKEN_FILE). With an expected
+    address, a sign-in for any other account, or one whose account Gmail
+    won't say, is revoked and nothing is saved."""
+    path = Path(token_path) if token_path is not None else TOKEN_FILE
+    expected = (expected_email or "").strip().lower()
+    with httpx.Client(timeout=30) as client:
+        resp = client.post(TOKEN_URL, data={
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "code": code,
+            "grant_type": "authorization_code",
+            "redirect_uri": redirect_uri,
+        })
+        if resp.status_code != 200:
+            print(f"  Token exchange failed ({resp.status_code}): {resp.text[:200]}")
+            return False
+        try:
+            data = resp.json()
+        except ValueError:
+            data = None
+        if not isinstance(data, dict):
+            print("  Google's answer to the token exchange couldn't be read. Try again.")
+            return False
+        if not data.get("refresh_token"):
+            print("  Google returned no refresh token. Remove Harvey from your"
+                  " account's third-party access list and retry.")
+            return False
+
+        signed_in = ""
+        access = data.get("access_token")
+        if isinstance(access, str) and access:
+            try:
+                profile = client.get(f"{API_BASE}/profile",
+                                     headers={"Authorization": f"Bearer {access}"})
+                answer = profile.json() if profile.status_code == 200 else None
+            except (httpx.HTTPError, ValueError):
+                answer = None
+            address = answer.get("emailAddress") if isinstance(answer, dict) else None
+            signed_in = address.strip() if isinstance(address, str) else ""
+
+        if expected and signed_in.lower() != expected:
+            # Not kept, so not left valid either.
+            try:
+                client.post(REVOKE_URL, data={"token": data["refresh_token"]})
+            except httpx.HTTPError:
+                logger.warning("Gmail: couldn't revoke a refused sign-in")
+            if signed_in:
+                print(f"  ✗ Signed in as {signed_in}, but this mailbox is {expected}.")
+            else:
+                print(f"  ✗ Couldn't confirm that this sign-in is {expected}.")
+            print(f"  Nothing was saved and the sign-in was withdrawn. Run 'harvey gmail auth"
+                  f" --mailbox {expected}' again and choose {expected}.")
+            return False
+
+    _save_token({
+        "refresh_token": data["refresh_token"],
+        "scope": data.get("scope", SCOPE),
+        "obtained_at": int(time.time()),
+    }, path)
+    who = f" as {signed_in}" if signed_in else ""
+    print(f"  ✓ Gmail authorized{who}. Token stored at {path}")
+    return True
+
+
+def run_auth_flow(client_id: str, client_secret: str, token_path=None,
+                  expected_email: str = "") -> bool:
     """One-time OAuth (installed-app loopback). Blocks until the browser
-    round-trip completes; stores the refresh token for GmailProvider."""
+    round-trip completes; stores the refresh token for GmailProvider at
+    ``token_path`` (None: TOKEN_FILE). With ``expected_email``, only a
+    sign-in as that account is kept (_finish_auth)."""
     import http.server
     import secrets
     import threading
@@ -558,15 +812,7 @@ def run_auth_flow(client_id: str, client_secret: str) -> bool:
 
     state = secrets.token_urlsafe(16)
     redirect_uri = f"http://localhost:{LOOPBACK_PORT}"
-    auth_url = AUTH_URL + "?" + urllib.parse.urlencode({
-        "client_id": client_id,
-        "redirect_uri": redirect_uri,
-        "response_type": "code",
-        "scope": SCOPE,
-        "access_type": "offline",
-        "prompt": "consent",
-        "state": state,
-    })
+    auth_url = _auth_url(client_id, redirect_uri, state, expected_email)
 
     result: dict = {}
     done = threading.Event()
@@ -582,8 +828,11 @@ def run_auth_flow(client_id: str, client_secret: str) -> bool:
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
             self.end_headers()
+            # Whether the sign-in is kept is decided after this (the account
+            # check), so the page doesn't claim it worked.
             self.wfile.write(
-                b"<h2>Harvey is connected to Gmail.</h2>You can close this tab.")
+                b"<h2>Harvey got the Google sign-in.</h2>"
+                b"You can close this tab. The terminal says whether it was accepted.")
             done.set()
 
         def log_message(self, *args):
@@ -593,37 +842,21 @@ def run_auth_flow(client_id: str, client_secret: str) -> bool:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
 
+    if expected_email:
+        print(f"\n  Sign in as {expected_email.strip().lower()}.")
     print(f"\n  Opening browser for Google sign-in...\n  {auth_url}\n")
     webbrowser.open(auth_url)
     if not done.wait(timeout=300):
         server.shutdown()
+        server.server_close()
         print("  Timed out waiting for the browser round-trip.")
         return False
     server.shutdown()
+    server.server_close()
 
     if result.get("error") or not result.get("code"):
         print(f"  Authorization failed: {result.get('error') or 'no code returned'}")
         return False
 
-    resp = httpx.post(TOKEN_URL, data={
-        "client_id": client_id,
-        "client_secret": client_secret,
-        "code": result["code"],
-        "grant_type": "authorization_code",
-        "redirect_uri": redirect_uri,
-    }, timeout=30)
-    if resp.status_code != 200:
-        print(f"  Token exchange failed ({resp.status_code}): {resp.text[:200]}")
-        return False
-    data = resp.json()
-    if not data.get("refresh_token"):
-        print("  Google returned no refresh token. Remove Harvey from your"
-              " account's third-party access list and retry.")
-        return False
-    _save_token({
-        "refresh_token": data["refresh_token"],
-        "scope": data.get("scope", SCOPE),
-        "obtained_at": int(time.time()),
-    })
-    print(f"  ✓ Gmail authorized. Token stored at {TOKEN_FILE}")
-    return True
+    return _finish_auth(client_id, client_secret, result["code"], redirect_uri,
+                        token_path=token_path, expected_email=expected_email)

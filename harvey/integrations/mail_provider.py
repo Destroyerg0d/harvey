@@ -31,6 +31,11 @@ class SendResult:
     message_id: str = ""     # RFC Message-ID (or provider id) of the sent mail
     thread_ref: str = ""     # provider thread handle (Gmail threadId, etc.)
     error: str = ""
+    # HTTP status of the send call (0: no answer, or none was made), and
+    # whether the send was tried at all. attempted=False means nothing can
+    # have gone out (no token, wrong account), so the email may wait and retry.
+    status: int = 0
+    attempted: bool = True
 
 
 @dataclass
@@ -45,6 +50,9 @@ class InboundMessage:
     date: str = ""
     is_bounce: bool = False
     headers: dict = field(default_factory=dict)
+    # The mailbox it arrived in when more than one is configured; "" means
+    # the primary (persona.email).
+    mailbox: str = ""
 
 
 BOUNCE_SENDERS = ("mailer-daemon", "postmaster", "mail delivery subsystem")
@@ -147,11 +155,18 @@ class MailProvider(ABC):
         """Cheap end-to-end credential check. Returns (ok, detail)."""
 
 
-def get_mail_provider(config, env) -> MailProvider | None:
-    """Build the configured native provider, or None for instantly/unknown."""
+def get_mail_provider(config, env, mailbox=None) -> MailProvider | None:
+    """Build the configured native provider, or None for instantly/unknown.
+
+    ``mailbox`` (a harvey.mailboxes.Mailbox) is one of several Gmail
+    mailboxes; None is the single mailbox of persona.email, as before."""
     provider = (config.channels.email.provider or "").strip().lower()
+    if mailbox is not None and provider != "gmail":
+        raise ValueError(f"multiple mailboxes are Gmail only, not '{provider}'")
     if provider == "gmail":
         from harvey.integrations.gmail import GmailProvider
+        if mailbox is not None:
+            return GmailProvider(config, env, mailbox=mailbox)
         return GmailProvider(config, env)
     if provider == "smtp":
         from harvey.integrations.smtp_mail import SmtpImapProvider
