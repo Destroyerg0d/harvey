@@ -41,6 +41,11 @@ read, that email is moved back as well, in case the address is the cause (a
 slow lookup, an odd answer), so one address can't keep every other one
 waiting.
 
+A recipient Harvey is sure is in one of ``skip_countries`` (the same sure
+country as above, never the prospects' country) isn't checked at all: no
+call, no check spent, and the email is clear to send. A verdict already
+stored for the address still applies.
+
 Without an API key Precleared allows 10 checks a day; a free key
 (https://precleared.dev/get-key, PRECLEARED_API_KEY) allows 25 a day.
 Beyond that, a key draws on a prepaid pack. When a key runs out, the held
@@ -139,6 +144,9 @@ class Clearance:
     fix_url: str = ""
     # True when the verdict came from the 30-day cache rather than a call.
     cached: bool = False
+    # True when no check was made because the recipient is in one of
+    # skip_countries: clear to send, with no verdict and no receipt.
+    skipped: bool = False
 
 
 class PreclearedClient:
@@ -150,6 +158,7 @@ class PreclearedClient:
         pitch: str = "",
         prospect_country: str = "",
         default_country: str = "",
+        skip_countries: list[str] | tuple[str, ...] | str = (),
         transport: httpx.AsyncBaseTransport | None = None,
     ):
         self.sender_country = sender_country
@@ -161,6 +170,11 @@ class PreclearedClient:
         # prospect_country, else default_country (from_config passes the one
         # country the ICP geography is in).
         self.default_country = self.prospect_country or normalize_prospect_country(default_country)
+        # Recipients Harvey is sure are in one of these aren't checked.
+        if isinstance(skip_countries, str):
+            skip_countries = skip_countries.split(",")
+        codes = (_country(c) for c in skip_countries or ())
+        self.skip_countries = frozenset("GB" if code == "UK" else code for code in codes if code)
         self._transport = transport  # tests inject httpx.MockTransport
 
     @classmethod
@@ -178,6 +192,7 @@ class PreclearedClient:
             pitch=getattr(product, "description", ""),
             prospect_country=getattr(settings, "prospect_country", ""),
             default_country=icp_country(config),
+            skip_countries=getattr(settings, "skip_countries", None) or (),
         )
 
     def _redact(self, text: str) -> str:
@@ -232,10 +247,25 @@ class PreclearedClient:
 
     async def cached(self, to_email: str, state, country: str = "",
                     company: str = "", name: str = "") -> Clearance | None:
-        """The stored verdict for this address and these facts, or None."""
+        """The stored verdict for this address and these facts; else, for a
+        recipient in one of skip_countries, a clearance with no check
+        (``skipped``); else None. ``country`` is the one Harvey is sure of,
+        as for check(), so the prospects' country never skips a check."""
         email = (to_email or "").strip().lower()
-        return self._cached(await state.get_setting(SETTINGS_PREFIX + email), _country(country),
-                            _name(company, MAX_COMPANY_NAME), _name(name, MAX_RECIPIENT_NAME))
+        country = _country(country)
+        stored = self._cached(await state.get_setting(SETTINGS_PREFIX + email), country,
+                              _name(company, MAX_COMPANY_NAME), _name(name, MAX_RECIPIENT_NAME))
+        return stored if stored is not None else self._skipped(email, country)
+
+    def _skipped(self, email: str, country: str) -> Clearance | None:
+        """Clear to send without a check when the recipient is in a skipped
+        country, else None."""
+        if not country or country not in self.skip_countries:
+            return None
+        logger.debug(f"Precleared: not checking {email}: the recipient is in {country}, "
+                     "which compliance.precleared.skip_countries skips")
+        return Clearance(allowed=True, skipped=True,
+                         reason=f"not checked: the recipient is in {country} (skip_countries)")
 
     def stored_verdicts(self) -> tuple[str, str, str]:
         """What a stored verdict needs to still be used, for counting in SQL:

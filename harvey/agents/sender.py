@@ -1238,7 +1238,8 @@ class Sender:
                 company, name = names
                 # A stored verdict still counts once checks are paused, so
                 # people already cleared keep getting their follow-ups; only
-                # new addresses wait for the next cycle.
+                # new addresses wait for the next cycle. A recipient Harvey
+                # is sure is in a skip_countries country needs no check.
                 clearance = await self.precleared.cached(
                     item["to_email"], self.state, country, company=company, name=name)
                 if clearance is None and (compliance_paused
@@ -1287,7 +1288,7 @@ class Sender:
                         f"email until a later cycle: {clearance.reason}"
                     )
                     continue
-                if not clearance.cached:
+                if not clearance.cached and not clearance.skipped:
                     answered = True
                     self._failing_domains.clear()
                 if not clearance.allowed:

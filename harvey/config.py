@@ -421,6 +421,11 @@ class PreclearedConfig(BaseModel):
     # the recipient's country from the address, company records or the
     # company's website. Leave empty if your prospects are spread out.
     prospect_country: str = ""
+    # Optional: countries (two letters, e.g. ["US"]) whose recipients aren't
+    # checked, to save checks where you already know the answer. Only when
+    # Harvey is sure of the recipient's country from the company's location;
+    # prospect_country never counts. A verdict already stored still applies.
+    skip_countries: list[str] = []
 
     @field_validator("sender_country", mode="before")
     @classmethod
@@ -442,6 +447,38 @@ class PreclearedConfig(BaseModel):
     @classmethod
     def _valid_prospect_country(cls, v) -> str:
         return normalize_prospect_country(v)
+
+    @field_validator("skip_countries", mode="before")
+    @classmethod
+    def _valid_skip_countries(cls, v) -> list[str]:
+        """Two-letter codes, upper-cased ("uk" -> "GB"), each once. A typo
+        or an unquoted NO (YAML's false) is an error, never ignored."""
+        if v is None or v == "":
+            return []
+        if isinstance(v, str):
+            v = v.split(",")
+        if not isinstance(v, (list, tuple)):
+            raise ValueError(
+                'skip_countries must be a list of two-letter country codes, e.g. ["US"].')
+        codes: list[str] = []
+        for item in v:
+            if isinstance(item, bool):
+                raise ValueError(
+                    f"an entry in skip_countries was read as {item}. YAML turns an unquoted "
+                    'NO or ON into true/false, so quote the code, e.g. skip_countries: ["NO"].')
+            if not isinstance(item, str):
+                raise ValueError(
+                    f"'{item}' in skip_countries is not a two-letter country code such as US or GB.")
+            code = item.strip().upper()
+            code = {"UK": "GB", "USA": "US"}.get(code, code)
+            if not code:
+                continue
+            if not (len(code) == 2 and code.isascii() and code.isalpha()):
+                raise ValueError(
+                    f"'{code}' in skip_countries is not a two-letter country code such as US or GB.")
+            if code not in codes:
+                codes.append(code)
+        return codes
 
     @model_validator(mode="after")
     def _country_when_enabled(self):

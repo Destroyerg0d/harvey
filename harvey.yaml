@@ -127,6 +127,11 @@ compliance:
     # Harvey also tells Precleared the recipient's country when the company's
     # location makes it certain, and the company's and person's names when
     # it has them (see docs/precleared.md).
+    # Optional: recipients Harvey is sure are in one of these countries (from
+    # the company's location, never prospect_country) are not checked, so no
+    # check is spent on them, and their email is clear to send. Unset or
+    # empty, everyone is checked.
+    # skip_countries: ["US"]
 
 # Optional: your own rules for the emails Harvey drafts (length, structure,
 # what to say about the product, links, subject lines, sign-off), as a

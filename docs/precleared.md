@@ -22,14 +22,30 @@ compliance:
     sender_country: "GB"        # GB or US
     address_source: "unknown"   # unless copied from the businesses' own sites
     prospect_country: ""        # e.g. "US" if all prospects are in one country
+    skip_countries: []          # optional, e.g. ["US"]: see "Skipping countries"
 ```
 
 Quote `prospect_country` (YAML reads an unquoted `NO` as false).
-`harvey setup` asks the same questions.
+`harvey setup` asks the same questions (all but `skip_countries`).
+
+## Skipping countries
+
+If you already know the answer for a country, `skip_countries` saves the
+checks: a recipient Harvey is **sure** is in one of those countries is not
+checked at all. No request is made, no check is spent, and the email is clear
+to send, with no receipt logged.
+
+"Sure" means exactly what decides `recipient_country` below: a country, US
+state, Canadian province or Australian state named in the company's location.
+`prospect_country` and the `icp.geography` default never count, so a recipient
+whose country Harvey is not sure of is still checked, even when every
+prospect is meant to be in a skipped country. A verdict Precleared already
+gave for the address still applies. Codes are two letters (`UK` is read as
+`GB`); quote `NO`. The default, an empty list, skips nothing.
 
 ## What is sent
 
-One request per new address: the address, `sender_country`,
+One request per new address (none for a skipped country): the address, `sender_country`,
 `address_source`, `existing_customer: false`, the first 200 characters of
 `product.description`, and the recipient's country, in one of two ways:
 
