@@ -1170,7 +1170,8 @@ class Scout:
         Status is one of verified / risky / guess / invalid — the pipeline
         never reports a mere pattern guess as verified (that old bug bounced
         mail and burned domains). Passes env (verifier keys) and state (the
-        pattern cache) so the domain's pattern is learned once and reused.
+        pattern cache) so the domain's pattern is learned once and reused,
+        and the free verifiers' monthly allowances are counted.
         """
         if not (first_name and last_name and domain):
             return "", "invalid"
@@ -1723,7 +1724,8 @@ Respond ONLY with the JSON array."""
         if not email:
             return None
         try:
-            status = await verify_published_address(email, env=self.env)
+            status = await verify_published_address(
+                email, env=self.env, state=getattr(self, "state", None))
         except Exception as e:
             logger.debug(f"Inbox verification failed for {email}: {e}")
             status = "guess"

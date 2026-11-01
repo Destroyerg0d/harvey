@@ -1261,6 +1261,10 @@ async function loadSettings() {
   savedPh('reoon-key', data.reoon_api_key_set, '600 free/mo — reoon.com/email-verifier');
   savedPh('zerobounce-key', data.zerobounce_api_key_set, '100 free/mo — best for M365/Workspace catch-alls');
   savedPh('hunter-key', data.hunter_api_key_set, '50 free/mo + email-pattern lookup');
+  savedPh('bounceless-key', data.bounceless_api_key_set, '1,000 free/mo — sign up with a work email');
+  savedPh('emailverify-key', data.emailverify_api_key_set, '100 free/mo');
+  savedPh('getprospect-key', data.getprospect_api_key_set, '100 free/mo');
+  savedPh('abstract-key', data.abstract_api_key_set, '100 free/mo — Email Validation API');
   savedPh('linkedin-password', data.linkedin_password_set, 'Enter password');
   savedPh('cf-api-token', data.cloudflare_api_token_set, 'Your Cloudflare API Token');
 
@@ -1285,6 +1289,10 @@ async function loadSettings() {
   tag('reoon-status', data.reoon_api_key_set, 'set');
   tag('zerobounce-status', data.zerobounce_api_key_set, 'set');
   tag('hunter-status', data.hunter_api_key_set, 'set');
+  tag('bounceless-status', data.bounceless_api_key_set, 'set');
+  tag('emailverify-status', data.emailverify_api_key_set, 'set');
+  tag('getprospect-status', data.getprospect_api_key_set, 'set');
+  tag('abstract-status', data.abstract_api_key_set, 'set');
 }
 
 function saveGmail() {
@@ -1329,6 +1337,14 @@ function saveVerifiers() {
   if (r) payload.REOON_API_KEY = r;
   if (z) payload.ZEROBOUNCE_API_KEY = z;
   if (h) payload.HUNTER_API_KEY = h;
+  const b = document.getElementById('bounceless-key').value;
+  const ev = document.getElementById('emailverify-key').value;
+  const gp = document.getElementById('getprospect-key').value;
+  const ab = document.getElementById('abstract-key').value;
+  if (b) payload.BOUNCELESS_API_KEY = b;
+  if (ev) payload.EMAILVERIFY_API_KEY = ev;
+  if (gp) payload.GETPROSPECT_API_KEY = gp;
+  if (ab) payload.ABSTRACT_API_KEY = ab;
   if (!Object.keys(payload).length) { showToast('Enter at least one key first.', 'error'); return; }
   saveEnv(payload, 'Verification keys saved.').then(loadSettings);
 }

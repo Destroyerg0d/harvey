@@ -11,7 +11,9 @@ permutation, this pipeline:
    sensible default — collapsing N guesses to one candidate.
 3. Verifies that single candidate through the best available channel for
    the domain type: a real-verdict API (Reoon, ZeroBounce for the big
-   providers), Hunter, or SMTP for small self-hosted servers.
+   providers), Hunter, or SMTP for small self-hosted servers, then the
+   free tiers Harvey counts itself (Bounceless, EmailVerify.io,
+   GetProspect, Abstract) when those couldn't decide.
 4. Detects catch-all domains and buckets them as ``risky`` instead of
    pretending they're verified.
 
@@ -24,9 +26,11 @@ import logging
 import os
 import random
 import re
+import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 import dns.resolver
 import aiosmtplib
@@ -578,6 +582,278 @@ async def verify_hunter(email: str, api_key: str) -> Optional[dict]:
     return {"status": status, "catch_all": bool(data.get("accept_all"))}
 
 
+# ── Free tiers Harvey counts itself ──
+#
+# Four more verifiers, tried after the ones above when those couldn't
+# decide. Their free tiers are monthly, so every call to each is counted per
+# calendar month (UTC) in the settings table, like the Hunter domain-search
+# budget, and a verifier whose allowance is used is skipped until the month
+# turns: a free tier is never overrun. .env can set each allowance (a paid
+# plan, or a smaller share of the free tier).
+VERIFIER_ALLOWANCES = {
+    # service: (.env setting, free checks a month)
+    "bounceless": ("BOUNCELESS_MONTHLY_CHECKS", 1000),
+    "emailverify": ("EMAILVERIFY_MONTHLY_CHECKS", 100),
+    "getprospect": ("GETPROSPECT_MONTHLY_CHECKS", 100),
+    "abstract": ("ABSTRACT_MONTHLY_CHECKS", 100),
+}
+# Bounceless may take this long before it answers; under API_TIMEOUT's read
+# timeout, so its answer arrives before Harvey gives up on it.
+BOUNCELESS_TIMEOUT_MS = 15000
+# Abstract's free plan allows about one request a second.
+ABSTRACT_MIN_INTERVAL = 1.1
+_abstract_last_call = 0.0
+# EmailVerify.io's do_not_mail reasons that make an address unsafe to send
+# to at all. Its other reasons (a role mailbox such as info@) stay
+# inconclusive, as ZeroBounce's do_not_mail does.
+EMAILVERIFY_UNSAFE = ("possible_trap", "spamtrap", "toxic", "global_suppression")
+_CATCH_ALL_WORDS = ("catch_all", "catchall", "accept_all")
+# A verifier: (email, api key) -> verdict dict, or None when inconclusive.
+Verifier = Callable[[str, str], Awaitable[Optional[dict]]]
+
+
+def _verifier_monthly_cap(service: str) -> int:
+    setting, free = VERIFIER_ALLOWANCES[service]
+    raw = os.getenv(setting, "").strip()
+    if not raw:
+        return free
+    try:
+        return max(int(raw), 0)
+    except ValueError:
+        return free
+
+
+def _verifier_usage_key(service: str) -> str:
+    return f"{service}_check_count:{datetime.now(timezone.utc):%Y-%m}"
+
+
+async def verifier_checks_remaining(service: str, state) -> int:
+    """Checks left on this verifier this calendar month (UTC). Without a
+    state store nothing can be counted, so none are left: an uncounted call
+    could overrun the free tier."""
+    if state is None:
+        return 0
+    cap = _verifier_monthly_cap(service)
+    try:
+        used = int(await state.get_setting(_verifier_usage_key(service), "0") or "0")
+    except (ValueError, TypeError):
+        used = 0
+    except Exception as e:
+        logger.debug(f"{service} usage read failed: {e}")
+        return 0
+    return max(cap - used, 0)
+
+
+async def record_verifier_check(service: str, state) -> bool:
+    """Count one check against this month's allowance. Called just before
+    the request, so a call that fails mid-flight is still counted. False
+    when it couldn't be counted, and then the call isn't made."""
+    if state is None:
+        return False
+    try:
+        await state.increment_setting(_verifier_usage_key(service))
+        return True
+    except Exception as e:
+        logger.debug(f"{service} usage write failed: {e}")
+        return False
+
+
+async def _verifier_json(name: str, method: str, url: str, **kwargs) -> Optional[dict]:
+    """One verifier request: the JSON object a 200 answer carries, or None
+    for anything else (network trouble, out of credits, rate limited, a bad
+    key, a body that isn't a JSON object). Never raises: a verifier that
+    can't answer is only inconclusive. Errors are logged by type alone,
+    since some of these keys travel in the URL."""
+    try:
+        async with httpx.AsyncClient(timeout=API_TIMEOUT) as client:
+            resp = await client.request(method, url, **kwargs)
+    except Exception as e:
+        logger.debug(f"{name} request failed: {type(e).__name__}")
+        return None
+    if resp.status_code != 200:
+        logger.debug(f"{name} answered HTTP {resp.status_code}")
+        return None
+    try:
+        data = resp.json()
+    except (ValueError, RecursionError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _word(value) -> str:
+    """A provider's status word made comparable: "Catch-All" -> "catch_all"."""
+    if not isinstance(value, str):
+        return ""
+    return re.sub(r"[\s-]+", "_", value.strip().lower())
+
+
+def _flag(value) -> bool:
+    """A provider's yes/no field: true only for a real True, bare or as
+    Abstract's {"value": true, "text": "TRUE"}."""
+    if isinstance(value, dict):
+        value = value.get("value")
+    return value is True
+
+
+async def verify_bounceless(email: str, api_key: str) -> Optional[dict]:
+    """Bounceless: 1,000 free checks a month (signing up needs a work email).
+
+    Reads ``presend.verdict``: DELIVERABLE, UNDELIVERABLE_* (no mailbox and
+    the like), CATCH_ALL, DISPOSABLE or UNKNOWN. UNKNOWN, or a verdict that
+    isn't ready (a queued 202, ``null``), is inconclusive: None.
+    """
+    data = await _verifier_json(
+        "Bounceless", "POST", "https://api.bounceless.io/v1/verify",
+        headers={"X-Api-Key": api_key, "Idempotency-Key": str(uuid.uuid4())},
+        json={"email": email, "timeoutMs": BOUNCELESS_TIMEOUT_MS},
+    )
+    presend = data.get("presend") if data else None
+    verdict = _word(presend.get("verdict")) if isinstance(presend, dict) else ""
+    if verdict == "deliverable":
+        return {"status": "valid", "catch_all": False}
+    if verdict.startswith("undeliverable"):
+        return {"status": "invalid", "catch_all": False}
+    if verdict == "catch_all":
+        return {"status": "catch_all", "catch_all": True}
+    if verdict == "disposable":
+        return {"status": "disposable", "catch_all": False}
+    return None
+
+
+async def verify_emailverify(email: str, api_key: str) -> Optional[dict]:
+    """EmailVerify.io: 100 free checks a month.
+
+    ``status`` is valid, invalid, catch-all, disposable, do_not_mail,
+    unknown, role_based or skipped (in any case or spelling), and
+    ``sub_status`` says why. do_not_mail is invalid only for a trap or a
+    suppressed address (EMAILVERIFY_UNSAFE); anything else unclear is
+    inconclusive: None.
+    """
+    data = await _verifier_json(
+        "EmailVerify.io", "GET", "https://app.emailverify.io/api/v1/validate",
+        params={"key": api_key, "email": email},
+    )
+    if data is None:
+        return None
+    if "status" not in data and isinstance(data.get("data"), dict):
+        data = data["data"]
+    status = _word(data.get("status"))
+    sub = _word(data.get("sub_status"))
+    if status == "invalid":
+        return {"status": "invalid", "catch_all": False}
+    if status == "disposable" or sub == "disposable":
+        return {"status": "disposable", "catch_all": False}
+    if status in _CATCH_ALL_WORDS or sub in _CATCH_ALL_WORDS:
+        return {"status": "catch_all", "catch_all": True}
+    if status == "valid":
+        return {"status": "valid", "catch_all": False}
+    if status == "do_not_mail" and sub in EMAILVERIFY_UNSAFE:
+        return {"status": "invalid", "catch_all": False}
+    return None
+
+
+async def verify_getprospect(email: str, api_key: str) -> Optional[dict]:
+    """GetProspect: 100 free checks a month.
+
+    ``data.status`` is valid, invalid, accept_all (the probe couldn't tell:
+    a catch-all) or unknown, and ``data.domain_status`` flags a disposable
+    or invalid domain. GetProspect counts a valid mailbox on an accept-all
+    domain as confirmed, so it is. A failed check (``success: false``,
+    status unknown) is inconclusive: None.
+    """
+    data = await _verifier_json(
+        "GetProspect", "GET", "https://api.getprospect.com/v2/email-verifier",
+        params={"email": email}, headers={"x-api-key": api_key},
+    )
+    if data is None or data.get("success") is False:
+        return None
+    body = data.get("data") if isinstance(data.get("data"), dict) else data
+    status = _word(body.get("status"))
+    domain = _word(body.get("domain_status"))
+    if status == "invalid" or domain == "invalid":
+        return {"status": "invalid", "catch_all": False}
+    if domain == "disposable":
+        return {"status": "disposable", "catch_all": False}
+    if status == "valid":
+        return {"status": "valid", "catch_all": False}
+    if status in _CATCH_ALL_WORDS:
+        return {"status": "catch_all", "catch_all": True}
+    return None
+
+
+async def _abstract_pace() -> None:
+    """Space Abstract calls ABSTRACT_MIN_INTERVAL apart. Harvey verifies one
+    address at a time, so the time of the last call is enough."""
+    global _abstract_last_call
+    wait = _abstract_last_call + ABSTRACT_MIN_INTERVAL - time.monotonic()
+    if wait > 0:
+        await asyncio.sleep(wait)
+    _abstract_last_call = time.monotonic()
+
+
+async def verify_abstract(email: str, api_key: str) -> Optional[dict]:
+    """Abstract Email Validation: 100 free checks a month, about one a second.
+
+    ``deliverability`` is DELIVERABLE, UNDELIVERABLE or UNKNOWN, with
+    ``is_catchall_email`` and ``is_disposable_email`` as {"value": bool}.
+    UNKNOWN on a domain that isn't a catch-all is inconclusive: None.
+    """
+    await _abstract_pace()
+    data = await _verifier_json(
+        "Abstract", "GET", "https://emailvalidation.abstractapi.com/v1/",
+        params={"api_key": api_key, "email": email},
+    )
+    if data is None:
+        return None
+    if _flag(data.get("is_disposable_email")):
+        return {"status": "disposable", "catch_all": False}
+    deliverability = _word(data.get("deliverability"))
+    if deliverability == "undeliverable":
+        return {"status": "invalid", "catch_all": False}
+    if _flag(data.get("is_catchall_email")):
+        return {"status": "catch_all", "catch_all": True}
+    if deliverability == "deliverable":
+        return {"status": "valid", "catch_all": False}
+    return None
+
+
+def _counted_channels(env) -> list[tuple[str, Verifier, str]]:
+    """The counted verifiers that have a key, in the order they're tried:
+    (service, verify function, key)."""
+    channels = []
+    for service, attr, verify in (
+        ("bounceless", "bounceless_api_key", verify_bounceless),
+        ("emailverify", "emailverify_api_key", verify_emailverify),
+        ("getprospect", "getprospect_api_key", verify_getprospect),
+        ("abstract", "abstract_api_key", verify_abstract),
+    ):
+        key = getattr(env, attr, "") if env else ""
+        if isinstance(key, str) and key.strip():
+            channels.append((service, verify, key.strip()))
+    return channels
+
+
+async def _run_counted(email: str, env, state) -> tuple[Optional[str], bool]:
+    """Try the counted verifiers in turn, each only while this month's
+    allowance lasts. Returns (first conclusive status or None, catch_all_seen)."""
+    catch_all_seen = False
+    for service, verify, key in _counted_channels(env):
+        if await verifier_checks_remaining(service, state) <= 0:
+            logger.debug(f"{service}: this month's checks are used, skipped")
+            continue
+        if not await record_verifier_check(service, state):
+            continue
+        verdict = await verify(email, key)
+        if verdict is None:
+            continue
+        if verdict.get("catch_all"):
+            catch_all_seen = True
+        status = _status_from_verdict(verdict)
+        if status is not None:
+            return status, catch_all_seen
+    return None, catch_all_seen
+
+
 async def verify_email_smtp(email: str) -> Optional[bool]:
     """SMTP RCPT check — only trustworthy for small, self-hosted mail servers.
 
@@ -640,11 +916,14 @@ def _status_from_verdict(verdict: dict) -> Optional[str]:
     return None  # unknown / risky-unknown — inconclusive
 
 
-async def _verify_candidate(email: str, mx_type: str, env) -> tuple[Optional[str], bool]:
+async def _verify_candidate(email: str, mx_type: str, env, state=None) -> tuple[Optional[str], bool]:
     """Run the best available verifier for this domain type.
 
     Returns (status_or_None, catch_all_seen). Order is chosen so scarce
     paid-ish credits are spent only where they actually resolve the domain.
+    The counted free tiers (Bounceless, EmailVerify.io, GetProspect,
+    Abstract) come last in both orders, and only with ``state`` to count
+    their monthly allowances in.
     """
     reoon_key = getattr(env, "reoon_api_key", "") if env else ""
     zerobounce_key = getattr(env, "zerobounce_api_key", "") if env else ""
@@ -653,7 +932,8 @@ async def _verify_candidate(email: str, mx_type: str, env) -> tuple[Optional[str
     catch_all_seen = False
 
     # Big providers: ZeroBounce first (its engine cracks their catch-alls),
-    # then Reoon, then Hunter. SMTP is useless/misleading here.
+    # then Reoon, then Hunter, then the counted free tiers. SMTP is
+    # useless/misleading here.
     if mx_type in ("google", "microsoft", "gateway"):
         channels = []
         if zerobounce_key:
@@ -671,9 +951,11 @@ async def _verify_candidate(email: str, mx_type: str, env) -> tuple[Optional[str
             status = _status_from_verdict(verdict)
             if status is not None:
                 return status, catch_all_seen
-        return None, catch_all_seen
+        status, seen = await _run_counted(email, env, state)
+        return status, catch_all_seen or seen
 
-    # Small / self-hosted: Reoon → SMTP (still works here) → Hunter.
+    # Small / self-hosted: Reoon → SMTP (still works here) → Hunter → the
+    # counted free tiers.
     if reoon_key:
         verdict = await verify_reoon(email, reoon_key)
         if verdict:
@@ -701,16 +983,18 @@ async def _verify_candidate(email: str, mx_type: str, env) -> tuple[Optional[str
             if status is not None:
                 return status, catch_all_seen
 
-    return None, catch_all_seen
+    status, seen = await _run_counted(email, env, state)
+    return status, catch_all_seen or seen
 
 
-async def verify_published_address(email: str, env=None) -> str:
+async def verify_published_address(email: str, env=None, state=None) -> str:
     """Grade an address the company publishes on its own website.
 
     Graded like any other address: a catch-all verdict stays "risky", so
     ``send_to_risky`` still decides whether it is sent (a published address
     can be stale). A verifier's invalid verdict wins, and an inconclusive
-    check stays an honest guess that is never sent.
+    check stays an honest guess that is never sent. ``state`` counts the
+    free tiers' monthly allowances, as in find_email.
     """
     email = (email or "").strip().lower()
     domain = email.partition("@")[2]
@@ -719,7 +1003,7 @@ async def verify_published_address(email: str, env=None) -> str:
     mx_host = await get_mx_host(domain)
     if not mx_host:
         return "invalid"
-    status, _ = await _verify_candidate(email, classify_mx(mx_host), env)
+    status, _ = await _verify_candidate(email, classify_mx(mx_host), env, state=state)
     return status or "guess"
 
 
@@ -806,7 +1090,7 @@ async def find_email(
     if not verify:
         return EmailResult(email=candidate, status="guess", pattern=pattern, mx_type=mx_type)
 
-    status, catch_all = await _verify_candidate(candidate, mx_type, env)
+    status, catch_all = await _verify_candidate(candidate, mx_type, env, state=state)
 
     if catch_all and state is not None:
         try:

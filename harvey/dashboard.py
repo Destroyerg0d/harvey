@@ -35,6 +35,11 @@ CONFIG_FILE = PROJECT_ROOT / "harvey.yaml"
 PID_FILE = PROJECT_ROOT / "data" / "harvey.pid"
 LOG_FILE = PROJECT_ROOT / "data" / "harvey.log"
 TOKEN_FILE = PROJECT_ROOT / "data" / "dashboard-token"
+# Email verifier keys: any one of them makes found addresses verifiable.
+VERIFIER_KEYS = (
+    "REOON_API_KEY", "ZEROBOUNCE_API_KEY", "HUNTER_API_KEY",
+    "BOUNCELESS_API_KEY", "EMAILVERIFY_API_KEY", "GETPROSPECT_API_KEY", "ABSTRACT_API_KEY",
+)
 
 
 def _resolve_config_file() -> Path:
@@ -237,12 +242,13 @@ async def get_setup_status():
     })
 
     # 4. Email verification (needed for addresses to be sendable, not 'guess')
-    verifier_set = _has("REOON_API_KEY") or _has("ZEROBOUNCE_API_KEY") or _has("HUNTER_API_KEY")
+    verifier_set = any(_has(key) for key in VERIFIER_KEYS)
     checks.append({
         "id": "verifier", "label": "Email verification key",
         "done": verifier_set,
         "required": True,
-        "help": "Add a Reoon (free 600/mo), ZeroBounce, or Hunter key in Settings — "
+        "help": "Add a Reoon (free 600/mo), Bounceless (free 1,000/mo), ZeroBounce, Hunter, "
+                "EmailVerify.io, GetProspect or Abstract key in Settings — "
                 "without one, found emails stay 'guess' and are never sent.",
     })
 
@@ -350,7 +356,7 @@ async def get_settings():
         "SMTP_HOST", "SMTP_PORT", "SMTP_USERNAME", "SMTP_PASSWORD",
         "IMAP_HOST", "IMAP_PORT", "IMAP_USERNAME", "IMAP_PASSWORD",
         "M365_CLIENT_ID", "M365_TENANT_ID",
-        "REOON_API_KEY", "ZEROBOUNCE_API_KEY", "HUNTER_API_KEY",
+        *VERIFIER_KEYS,
     ]
     for key in all_keys:
         if key not in env_vars:
@@ -394,6 +400,10 @@ async def get_settings():
         "reoon_api_key_set": is_set("REOON_API_KEY"),
         "zerobounce_api_key_set": is_set("ZEROBOUNCE_API_KEY"),
         "hunter_api_key_set": is_set("HUNTER_API_KEY"),
+        "bounceless_api_key_set": is_set("BOUNCELESS_API_KEY"),
+        "emailverify_api_key_set": is_set("EMAILVERIFY_API_KEY"),
+        "getprospect_api_key_set": is_set("GETPROSPECT_API_KEY"),
+        "abstract_api_key_set": is_set("ABSTRACT_API_KEY"),
     }
 
 
@@ -413,8 +423,7 @@ async def save_env_settings(request: Request):
                      "GMAIL_CLIENT_ID", "GMAIL_CLIENT_SECRET",
                      "SMTP_HOST", "SMTP_PORT", "SMTP_USERNAME", "SMTP_PASSWORD",
                      "IMAP_HOST", "IMAP_PORT", "IMAP_USERNAME", "IMAP_PASSWORD",
-                     "M365_CLIENT_ID", "M365_TENANT_ID",
-                     "REOON_API_KEY", "ZEROBOUNCE_API_KEY", "HUNTER_API_KEY"]:
+                     "M365_CLIENT_ID", "M365_TENANT_ID", *VERIFIER_KEYS]:
             if key in data and data[key] is not None:
                 value = data[key]
                 if isinstance(value, bool) or not isinstance(value, (str, int, float)):

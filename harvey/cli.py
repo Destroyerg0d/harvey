@@ -476,8 +476,9 @@ def cmd_export(args):
         )
         print(f"\n  Exported {count} prospect(s) to {args.out}  ({scope})")
         if count == 0 and not args.all:
-            print("  Tip: no deliverable emails yet? Add a REOON_API_KEY to .env so")
-            print("  Harvey can verify addresses, or use --all for the raw list.\n")
+            print("  Tip: no deliverable emails yet? Add a verifier key to .env (REOON_API_KEY,")
+            print("  BOUNCELESS_API_KEY or another in .env.example) so Harvey can verify")
+            print("  addresses, or use --all for the raw list.\n")
         else:
             print("  The CSV imports directly into Instantly, Smartlead, or any sequencer.\n")
 
