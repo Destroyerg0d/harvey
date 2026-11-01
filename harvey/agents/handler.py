@@ -7,10 +7,13 @@ threshold — flips the global kill switch so a bad list can't torch the
 sending domain while nobody's watching.
 """
 
+import asyncio
 import html
 import logging
+import math
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 
 from harvey.brain import Brain, BrainUnavailable
 from harvey.config import (
@@ -22,6 +25,10 @@ from harvey.humanize import humanize, humanizer_enabled
 from harvey.integrations.instantly import InstantlyClient
 from harvey.integrations.mail_provider import (
     NATIVE_PROVIDERS, get_mail_provider, strip_quoted_reply,
+)
+from harvey.mailboxes import (
+    MailboxProviders, bounce_key, configured_mailboxes, connection_problem, down_since_key,
+    is_multi, mailbox_for, normalize, paused_key, primary_mailbox, read_ok_key,
 )
 from harvey.models.conversation import Conversation, Message
 from harvey.state import COLLEAGUE_REPLIED, REVIEW_NEXT_REPLY_KEY, StateManager
@@ -35,6 +42,19 @@ KILL_SWITCH_KEY = "sending_paused"
 BOUNCE_COUNT_KEY = "bounce_count"
 # Kill switch only engages after this many sends (a tiny sample lies).
 MIN_SENDS_FOR_KILL_SWITCH = 10
+# An address in a bounce's text: which email it bounced, when it doesn't say
+# by In-Reply-To.
+_ADDRESS_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+# All of an outbox's history, for counting everything a mailbox has sent.
+EVER = "0001-01-01T00:00:00"
+# Several mailboxes: each inbox is read at the same time as the others, and
+# a read that takes longer than this counts as one that failed (so nothing is
+# sent this cycle), well inside the cycle's ten minutes.
+MAILBOX_READ_TIMEOUT_SECONDS = 240
+# A mailbox whose last complete read is older than this (or missing, once it
+# has sent) reads that far back, up to gmail.MAX_FULL_READ_DAYS, before its
+# cold email goes again: the usual read is the last week only.
+READ_GAP_DAYS = 6
 
 INTENT_LABELS = {
     "interested",
@@ -352,8 +372,16 @@ class Handler:
         self.config = config
         self.instantly = InstantlyClient(env.instantly_api_key)
         self.provider = get_mail_provider(config, env)
+        # With several mailboxes, each one's own provider (main.py shares
+        # the Sender's, so each account is checked once).
+        self.mailbox_providers = MailboxProviders(config, env)
         self.skills = ""
         self.last_read_problem = ""   # why the last mailbox read failed, for the heartbeat
+        # Several mailboxes: what this run couldn't read holds back (the
+        # heartbeat hands them to the Sender): cold email to these prospects,
+        # and from these mailboxes. Reset every run.
+        self.hold_prospects: set[str] = set()
+        self.hold_mailboxes: set[str] = set()
 
     @property
     def is_native(self) -> bool:
@@ -484,6 +512,7 @@ class Handler:
 
     async def _record_after_opt_out(
         self, prospect, reply_text: str, campaign_id: str = "", escalate: bool = False,
+        mailbox: str = "",
     ):
         """Keep a message from someone who opted out, and do nothing else.
 
@@ -508,6 +537,7 @@ class Handler:
             intent="escalate" if escalate else "unsubscribe",
             stage="closed_lost",
             status="needs_human" if escalate else "closed",
+            mailbox=mailbox,
         ))
         if escalate:
             await self.state.log_action(
@@ -556,9 +586,13 @@ class Handler:
         stripped = strip_quoted_reply(reply_text) or reply_text
         reply_text = ours.remove(stripped).strip() or stripped
 
+        # Several mailboxes: the one it arrived in, which the thread and any
+        # answer belong to ("" with one mailbox).
+        receiving = (reply_meta or {}).get("mailbox", "")
         if prospect.status == "opted_out":
             escalate = any(p in keyword_text for p in ESCALATION_PATTERNS)
-            await self._record_after_opt_out(prospect, reply_text, campaign_id, escalate)
+            await self._record_after_opt_out(prospect, reply_text, campaign_id, escalate,
+                                             mailbox=receiving)
             return
 
         # Update prospect status + stop-on-reply: a human answered, so every
@@ -612,6 +646,8 @@ class Handler:
                 intent=intent,
                 status="open",
             )
+        if receiving:
+            convo.mailbox = receiving
         convo.thread.append(Message(sender="prospect", content=reply_text))
         convo.intent = intent
         old_stage = convo.stage
@@ -638,6 +674,7 @@ class Handler:
                 thread_json=convo.thread_json(),
                 intent=intent,
                 stage=convo.stage,
+                **({"mailbox": receiving} if receiving else {}),
             )
         if convo.stage != old_stage:
             logger.info(f"Handler: Stage for {lead_email}: {old_stage} -> {convo.stage}")
@@ -802,6 +839,10 @@ class Handler:
     async def _run_native(self) -> bool:
         """Poll the mailbox, split bounces from human replies, handle both.
         Returns True only if the mailbox was read and every message handled."""
+        self.hold_prospects = set()
+        self.hold_mailboxes = set()
+        if is_multi(self.config):
+            return await self._run_native_multi()
         if not self.provider.is_configured():
             logger.debug(
                 f"Handler: provider '{self.provider.name}' not configured yet."
@@ -825,19 +866,7 @@ class Handler:
                 continue
             consumed = True
             try:
-                if msg.is_bounce:
-                    await self._handle_bounce(msg)
-                elif msg.body.strip():
-                    await self._process_reply(
-                        msg.from_email,
-                        msg.body.strip(),
-                        reply_uuid="",
-                        reply_meta={
-                            "thread_ref": msg.thread_ref,
-                            "message_id": msg.message_id,
-                            "subject": msg.subject,
-                        },
-                    )
+                await self._handle_message(msg)
                 handled += 1
             except BrainUnavailable as e:
                 consumed = False
@@ -863,12 +892,244 @@ class Handler:
             self.provider.confirm_read()
         return complete
 
+    async def _handle_message(self, msg):
+        """One inbound message: a bounce, or a reply (from the mailbox it
+        arrived in, with several)."""
+        if msg.is_bounce:
+            await self._handle_bounce(msg)
+        elif msg.body.strip():
+            await self._process_reply(
+                msg.from_email,
+                msg.body.strip(),
+                reply_uuid="",
+                reply_meta={
+                    "thread_ref": msg.thread_ref,
+                    "message_id": msg.message_id,
+                    "subject": msg.subject,
+                    **({"mailbox": msg.mailbox} if msg.mailbox else {}),
+                },
+            )
+
+    @staticmethod
+    def _seen_keys(msg, mailbox: str, primary: str) -> list[str]:
+        """What marks a message handled (several mailboxes): the primary's
+        own key as before (Gmail id, else Message-ID), another mailbox's
+        Gmail id under its address (ids are per mailbox), and the RFC
+        Message-ID, which is the same in every inbox it reached."""
+        keys = []
+        if mailbox == primary:
+            keys.append(msg.provider_id or msg.message_id)
+        elif msg.provider_id:
+            keys.append(f"{mailbox}:{msg.provider_id}")
+        rfc = (msg.message_id or "").strip()
+        if rfc and rfc not in keys:
+            keys.append(rfc)
+        return [k for k in keys if k]
+
+    async def _read_plan(self, primary: str) -> tuple[list, dict[str, str]]:
+        """Several mailboxes: [(mailbox, provider)] to read now, and why each
+        mailbox that has sent before can't be read ({address: why}). One
+        whose last complete read is older than READ_GAP_DAYS reads back that
+        far (or the most it can, never read but has sent) on its next read."""
+        to_read, unread = [], {}
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        for m in configured_mailboxes(self.config):
+            provider = self.mailbox_providers.get(m)
+            has_sent = await self.state.count_outbox_sent_since(EVER, mailbox=m.email,
+                                                                primary=primary) > 0
+            problem = connection_problem(m, provider)
+            if problem:
+                if has_sent:
+                    unread[m.email] = problem
+                continue
+            last = await self.state.get_setting(read_ok_key(m.email))
+            try:
+                gap = (now - datetime.fromisoformat(last)) if last else None
+            except ValueError:
+                gap = None
+            widen = None
+            if gap is not None and gap > timedelta(days=READ_GAP_DAYS):
+                widen = math.ceil(gap.total_seconds() / 86400) + 1
+            elif gap is None and has_sent:
+                widen = 10 ** 6       # as far back as a read goes
+            if widen is not None and hasattr(provider, "widen_next_read"):
+                logger.info(f"Handler: {m.email} has no complete read in the last "
+                            f"{READ_GAP_DAYS} days; reading further back.")
+                provider.widen_next_read(widen)
+            to_read.append((m, provider))
+        return to_read, unread
+
+    async def _run_native_multi(self) -> bool:
+        """Several mailboxes: read every one that can be read, at the same
+        time, and handle what arrived. Each mailbox's read is confirmed
+        (confirm_read) only once everything it returned was handled.
+
+        True unless nothing may be sent this cycle: an unexpected error or
+        a read that ran too long, a message that couldn't be handled, or the
+        brain going down. A mailbox that couldn't be read (signed out, wrong
+        account, Gmail errors), but has sent before, holds back only the cold
+        email a reply in it could stop: to everyone given to it or emailed
+        from it, and their companies (hold_prospects), and its own
+        (hold_mailboxes)."""
+        from harvey.integrations.gmail import GmailError
+
+        primary = primary_mailbox(self.config).email
+        self.last_read_problem = ""
+        to_read, unread = await self._read_plan(primary)
+        complete = True
+
+        async def read(provider):
+            return await asyncio.wait_for(provider.get_replies(),
+                                          timeout=MAILBOX_READ_TIMEOUT_SECONDS)
+
+        results = await asyncio.gather(*(read(p) for _, p in to_read), return_exceptions=True)
+        batches = []
+        for (m, provider), result in zip(to_read, results):
+            if isinstance(result, asyncio.CancelledError):
+                raise result
+            if isinstance(result, GmailError):
+                logger.error(f"Handler: couldn't read {m.email}: {result}")
+                unread[m.email] = str(result)
+            elif isinstance(result, BaseException):
+                # Not the mailbox saying no: something unexpected, or a read
+                # that ran too long. Nothing goes out this cycle.
+                why = str(result) or type(result).__name__
+                logger.error(f"Handler: reading {m.email} failed: {why}")
+                self.last_read_problem = f"{m.email}: {why}"
+                complete = False
+            else:
+                batches.append((m, provider, result))
+                # It answers: no longer down (a mailbox signed in again can
+                # take new prospects, even with nothing of its own to send).
+                if await self.state.get_setting(down_since_key(m.email)):
+                    await self.state.delete_setting(down_since_key(m.email))
+
+        # The same message in more than one inbox (they wrote to two of the
+        # team) is handled once, from the inbox of the mailbox they belong to.
+        inboxes: dict[str, list] = {}
+        for m, _, messages in batches:
+            for msg in messages:
+                if (msg.message_id or "").strip():
+                    inboxes.setdefault(msg.message_id.strip(), []).append((m.email, msg))
+        owner: dict[str, str] = {}
+        for rfc, copies in inboxes.items():
+            boxes = [address for address, _ in copies]
+            if len(set(boxes)) < 2:
+                continue
+            prospect = await self.state.get_prospect_by_email(copies[0][1].from_email)
+            theirs = normalize(self.config, prospect.mailbox) if prospect else ""
+            owner[rfc] = theirs if theirs in boxes else boxes[0]
+
+        handled = 0
+        stopped = False
+        fully_handled: dict[str, bool] = {}
+        deferred = []     # (mailbox, keys): copies handled from another inbox
+        for m, provider, messages in batches:
+            if stopped:
+                break
+            fully_handled[m.email] = True
+            for msg in messages:
+                keys = self._seen_keys(msg, m.email, primary)
+                if not keys:
+                    continue
+                if any([await self.state.is_reply_processed(k) for k in keys]):
+                    continue
+                rfc = (msg.message_id or "").strip()
+                if owner.get(rfc, m.email) != m.email:
+                    deferred.append((m.email, keys, rfc))
+                    continue
+                if not msg.mailbox:
+                    msg.mailbox = m.email
+                consumed = True
+                try:
+                    await self._handle_message(msg)
+                    handled += 1
+                except BrainUnavailable as e:
+                    consumed = False
+                    complete = False
+                    stopped = True
+                    fully_handled[m.email] = False
+                    logger.error(f"Handler: stopping; replies are left for later ({e}).")
+                    break
+                except Exception as e:
+                    logger.error(f"Handler: error processing {msg.from_email} in {m.email}: {e}")
+                    self.last_read_problem = (f"a reply from {msg.from_email} to {m.email} "
+                                              f"couldn't be handled ({e})")
+                    complete = False
+                    fully_handled[m.email] = False
+                finally:
+                    if consumed:
+                        for key in keys:
+                            await self.state.mark_reply_processed(key)
+        for address, keys, rfc in deferred:
+            if await self.state.is_reply_processed(rfc):
+                for key in keys:
+                    await self.state.mark_reply_processed(key)
+            else:
+                fully_handled[address] = False
+
+        now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+        for m, provider, _ in batches:
+            if fully_handled.get(m.email):
+                provider.confirm_read()
+                await self.state.set_setting(read_ok_key(m.email), now)
+
+        if unread:
+            self.hold_mailboxes = set(unread)
+            self.hold_prospects = await self.state.prospects_linked_to_mailboxes(
+                list(unread), primary)
+            problems = "; ".join(f"{address}: {why}" for address, why in unread.items())
+            logger.warning(
+                f"Handler: couldn't read {', '.join(unread)}; cold email to "
+                f"{len(self.hold_prospects)} prospect(s) a reply there could stop waits "
+                f"({problems}).")
+            self.last_read_problem = self.last_read_problem or problems
+        if handled:
+            logger.info(f"Handler: processed {handled} inbound message(s).")
+        else:
+            logger.info("Handler: no new replies.")
+        return complete
+
+    async def _bounced_row(self, msg) -> dict | None:
+        """The sent email a bounce is about, or None: the one it answers
+        (In-Reply-To), else the latest one sent (from the mailbox it arrived
+        in, with several) to an address the bounce names, before it came."""
+        row = await self.state.find_outbox_by_message_id(msg.in_reply_to)
+        if row is not None:
+            return row
+        addresses = set(_ADDRESS_RE.findall(msg.body or ""))
+        if is_multi(self.config) and msg.mailbox:
+            row = await self.state.find_sent_outbox_to(
+                addresses, mailboxes=[msg.mailbox], primary=primary_mailbox(self.config).email)
+        else:
+            row = await self.state.find_sent_outbox_to(addresses)
+        if row is None:
+            return None
+        try:
+            bounced_at = parsedate_to_datetime(msg.date) if msg.date else None
+            if bounced_at is not None and bounced_at.tzinfo is not None:
+                bounced_at = bounced_at.astimezone(timezone.utc).replace(tzinfo=None)
+            sent_at = datetime.fromisoformat(str(row.get("sent_at") or ""))
+        except (TypeError, ValueError, IndexError):
+            return row
+        if bounced_at is not None and bounced_at < sent_at - timedelta(minutes=5):
+            return None   # older than the email: it's about something else
+        return row
+
     async def _handle_bounce(self, msg):
-        """A bounce is a data bug AND a reputation threat. Fix both."""
-        outbox_item = await self.state.find_outbox_by_message_id(msg.in_reply_to)
-        prospect = None
-        if outbox_item:
-            prospect = await self.state.get_prospect(outbox_item["prospect_id"])
+        """A bounce is a data bug AND a reputation threat. Fix both, for an
+        email Harvey sent: a bounce it can't match to one (an old one, or
+        for mail Harvey didn't send) changes nothing, and can't pause
+        sending. With several mailboxes it counts against the mailbox that
+        sent the email, and past the bounce rate pauses that one alone."""
+        outbox_item = await self._bounced_row(msg)
+        if outbox_item is None:
+            logger.warning(
+                f"Handler: bounce received ({msg.subject[:60]}) but couldn't "
+                "match it to an email Harvey sent; nothing changed."
+            )
+            return
+        prospect = await self.state.get_prospect(outbox_item["prospect_id"])
 
         if prospect:
             await self.state.update_prospect_email(
@@ -881,11 +1142,28 @@ class Handler:
                 f"Handler: BOUNCE for {prospect.email} — marked invalid, "
                 f"cancelled {cancelled} queued email(s)."
             )
-        else:
-            logger.warning(
-                f"Handler: bounce received ({msg.subject[:60]}) but couldn't "
-                "match it to a sent email."
+
+        max_rate = getattr(self.config.channels.email, "max_bounce_rate", 0.05)
+        if is_multi(self.config):
+            primary = primary_mailbox(self.config).email
+            address = normalize(self.config, outbox_item.get("mailbox"))
+            bounces = await self.state.increment_setting(bounce_key(address))
+            total_sent = await self.state.count_outbox_sent_since(EVER, mailbox=address,
+                                                                  primary=primary)
+            await self.state.log_action(
+                action_type="bounce",
+                agent="handler",
+                details={"prospect": prospect.email if prospect else "unknown",
+                         "mailbox": address, "bounces": bounces, "total_sent": total_sent},
             )
+            if (max_rate > 0 and total_sent >= MIN_SENDS_FOR_KILL_SWITCH
+                    and bounces / total_sent > max_rate):
+                reason = (f"bounce rate {bounces}/{total_sent} exceeded {max_rate:.0%} — "
+                          "check list quality before resuming")
+                await self.state.set_setting(paused_key(address), reason)
+                logger.error(f"Handler: SENDING FROM {address} PAUSED — {reason}. "
+                             "The other mailboxes carry on.")
+            return
 
         bounces = await self.state.increment_setting(BOUNCE_COUNT_KEY)
         total_sent = await self.state.count_outbox_sent()
@@ -896,7 +1174,6 @@ class Handler:
                      "bounces": bounces, "total_sent": total_sent},
         )
 
-        max_rate = getattr(self.config.channels.email, "max_bounce_rate", 0.05)
         if (
             max_rate > 0
             and total_sent >= MIN_SENDS_FOR_KILL_SWITCH
@@ -939,6 +1216,9 @@ class Handler:
             thread_ref=reply_meta.get("thread_ref", ""),
             in_reply_to=reply_meta.get("message_id", ""),
             approved_by="" if require_approval else "autopilot",
+            # Several mailboxes: answered from the one it arrived in, in that
+            # mailbox's thread. Otherwise the prospect's, as before.
+            mailbox=reply_meta.get("mailbox") or None,
         )
         if item_id:
             await self.state.delete_setting(review_key)
@@ -1061,9 +1341,14 @@ Respond with ONLY the category label, nothing else."""
                     objection_context = f"\nSuggested approach for this objection: {response}"
                     break
 
+        # Several mailboxes: the reply goes out from, and is written as, the
+        # mailbox the prospect wrote to.
+        sender = mailbox_for(self.config, convo.mailbox) if is_multi(self.config) else None
         prompt = self.brain.load_prompt("handler", stage=convo.stage)
         if not prompt:
-            prompt = f"""You are {self.config.persona.name}, {self.config.persona.role} at {self.config.persona.company}.
+            who = (f"{sender.first_name}, on the {self.config.persona.company} team" if sender else
+                   f"{self.config.persona.name}, {self.config.persona.role} at {self.config.persona.company}")
+            prompt = f"""You are {who}.
 Your tone is: {self.config.persona.tone}
 Product: {self.config.product.name} — {self.config.product.description}"""
 
@@ -1078,6 +1363,13 @@ Product: {self.config.product.name} — {self.config.product.description}"""
             playbook = self.brain.load_skill("selling_to_startups")
             if playbook:
                 prompt += "\n\nSELLING TO STARTUP FOUNDERS\n" + playbook
+        if sender is not None:
+            # After the skills, so nothing in them reads as who is writing.
+            prompt += (
+                f"\n\nWHO IS WRITING: {sender.first_name} at {self.config.persona.company}, from "
+                f"{sender.email}. This reply goes out from that mailbox, so write it as "
+                f"{sender.first_name}: never as anyone else on the team, and invent nothing "
+                f"about {sender.first_name} (no background, location or personal details).")
 
         prompt += f"""
 

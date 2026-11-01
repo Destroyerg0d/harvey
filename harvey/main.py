@@ -287,6 +287,15 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
 
     await state.init_db()
     logger.info("Database initialized.")
+    # Which mailboxes this run sends from: the config is read once, at start.
+    from harvey import mailboxes
+    try:
+        await state.set_setting(mailboxes.IN_USE_KEY, mailboxes.in_use_value(config))
+    except Exception as e:
+        logger.warning(f"Couldn't record the mailboxes in use: {e}")
+    if mailboxes.is_multi(config):
+        logger.info("Sending from " + ", ".join(
+            m.email for m in mailboxes.configured_mailboxes(config)) + ".")
 
     # Import agents here to avoid circular imports
     from harvey.agents.scout import Scout
@@ -300,6 +309,11 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
     sender = Sender(brain, state, config, env)
     handler = Handler(brain, state, config, env)
     analyst = Analyst(state)
+    # Several mailboxes: one provider per mailbox for all three, so each
+    # account is checked once and a new sign-in is picked up by all of them.
+    shared = getattr(sender, "mailbox_providers", None)
+    if shared is not None:
+        writer.mailbox_providers = handler.mailbox_providers = shared
 
     interval = config.usage.heartbeat_interval_minutes * 60
     max_calls = max(int(200 * (config.usage.max_daily_claude_percent / 100)), 1)
@@ -339,6 +353,8 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
             # inside its recipient's window, not held by a cap or a pause.
             # Replies wait for the operator's hours, as they always have.
             sender.cold_only = send_only
+            # What an unread inbox holds back is decided afresh every cycle.
+            sender.hold_prospects, sender.hold_mailboxes = set(), set()
             if send_only and not await sender.cold_due_in_window():
                 logger.info(
                     f"Quiet hours. No cold email can go now; checking again in "
@@ -446,6 +462,10 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
                         await record_send_phase(state, held)
                 else:
                     await record_send_phase(state, send_hold_reason([], "", ""))
+                    # Several mailboxes: an inbox that couldn't be read holds
+                    # back the cold email a reply in it could stop.
+                    sender.hold_prospects = set(getattr(handler, "hold_prospects", ()) or ())
+                    sender.hold_mailboxes = set(getattr(handler, "hold_mailboxes", ()) or ())
                     await _run_agents([(name, run()) for name, run in send_tasks])
 
             # 6. Log the action (best-effort; never kills the loop)

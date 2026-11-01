@@ -60,6 +60,10 @@ LOOPBACK_PORT = 8765
 MAX_INBOX_PAGES = 40
 # A full 7-day read runs at least this often, whatever the history says.
 FULL_READ_EVERY_SECONDS = 24 * 3600
+# How far back a full read lists the inbox, and the most a widened one
+# does (widen_next_read: the last complete read was longer ago than a week).
+FULL_READ_DAYS = 7
+MAX_FULL_READ_DAYS = 30
 # Labels that mean "not a reply to handle".
 _NOT_REPLIES = frozenset({"SENT", "DRAFT", "SPAM", "TRASH"})
 # Codecs Python accepts that are no real mail charset (see _extract_text).
@@ -183,6 +187,8 @@ class GmailProvider(MailProvider):
         self._last_full_read = 0.0
         self._verify_week = False      # list the week once more after a full read
         self._pending: tuple | None = None
+        # Days a full read covers (widen_next_read changes it for one read).
+        self.full_read_days = FULL_READ_DAYS
 
     def is_configured(self) -> bool:
         return bool(self.client_id and self.client_secret and self._stored_token())
@@ -467,8 +473,19 @@ class GmailProvider(MailProvider):
         if full:
             self._last_full_read = time.time()
             self._verify_week = True
+            self.full_read_days = FULL_READ_DAYS
         elif verified:
             self._verify_week = False
+
+    def widen_next_read(self, days: int):
+        """Make the next read a full one covering ``days`` (at least the
+        usual week, at most MAX_FULL_READ_DAYS), whatever marker this
+        provider holds: the inbox wasn't read completely for longer than a
+        week, so a reply since then can be older than the week a full read
+        lists. Back to the week once that read is confirmed."""
+        self.full_read_days = max(FULL_READ_DAYS, min(MAX_FULL_READ_DAYS, int(days)))
+        self._history_id = None
+        self._last_full_read = 0.0
 
     async def _current_history_id(self) -> str | None:
         """Gmail's current history marker, or None (the next read is the
@@ -566,7 +583,7 @@ class GmailProvider(MailProvider):
         not a cap: a reply beyond the first page must still stop its
         follow-ups. Bounded like the Graph provider (MAX_INBOX_PAGES of
         Gmail's largest pages, which are ids only), never partial."""
-        params = {"q": "in:inbox -from:me newer_than:7d",
+        params = {"q": f"in:inbox -from:me newer_than:{self.full_read_days}d",
                   "maxResults": max(1, min(500, int(limit)))}
         out = []
         seen_ids = set()
