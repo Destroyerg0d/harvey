@@ -18,6 +18,10 @@ from harvey.brain import Brain
 from harvey.config import EmailRulesError, HarveyConfig, compliance_of, load_email_rules
 from harvey.humanize import humanize, humanizer_enabled
 from harvey.integrations.mail_provider import NATIVE_PROVIDERS
+from harvey.mailboxes import (
+    SENDER_FIRST_NAME_TAG, MailboxProviders, companies_of, configured_mailboxes, is_multi,
+    least_loaded, normalize, takes_new_prospects,
+)
 from harvey.models.campaign import Campaign, EmailStep
 from harvey.state import WRITABLE_EMAIL_STATUSES, StateManager
 from harvey.sending_mode import sync_sending_mode
@@ -56,13 +60,30 @@ EMAIL_RULES_PROBLEM_KEY = "email_rules_problem"
 BUILT_IN_FOOTER = "- No postal address, unsubscribe or opt-out line: Harvey adds them when it sends."
 
 
-def operator_rules_block(rules: str) -> str:
+def sign_off_rule(which: str, only: str = "") -> str:
+    """With several mailboxes: one draft can go out from any of them (and a
+    prospect can move to another), so no draft names its sender. ``which``
+    ("the email", "every email") signs off with the sender tag instead,
+    which the Sender fills in from the mailbox it goes out from."""
+    return (
+        f"- End {which} with a line that is only {SENDER_FIRST_NAME_TAG}, exactly as\n"
+        f"  written{only}: the first name of the teammate it goes out from replaces it when it\n"
+        "  sends. Never write a sender's name yourself, and add no other signature.")
+
+
+def operator_rules_block(rules: str, multi: bool = False) -> str:
     """The operator's email rules as a prompt section ("" when there are none).
 
     Trusted text from the person running Harvey, so it isn't fenced. It wins
-    over the built-in style and shape rules, never over the FACTS rule."""
+    over the built-in style and shape rules, never over the FACTS rule. With
+    several mailboxes (``multi``) they set a sign-off's words but never the
+    name it signs with: that is always the sender tag."""
     if not rules:
         return ""
+    sender = (
+        "The name an email signs with isn't theirs to set: wherever they give a name\n"
+        "to sign with, write the line " + SENDER_FIRST_NAME_TAG + " instead.\n"
+        if multi else "")
     return (
         "\n\nOPERATOR'S EMAIL RULES — written by the person running Harvey. For\n"
         "length, structure, what to say about the product, links, subject lines\n"
@@ -71,6 +92,7 @@ def operator_rules_block(rules: str) -> str:
         "say about the prospect comes only from the facts given, never invented.\n"
         "Nor do they allow a fake \"Re:\" or \"Fwd:\" subject line, or a claim of a\n"
         "conversation that never happened.\n"
+        + sender
         + rules
     )
 
@@ -111,10 +133,80 @@ class Writer:
         self.state = state
         self.config = config
         self.env = env
+        # With several mailboxes: theirs, to tell which can take new
+        # prospects (main.py shares the Sender's, so each is checked once).
+        self.mailbox_providers = MailboxProviders(config, env)
 
     @property
     def is_native(self) -> bool:
         return self.config.channels.email.provider in NATIVE_PROVIDERS
+
+    @property
+    def multi(self) -> bool:
+        return is_multi(self.config)
+
+    def _persona_name(self) -> str:
+        """Who the prompt says writes. With several mailboxes no one person:
+        the email goes out from (and signs as) whichever teammate's mailbox
+        sends it."""
+        if not self.multi:
+            return self.config.persona.name
+        return (f"a member of the {self.config.persona.company} team (the first name of "
+                "whoever it goes out from is added where the email signs off)")
+
+    async def _assign_mailboxes(self, batches: dict[str, list]) -> dict[str, list]:
+        """Several mailboxes: give everyone about to be written for a
+        mailbox before anything is drafted, company by company, so a company
+        hears from one sender. A company Harvey has already dealt with stays
+        on the mailbox it dealt with them from ("" there is the primary);
+        otherwise it goes to the least busy mailbox that can take new
+        prospects now (mailboxes.least_loaded). Each company is saved before
+        the next is chosen, so its load counts. Someone already given a
+        mailbox keeps it. Returns the batches without the prospects no
+        mailbox could take: they stay new for a later cycle."""
+        candidates = {p.id: p for group in batches.values() for p in group}
+        if not candidates:
+            return batches
+        companies = [[candidates[pid] for pid in ids]
+                     for ids in await companies_of(self.state, list(candidates))]
+
+        configured = {m.email for m in configured_mailboxes(self.config)}
+        open_mailboxes = None    # the ones that can take new prospects, once asked
+        left_out: set[str] = set()
+        for people in companies:
+            unassigned = [p for p in people if not (p.mailbox or "").strip()]
+            if not unassigned:
+                continue
+            stored = await self.state.company_mailbox([p.id for p in people])
+            if stored is not None:
+                target = normalize(self.config, stored)
+                if target not in configured:
+                    logger.warning(
+                        f"Writer: {unassigned[0].email}'s company is with {target}, which "
+                        "isn't in channels.email.mailboxes any more; their emails wait for it.")
+            else:
+                if open_mailboxes is None:
+                    open_mailboxes = []
+                    for m in configured_mailboxes(self.config):
+                        why = await takes_new_prospects(self.state, m, self.mailbox_providers.get(m))
+                        if why:
+                            logger.info(f"Writer: {m.email} takes no new prospects now: {why}")
+                        else:
+                            open_mailboxes.append(m)
+                chosen = await least_loaded(self.state, self.config, open_mailboxes)
+                if chosen is None:
+                    left_out.update(p.id for p in unassigned)
+                    continue
+                target = chosen.email
+            for p in unassigned:
+                await self.state.set_prospect_mailbox(p.id, target)
+                p.mailbox = target
+        if left_out:
+            logger.warning(
+                f"Writer: no mailbox can take new prospects right now (signed in and not "
+                f"paused); {len(left_out)} prospect(s) wait for a later cycle.")
+        kept = {name: [p for p in group if p.id not in left_out] for name, group in batches.items()}
+        return {name: group for name, group in kept.items() if group}
 
     async def run(self):
         """Create email campaigns for prospects that need outreach."""
@@ -161,6 +253,9 @@ class Writer:
 
         # Batch prospects into campaign groups (by industry/title for relevance)
         batches = self._group_prospects(prospects_with_email)
+        if self.multi:
+            # Who sends to whom, decided before anything is drafted.
+            batches = await self._assign_mailboxes(batches)
 
         for batch_name, prospects in batches.items():
             if not prospects:
@@ -388,7 +483,7 @@ class Writer:
             product_description=self.config.product.description,
             product_benefits="\n".join(f"- {b}" for b in self.config.product.key_benefits),
             product_pricing=self.config.product.pricing,
-            persona_name=self.config.persona.name,
+            persona_name=self._persona_name(),
             persona_company=self.config.persona.company,
             persona_role=self.config.persona.role,
             persona_tone=self.config.persona.tone,
@@ -399,7 +494,7 @@ class Writer:
             prompt += self._startup_playbook()
         prompt += await self._feedback_block([prospect.id])
         rules = getattr(self, "email_rules", "")
-        prompt += operator_rules_block(rules)
+        prompt += operator_rules_block(rules, multi=self.multi)
         if rules:
             shape = (
                 "- Follow the OPERATOR'S EMAIL RULES above for this first email: its length,\n"
@@ -409,6 +504,8 @@ class Writer:
         else:
             shape = PERSONAL_SHAPE
             strict = "- Follow every STRICT EMAIL RULE above."
+        sign_off = ("\n" + sign_off_rule("the email", " (the one merge variable in it)")
+                    if self.multi else "")
 
         prompt += f"""
 
@@ -425,7 +522,7 @@ funding rounds, mutual contacts, metrics, or anything else:
 Requirements:
 {shape}
 {footer_rule(self.config, rules)}
-{strict}{inbox_rule}
+{strict}{inbox_rule}{sign_off}
 
 Return ONLY JSON: {{"subject": "...", "body": "..."}}"""
 
@@ -469,14 +566,18 @@ Return ONLY JSON: {{"subject": "...", "body": "..."}}"""
             product_description=self.config.product.description,
             product_benefits="\n".join(f"- {b}" for b in self.config.product.key_benefits),
             product_pricing=self.config.product.pricing,
-            persona_name=self.config.persona.name,
+            persona_name=self._persona_name(),
             persona_company=self.config.persona.company,
             persona_role=self.config.persona.role,
             persona_tone=self.config.persona.tone,
         )
 
         if not prompt:
-            prompt = f"""You are {self.config.persona.name}, {self.config.persona.role} at {self.config.persona.company}.
+            who = (f"You write for {self.config.persona.company} as {self._persona_name()}."
+                   if self.multi else
+                   f"You are {self.config.persona.name}, {self.config.persona.role} at "
+                   f"{self.config.persona.company}.")
+            prompt = f"""{who}
 Your tone is: {self.config.persona.tone}
 
 Product: {self.config.product.name}
@@ -496,7 +597,7 @@ Pricing: {self.config.product.pricing}"""
         # note about one person ("met her at the expo") must never reach it.
         prompt += await self._feedback_block([])
         rules = getattr(self, "email_rules", "")
-        prompt += operator_rules_block(rules)
+        prompt += operator_rules_block(rules, multi=self.multi)
         if rules:
             shape = (
                 "- Email 1 is the first touch, email 2 a follow-up 3 days later, email 3 a\n"
@@ -509,6 +610,8 @@ Pricing: {self.config.product.pricing}"""
         else:
             shape, style = SEQUENCE_SHAPE, "\n" + SEQUENCE_STYLE
             strict = "- Follow every rule in the STRICT EMAIL RULES above. No exceptions."
+        # One template for the batch, sent from whichever mailbox each has.
+        sign_off = "\n" + sign_off_rule("every email") if self.multi else ""
 
         prompt += f"""
 
@@ -521,7 +624,7 @@ Requirements:
 {shape}
 {merge_rule}{style}
 {footer_rule(self.config, rules)}
-{strict}
+{strict}{sign_off}
 
 Return ONLY a JSON array (no markdown fences, no commentary):
 [
