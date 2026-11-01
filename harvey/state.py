@@ -521,6 +521,33 @@ MIGRATIONS: list[str] = [
     """,
 ]
 
+# Columns this fork adds outside MIGRATIONS, so the numbering stays upstream's
+# and a later upstream migration is never skipped: init_db adds each one that
+# is missing, after the migrations. (table, column, declaration)
+_EXTRA_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    # The mailbox that sends to / owns this prospect, row or thread
+    # (harvey/mailboxes.py). "" is the primary, persona.email.
+    ("prospects", "mailbox", "TEXT DEFAULT ''"),
+    ("outbox", "mailbox", "TEXT DEFAULT ''"),
+    ("conversations", "mailbox", "TEXT DEFAULT ''"),
+)
+
+
+def _mailbox_of(alias: str) -> str:
+    """SQL: row ``alias``'s mailbox as an address, lower-cased, with ""
+    (rows from before there were mailboxes, and single-mailbox setups) as the
+    primary. Takes one parameter, the primary's address."""
+    return (f"(CASE WHEN trim(COALESCE({alias}.mailbox, '')) = '' THEN ? "
+            f"ELSE lower(trim({alias}.mailbox)) END)")
+
+
+def _mailbox_filter(alias: str, mailboxes: list[str], primary: str) -> tuple[str, list]:
+    """SQL and parameters: row ``alias`` belongs to one of ``mailboxes``."""
+    wanted = [_norm(m) or _norm(primary) for m in mailboxes]
+    marks = ", ".join("?" for _ in wanted)
+    return f"{_mailbox_of(alias)} IN ({marks})", [_norm(primary), *wanted]
+
+
 BRAIN_PROVIDERS = ("claude", "codex")
 _USAGE_LOG_COLUMN = {"claude": "claude_calls", "codex": "codex_calls"}
 
@@ -544,7 +571,7 @@ _CAMPAIGN_COLUMNS = frozenset({
 })
 _CONVERSATION_COLUMNS = frozenset({
     "prospect_id", "campaign_id", "channel",
-    "thread_json", "intent", "stage", "status",
+    "thread_json", "intent", "stage", "status", "mailbox",
 })
 
 
@@ -582,6 +609,24 @@ class StateManager:
                     await db.executescript(script)
                     await db.execute(f"PRAGMA user_version = {target}")
                     await db.commit()
+
+            await self._add_extra_columns(db)
+
+    @staticmethod
+    async def _add_extra_columns(db):
+        """Add each of _EXTRA_COLUMNS that the database doesn't have yet."""
+        for table, column, declaration in _EXTRA_COLUMNS:
+            async with db.execute(f"PRAGMA table_info({table})") as cursor:
+                have = {row[1] for row in await cursor.fetchall()}
+            if column in have:
+                continue
+            try:
+                await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+            except aiosqlite.OperationalError as e:
+                # Another process (the dashboard, say) added it first.
+                if "duplicate column" not in str(e).lower():
+                    raise
+            await db.commit()
 
     # ── Companies ──
 
@@ -753,6 +798,7 @@ class StateManager:
         d["phone_verified"] = bool(d.get("phone_verified", 0))
         d["email_status"] = d.get("email_status") or ""
         d["timezone"] = d.get("timezone") or ""
+        d["mailbox"] = d.get("mailbox") or ""
         return Prospect(**d)
 
     async def add_prospect(self, prospect: Prospect) -> str:
@@ -769,8 +815,8 @@ class StateManager:
                     email_status, phone, phone_verified, linkedin_url, title,
                     seniority, department, source, source_url, status, score,
                     personalization_notes, company, industry, company_size,
-                    created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    created_at, updated_at, mailbox)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     prospect.id, prospect.company_id,
                     prospect.first_name, prospect.last_name,
@@ -785,6 +831,7 @@ class StateManager:
                     prospect.company, prospect.industry, prospect.company_size,
                     prospect.created_at.isoformat(),
                     prospect.updated_at.isoformat(),
+                    _norm(prospect.mailbox),
                 ),
             )
             await db.commit()
@@ -833,6 +880,17 @@ class StateManager:
                 "UPDATE prospects SET timezone = ? WHERE id = ?", (zone, prospect_id)
             )
             await db.commit()
+
+    async def set_prospect_mailbox(self, prospect_id: str, mailbox: str) -> bool:
+        """Give a prospect to a mailbox ("" for the primary). Their outbox
+        rows aren't touched. Like the time zone, not a change to the person,
+        so updated_at stays."""
+        async with self._connect() as db:
+            cursor = await db.execute(
+                "UPDATE prospects SET mailbox = ? WHERE id = ?", (_norm(mailbox), prospect_id)
+            )
+            await db.commit()
+            return cursor.rowcount == 1
 
     async def update_prospect_status(self, prospect_id: str, status: str):
         # An opt-out is permanent: nothing Harvey does later (a reply, a
@@ -1010,22 +1068,31 @@ class StateManager:
         thread_ref: str = "",
         in_reply_to: str = "",
         approved_by: str = "",
+        mailbox: str | None = None,
     ) -> str | None:
         """Queue one outgoing email. Returns its id, or None when the
         (campaign, prospect, step) slot already exists — the double-send guard.
-        ``approved_by="autopilot"`` when it's queued approved on autopilot."""
+        ``approved_by="autopilot"`` when it's queued approved on autopilot.
+        ``mailbox``: the mailbox it goes out from ("" the primary); None
+        takes the prospect's, so a caller that doesn't know still gets it."""
         item_id = _new_id()
+        if mailbox is None:
+            mailbox_sql = "lower(COALESCE((SELECT mailbox FROM prospects WHERE id = ?), ''))"
+            mailbox_param = prospect_id
+        else:
+            mailbox_sql, mailbox_param = "?", _norm(mailbox)
         async with self._connect() as db:
             cursor = await db.execute(
-                """INSERT OR IGNORE INTO outbox
+                f"""INSERT OR IGNORE INTO outbox
                    (id, campaign_id, prospect_id, conversation_id, step, kind,
                     to_email, subject, body, status, send_at, provider,
-                    thread_ref, in_reply_to)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    thread_ref, in_reply_to, mailbox)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, {mailbox_sql})""",
                 (
                     item_id, campaign_id, prospect_id, conversation_id,
                     int(step), kind, _norm(to_email), subject, body,
                     status, send_at, provider, thread_ref, in_reply_to,
+                    mailbox_param,
                 ),
             )
             if cursor.rowcount > 0 and approved_by:
@@ -1042,12 +1109,22 @@ class StateManager:
         skip_unready_follow_ups: bool = False,
         kind: str | None = None,
         follow_ups_only: bool = False,
+        mailboxes: list[str] | None = None,
+        primary: str = "",
     ) -> list[dict]:
         """skip_unready_follow_ups: leave out sequence follow-ups whose
         previous step hasn't gone out yet, so they can't fill the page.
         kind: only that kind ("sequence" for cold email).
-        follow_ups_only: only sequence emails after the first step."""
+        follow_ups_only: only sequence emails after the first step.
+        mailboxes: only rows going out from one of these (a row's "" is
+        ``primary``); None: every mailbox."""
+        if mailboxes is not None and not mailboxes:
+            return []
         where, params = [], []
+        if mailboxes is not None:
+            sql, mailbox_params = _mailbox_filter("o", mailboxes, primary)
+            where.append(sql)
+            params += mailbox_params
         if kind:
             where.append("kind = ?")
             params.append(kind)
@@ -1114,6 +1191,8 @@ class StateManager:
         stored_verdicts: tuple[str, str, str] | None = None,
         moved_back_prefix: str = "",
         has_cached_verdict: Callable[[dict], Awaitable[bool]] | None = None,
+        mailboxes: list[str] | None = None,
+        primary: str = "",
     ) -> int:
         """Approved cold email due by ``due_before``, leaving out follow-ups
         whose previous step hasn't gone out yet (as get_outbox's
@@ -1125,7 +1204,11 @@ class StateManager:
         moved_back_prefix: also count approved cold email whose error starts
         with it (moved back by the check), due or not.
         has_cached_verdict: optional per-recipient cache check, for facts
-        such as country that differ between recipients. Never calls an API."""
+        such as country that differ between recipients. Never calls an API.
+        mailboxes / primary: only rows going out from one of these, as in
+        get_outbox; None counts every mailbox."""
+        if mailboxes is not None and not mailboxes:
+            return 0
         due = "(o.send_at IS NULL OR o.send_at <= ?)"
         params: list = [due_before]
         if moved_back_prefix:
@@ -1138,6 +1221,10 @@ class StateManager:
                "AND p.campaign_id = o.campaign_id AND p.kind = 'sequence' "
                "AND p.step = o.step - 1 "
                "AND p.status IN ('pending_review', 'approved', 'sending')))")
+        if mailboxes is not None:
+            mailbox_sql, mailbox_params = _mailbox_filter("o", mailboxes, primary)
+            sql += f" AND {mailbox_sql}"
+            params += mailbox_params
         if stored_verdicts:
             # A verdict is stored as JSON under prefix + the lower-cased
             # address, with the facts it was decided on and when.
@@ -1178,13 +1265,15 @@ class StateManager:
 
     _OUTBOX_COLUMNS = frozenset({
         "status", "error", "message_id", "thread_ref", "sent_at",
-        "subject", "body", "send_at", "provider",
+        "subject", "body", "send_at", "provider", "mailbox",
     })
 
     async def update_outbox_item(self, item_id: str, **kwargs):
         fields = {k: v for k, v in kwargs.items() if k in self._OUTBOX_COLUMNS}
         if not fields:
             return
+        if "mailbox" in fields:
+            fields["mailbox"] = _norm(fields["mailbox"])
         sets = ", ".join(f"{k} = ?" for k in fields)
         async with self._connect() as db:
             await db.execute(
@@ -1207,6 +1296,20 @@ class StateManager:
                 "WHERE id = ? AND status = 'approved' "
                 "AND (send_at IS NULL OR send_at <= ?)",
                 (now, item_id, now),
+            )
+            await db.commit()
+            return cursor.rowcount == 1
+
+    async def release_outbox_item(self, item_id: str) -> bool:
+        """Hand a claimed item back: sending → approved, error cleared, for
+        a send that certainly never happened (no call was made, or the
+        mailbox refused it outright). False when it isn't being sent any
+        more, so it is left as it is."""
+        async with self._connect() as db:
+            cursor = await db.execute(
+                "UPDATE outbox SET status = 'approved', error = '', updated_at = ? "
+                "WHERE id = ? AND status = 'sending'",
+                (_utcnow().isoformat(), item_id),
             )
             await db.commit()
             return cursor.rowcount == 1
@@ -1443,6 +1546,26 @@ class StateManager:
         if kind:
             sql += " AND kind = ?"
             params += (kind,)
+        async with self._connect() as db:
+            async with db.execute(sql, params) as cursor:
+                return (await cursor.fetchone())[0]
+
+    async def count_outbox_sent_since(self, since_iso: str, mailbox: str | None = None,
+                                      primary: str = "", kind: str | None = None) -> int:
+        """Emails sent since ``since_iso`` (a naive UTC ISO time, e.g. 24
+        hours ago for a rolling day). ``mailbox``: only those it sent ("" is
+        ``primary``, and so are rows with no mailbox); None: every mailbox.
+        ``kind``: only that kind ("sequence", "reply")."""
+        sql = ("SELECT COUNT(*) FROM outbox o WHERE o.status = 'sent' "
+               "AND julianday(o.sent_at) >= julianday(?)")
+        params: list = [since_iso]
+        if kind:
+            sql += " AND o.kind = ?"
+            params.append(kind)
+        if mailbox is not None:
+            mailbox_sql, mailbox_params = _mailbox_filter("o", [mailbox], primary)
+            sql += f" AND {mailbox_sql}"
+            params += mailbox_params
         async with self._connect() as db:
             async with db.execute(sql, params) as cursor:
                 return (await cursor.fetchone())[0]
@@ -2327,13 +2450,13 @@ class StateManager:
             await db.execute(
                 """INSERT INTO conversations
                    (id, prospect_id, campaign_id, channel, thread_json,
-                    intent, stage, status, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    intent, stage, status, created_at, updated_at, mailbox)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     convo.id, convo.prospect_id, convo.campaign_id,
                     convo.channel, convo.thread_json(), convo.intent,
                     convo.stage, convo.status, convo.created_at.isoformat(),
-                    convo.updated_at.isoformat(),
+                    convo.updated_at.isoformat(), _norm(convo.mailbox),
                 ),
             )
             await db.commit()
@@ -2350,6 +2473,7 @@ class StateManager:
                     return None
                 d = dict(row)
                 d["thread"] = Conversation.thread_from_json(d.pop("thread_json"))
+                d["mailbox"] = d.get("mailbox") or ""
                 return Conversation(**d)
 
     async def get_conversations_by_status(self, status: str) -> list[Conversation]:
@@ -2363,6 +2487,7 @@ class StateManager:
                 for r in rows:
                     d = dict(r)
                     d["thread"] = Conversation.thread_from_json(d.pop("thread_json"))
+                    d["mailbox"] = d.get("mailbox") or ""
                     convos.append(Conversation(**d))
                 return convos
 
@@ -2373,6 +2498,8 @@ class StateManager:
         invalid = set(kwargs) - _CONVERSATION_COLUMNS
         if invalid:
             raise ValueError(f"Invalid conversation column(s): {sorted(invalid)}")
+        if "mailbox" in kwargs:
+            kwargs["mailbox"] = _norm(kwargs["mailbox"])
         set_clause = ", ".join(f"{key} = ?" for key in kwargs)
         async with self._connect() as db:
             await db.execute(

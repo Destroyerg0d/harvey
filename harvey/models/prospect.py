@@ -36,6 +36,8 @@ class Prospect(BaseModel):
     personalization_notes: str = ""
     # IANA time zone for the send window ("Europe/Oslo"), once known.
     timezone: str = ""
+    # The mailbox that emails them (harvey/mailboxes.py); "" is the primary.
+    mailbox: str = ""
     # legacy fields kept for backwards compat with existing code
     company: str = ""
     industry: str = ""
@@ -43,7 +45,7 @@ class Prospect(BaseModel):
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
 
-    @field_validator("email")
+    @field_validator("email", "mailbox")
     @classmethod
     def _normalize_email(cls, v: str) -> str:
         """Emails are dedup keys — normalize so 'Jane@X.com' == 'jane@x.com'."""
