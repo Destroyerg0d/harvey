@@ -1570,6 +1570,180 @@ class StateManager:
             async with db.execute(sql, params) as cursor:
                 return (await cursor.fetchone())[0]
 
+    # ── Mailboxes (harvey/mailboxes.py) ──
+
+    async def colleague_pairs(self, prospect_ids: list[str]) -> list[tuple[str, str]]:
+        """The pairs among these prospects who work together (_colleagues)."""
+        ids = sorted(set(prospect_ids))
+        if len(ids) < 2:
+            return []
+        marks = ", ".join("?" for _ in ids)
+        async with self._connect() as db:
+            async with db.execute(
+                f"SELECT p.id, c.id FROM prospects p, prospects c "
+                f"WHERE p.id IN ({marks}) AND c.id IN ({marks}) AND p.id < c.id "
+                f"AND {_colleagues('p', 'c')}", (*ids, *ids),
+            ) as cursor:
+                return [(r[0], r[1]) for r in await cursor.fetchall()]
+
+    async def company_mailbox(self, prospect_ids: list[str]) -> str | None:
+        """The stored mailbox ("" for the primary) of whoever at these
+        prospects' companies (them included) Harvey has already dealt with:
+        an outbox row, a conversation, a hand send, or a status past new.
+        Someone in a conversation first, then whoever was written to first.
+        None when nobody has been: then a mailbox one of them was given
+        earlier (and nothing written yet) is returned instead, or None."""
+        ids = sorted(set(prospect_ids))
+        if not ids:
+            return None
+        marks = ", ".join("?" for _ in ids)
+        at_company = (f"EXISTS (SELECT 1 FROM prospects p WHERE p.id IN ({marks}) "
+                      f"AND (p.id = c.id OR {_colleagues('p', 'c')}))")
+        dealt_with = (
+            "(COALESCE(c.status, 'new') NOT IN ('new', 'write_failed') "
+            "OR EXISTS (SELECT 1 FROM outbox o WHERE o.prospect_id = c.id) "
+            "OR EXISTS (SELECT 1 FROM conversations v WHERE v.prospect_id = c.id) "
+            "OR EXISTS (SELECT 1 FROM settings s WHERE s.key = ? || c.id))")
+        async with self._connect() as db:
+            async with db.execute(
+                "SELECT COALESCE(c.mailbox, '') FROM prospects c "
+                f"WHERE {at_company} AND {dealt_with} "
+                "ORDER BY EXISTS (SELECT 1 FROM conversations v WHERE v.prospect_id = c.id) DESC, "
+                "(SELECT MIN(o.created_at) FROM outbox o WHERE o.prospect_id = c.id) IS NULL, "
+                "(SELECT MIN(o.created_at) FROM outbox o WHERE o.prospect_id = c.id), "
+                "c.created_at LIMIT 1",
+                (*ids, MANUAL_SEND_KEY),
+            ) as cursor:
+                row = await cursor.fetchone()
+            if row is not None:
+                return row[0] or ""
+            # Nobody dealt with yet: keep a company on the mailbox one of
+            # them was given before (a cycle whose drafts failed, say).
+            async with db.execute(
+                "SELECT lower(trim(c.mailbox)) FROM prospects c "
+                f"WHERE {at_company} AND trim(COALESCE(c.mailbox, '')) != '' "
+                "ORDER BY c.created_at LIMIT 1", ids,
+            ) as cursor:
+                row = await cursor.fetchone()
+        return row[0] if row is not None else None
+
+    async def mailbox_loads(self, primary: str) -> dict[str, int]:
+        """{address: n}: each mailbox's cold first emails not sent yet
+        (pending, approved or going out), plus the new prospects given to it
+        that nothing is written for yet. "" counts as ``primary``. Emails it
+        sent recently are counted by count_outbox_sent_since."""
+        loads: dict[str, int] = {}
+        async with self._connect() as db:
+            async with db.execute(
+                f"SELECT {_mailbox_of('o')}, COUNT(*) FROM outbox o "
+                "WHERE o.kind = 'sequence' AND o.step = 1 "
+                "AND o.status IN ('pending_review', 'approved', 'sending') GROUP BY 1",
+                (_norm(primary),),
+            ) as cursor:
+                for address, n in await cursor.fetchall():
+                    loads[address] = loads.get(address, 0) + n
+            async with db.execute(
+                f"SELECT {_mailbox_of('p')}, COUNT(*) FROM prospects p "
+                "WHERE p.status = 'new' AND trim(COALESCE(p.mailbox, '')) != '' "
+                "AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.prospect_id = p.id) GROUP BY 1",
+                (_norm(primary),),
+            ) as cursor:
+                for address, n in await cursor.fetchall():
+                    loads[address] = loads.get(address, 0) + n
+        return loads
+
+    async def prospects_linked_to_mailboxes(self, mailboxes: list[str], primary: str) -> set[str]:
+        """Everyone a reply in one of these inboxes could come from: the
+        prospects given to them, the ones emailed from them, and everyone at
+        those people's companies. Wider than _colleagues on purpose (same
+        company, or the same email domain that isn't a shared one): it
+        decides who must wait while that inbox can't be read."""
+        if not mailboxes:
+            return set()
+        given, given_params = _mailbox_filter("p", mailboxes, primary)
+        sent, sent_params = _mailbox_filter("o", mailboxes, primary)
+        free = ", ".join(f"'{d}'" for d in sorted(FREE_MAIL_DOMAINS))
+        sql = (
+            "WITH linked(id) AS ("
+            f"SELECT p.id FROM prospects p WHERE {given} "
+            "UNION SELECT o.prospect_id FROM outbox o WHERE "
+            "(o.status IN ('sent', 'sending') OR (o.status = 'failed' AND substr(o.error, 1, ?) = ?)) "
+            f"AND {sent}) "
+            "SELECT id FROM linked "
+            "UNION SELECT c.id FROM prospects c WHERE COALESCE(c.company_id, '') != '' "
+            "AND c.company_id IN (SELECT q.company_id FROM prospects q JOIN linked l ON l.id = q.id) "
+            "UNION SELECT c.id FROM prospects c WHERE instr(c.email, '@') > 0 "
+            f"AND {_email_domain('c')} NOT IN ({free}) AND {_email_domain('c')} IN "
+            f"(SELECT {_email_domain('q')} FROM prospects q JOIN linked l ON l.id = q.id "
+            "WHERE instr(q.email, '@') > 0)"
+        )
+        params = [*given_params, len(MAYBE_SENT_PREFIX), MAYBE_SENT_PREFIX, *sent_params]
+        async with self._connect() as db:
+            async with db.execute(sql, params) as cursor:
+                return {r[0] for r in await cursor.fetchall() if r[0]}
+
+    async def movable_prospects(self, mailbox: str, primary: str) -> list[str]:
+        """Prospects given to ``mailbox`` that may move to another one: no
+        email has gone (or may have gone) to them or anyone at their company,
+        none of them wrote in or was emailed by hand, and nothing has stopped
+        them. Oldest first."""
+        mine, params = _mailbox_filter("p", [mailbox], primary)
+        dealt_with = (
+            "(COALESCE(c.status, 'new') NOT IN ('new', 'queued', 'write_failed') "
+            "OR EXISTS (SELECT 1 FROM outbox o WHERE o.prospect_id = c.id AND "
+            "(o.status IN ('sent', 'sending') OR (o.status = 'failed' AND substr(o.error, 1, ?) = ?))) "
+            "OR EXISTS (SELECT 1 FROM conversations v WHERE v.prospect_id = c.id) "
+            "OR EXISTS (SELECT 1 FROM settings s WHERE s.key = ? || c.id))")
+        async with self._connect() as db:
+            async with db.execute(
+                f"SELECT p.id FROM prospects p WHERE {mine} "
+                "AND p.status IN ('new', 'queued', 'write_failed') "
+                "AND NOT EXISTS (SELECT 1 FROM prospects c WHERE "
+                f"(c.id = p.id OR {_colleagues('p', 'c')}) AND {dealt_with}) "
+                "ORDER BY p.created_at",
+                (*params, len(MAYBE_SENT_PREFIX), MAYBE_SENT_PREFIX, MANUAL_SEND_KEY),
+            ) as cursor:
+                return [r[0] for r in await cursor.fetchall()]
+
+    async def move_prospects_to_mailbox(self, prospect_ids: list[str], mailbox: str) -> int:
+        """Give these prospects, and what's queued for them that hasn't gone
+        out (pending or approved), to ``mailbox``. Returns the rows moved."""
+        ids = sorted(set(prospect_ids))
+        if not ids:
+            return 0
+        marks = ", ".join("?" for _ in ids)
+        async with self._connect() as db:
+            await db.execute(
+                f"UPDATE prospects SET mailbox = ? WHERE id IN ({marks})", (_norm(mailbox), *ids))
+            cursor = await db.execute(
+                f"UPDATE outbox SET mailbox = ?, updated_at = ? WHERE prospect_id IN ({marks}) "
+                "AND status IN ('pending_review', 'approved')",
+                (_norm(mailbox), _utcnow().isoformat(), *ids))
+            await db.commit()
+            return cursor.rowcount
+
+    async def find_sent_outbox_to(self, addresses, mailboxes: list[str] | None = None,
+                                  primary: str = "") -> dict | None:
+        """The latest email sent to one of ``addresses`` (from one of
+        ``mailboxes``, when given), or None. For a bounce that doesn't say
+        which email it answers."""
+        wanted = sorted({_norm(a) for a in addresses if _norm(a)})
+        if not wanted:
+            return None
+        sql = (f"SELECT * FROM outbox o WHERE o.status = 'sent' "
+               f"AND lower(o.to_email) IN ({', '.join('?' for _ in wanted)})")
+        params: list = list(wanted)
+        if mailboxes is not None:
+            mailbox_sql, mailbox_params = _mailbox_filter("o", mailboxes, primary)
+            sql += f" AND {mailbox_sql}"
+            params += mailbox_params
+        sql += " ORDER BY o.sent_at DESC LIMIT 1"
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(sql, params) as cursor:
+                row = await cursor.fetchone()
+                return dict(row) if row else None
+
     async def get_step_delay_days(self, campaign_id: str, step: int) -> int | None:
         """The campaign's planned wait before `step` (days after the step
         before it), or None when the campaign or step isn't known."""

@@ -16,6 +16,7 @@ address (``paused_key(address)`` and so on).
 """
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -28,6 +29,9 @@ BOUNCE_KEY_PREFIX = "bounce_count:"
 READ_OK_KEY_PREFIX = "mailbox_read_ok:"
 # Since when it has been unusable (no token, wrong account, refused).
 DOWN_SINCE_KEY_PREFIX = "mailbox_down_since:"
+# The mailboxes the running Harvey read from its config when it started
+# (in_use_value), so `harvey status` can say when a restart is needed.
+IN_USE_KEY = "mailboxes_in_use"
 
 
 def _norm(value: str | None) -> str:
@@ -126,6 +130,11 @@ def primary_mailbox(config) -> Mailbox:
     return next((m for m in mailboxes if m.is_primary), mailboxes[0])
 
 
+def in_use_value(config) -> str:
+    """The mailboxes ``config`` sends from, as stored under IN_USE_KEY."""
+    return ",".join(m.email for m in configured_mailboxes(config))
+
+
 def mailbox_for(config, value: str | None) -> Mailbox | None:
     """The configured mailbox ``value`` names ("" or None: the primary),
     or None when it isn't one of them."""
@@ -164,3 +173,129 @@ def providers_for(config, env) -> dict:
         return {primary_mailbox(config).email: provider} if provider is not None else {}
     from harvey.integrations.gmail import GmailProvider
     return {m.email: GmailProvider(config, env, mailbox=m) for m in configured_mailboxes(config)}
+
+
+# The switch that stops every mailbox (the Sender's KILL_SWITCH_KEY).
+GLOBAL_PAUSE_KEY = "sending_paused"
+
+# With mailboxes configured, every email the Writer drafts signs off with
+# this line, and the Sender fills it in from the mailbox the email goes out
+# from, when it goes. A prospect moved to another mailbox signs with that one.
+SENDER_FIRST_NAME_TAG = "{{sender_first_name}}"
+_SENDER_TAG_RE = re.compile(r"\{\{\s*sender_first_name\s*\}\}", re.IGNORECASE)
+
+
+def render_sender(text: str, mailbox: Mailbox | None) -> str:
+    """``text`` with {{sender_first_name}} filled in from ``mailbox``
+    (unchanged without one)."""
+    if mailbox is None or not text:
+        return text or ""
+    return _SENDER_TAG_RE.sub(lambda _: mailbox.first_name, text)
+
+
+def _token_stamp(path) -> tuple | None:
+    try:
+        stat = Path(path).stat()
+    except OSError:
+        return None
+    return stat.st_mtime_ns, stat.st_size
+
+
+class MailboxProviders:
+    """Each configured mailbox's provider (what providers_for builds), made
+    the first time it's needed and again whenever its token file changes:
+    a mailbox signed in again (harvey gmail auth --mailbox) works without a
+    restart, and its new sign-in gets a fresh account check.
+
+    ``factory(mailbox)`` builds one; tests replace it."""
+
+    def __init__(self, config, env, factory=None):
+        self.config = config
+        self.env = env
+        self.factory = factory
+        self._built: dict[str, tuple] = {}
+
+    def get(self, mailbox: Mailbox):
+        stamp = _token_stamp(mailbox.token_path)
+        have = self._built.get(mailbox.email)
+        if have is not None and have[1] == stamp:
+            return have[0]
+        if self.factory is not None:
+            provider = self.factory(mailbox)
+        else:
+            from harvey.integrations.mail_provider import get_mail_provider
+            provider = get_mail_provider(self.config, self.env, mailbox=mailbox)
+        self._built[mailbox.email] = (provider, stamp)
+        return provider
+
+
+def connection_problem(mailbox: Mailbox, provider) -> str:
+    """Why ``mailbox`` can't send or read at all ("" when it can): no
+    sign-in, Gmail not set up, or a sign-in for another account. These are
+    what count towards it being down (``down_since_key``)."""
+    if not is_connected(mailbox):
+        return (f"{mailbox.email} isn't signed in. Run "
+                f"'harvey gmail auth --mailbox {mailbox.email}'.")
+    if provider is None or not provider.is_configured():
+        return f"{mailbox.email}: Gmail isn't set up (GMAIL_CLIENT_ID / GMAIL_CLIENT_SECRET)."
+    return getattr(provider, "unavailable_reason", "") or ""
+
+
+async def pause_problem(state, mailbox: Mailbox) -> str:
+    """Why sending from ``mailbox`` is paused ("" when it isn't): all
+    sending, or this mailbox alone (its own switch, or its bounce rate)."""
+    if await state.get_setting(GLOBAL_PAUSE_KEY):
+        return "all sending is paused"
+    paused = await state.get_setting(paused_key(mailbox.email))
+    return f"sending from {mailbox.email} is paused ({paused})" if paused else ""
+
+
+async def takes_new_prospects(state, mailbox: Mailbox, provider) -> str:
+    """Why ``mailbox`` can't be given new prospects now ("" when it can):
+    as connection_problem and pause_problem, and not while it is down."""
+    problem = connection_problem(mailbox, provider) or await pause_problem(state, mailbox)
+    if problem:
+        return problem
+    down = await state.get_setting(down_since_key(mailbox.email))
+    return f"{mailbox.email} has been failing since {down}" if down else ""
+
+
+async def least_loaded(state, config, candidates: list[Mailbox], extra: dict | None = None) -> Mailbox | None:
+    """The one of ``candidates`` with the least on its plate: cold first
+    emails waiting to go, emails sent in the last 7 days, and new prospects
+    given to it that nothing is written for yet (state.mailbox_loads), plus
+    ``extra`` ({address: n}). Ties go to the earlier one in the config."""
+    if not candidates:
+        return None
+    from datetime import datetime, timedelta, timezone
+    primary = primary_mailbox(config).email
+    week_ago = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=7)).isoformat()
+    loads = await state.mailbox_loads(primary)
+    extra = extra or {}
+
+    async def load(m: Mailbox) -> int:
+        sent = await state.count_outbox_sent_since(week_ago, mailbox=m.email, primary=primary)
+        return loads.get(m.email, 0) + sent + extra.get(m.email, 0)
+
+    scored = [(await load(m), i, m) for i, m in enumerate(candidates)]
+    return min(scored, key=lambda x: (x[0], x[1]))[2]
+
+
+async def companies_of(state, prospect_ids: list[str]) -> list[list[str]]:
+    """``prospect_ids`` grouped by company (state.colleague_pairs), in the
+    order they were given, so each company goes to one mailbox."""
+    ids = list(dict.fromkeys(prospect_ids))
+    parent = {pid: pid for pid in ids}
+
+    def root(pid):
+        while parent[pid] != pid:
+            parent[pid] = parent[parent[pid]]
+            pid = parent[pid]
+        return pid
+
+    for a, b in await state.colleague_pairs(ids):
+        parent[root(a)] = root(b)
+    groups: dict[str, list[str]] = {}
+    for pid in ids:
+        groups.setdefault(root(pid), []).append(pid)
+    return list(groups.values())
