@@ -1266,7 +1266,12 @@ async function loadSettings() {
 
   // Gmail auth status chip
   const g = document.getElementById('gmail-status');
-  if (g) {
+  if (g && data.mailboxes_configured) {
+    // Several mailboxes: each signs in with harvey gmail auth --mailbox.
+    const n = data.mailboxes_connected || 0, of = data.mailboxes_configured;
+    g.className = 'email-tag ' + (n === of ? 'verified' : n ? 'risky' : 'guess');
+    g.textContent = n + ' of ' + of + ' mailboxes connected';
+  } else if (g) {
     if (data.gmail_authorized) { g.className = 'email-tag verified'; g.textContent = 'authorized'; }
     else if (data.gmail_client_secret_set) { g.className = 'email-tag risky'; g.textContent = 'run: harvey gmail auth'; }
     else { g.className = 'email-tag guess'; g.textContent = 'not set up'; }
@@ -1639,7 +1644,14 @@ async function loadOutbox() {
   banner.innerHTML = sendingModeBanner(_sendingMode) + (data.paused
     ? '<div class="banner bad">' + icon('alert') + '<div><b>Sending is paused</b>' +
         '<p>' + escHtml(data.paused) + '. Approved mail stays queued until you resume.</p></div></div>'
-    : '');
+    : '') +
+    // Several mailboxes: one paused on its own (by hand, or its bounce rate).
+    (data.paused_mailboxes || []).map(m =>
+      '<div class="banner bad">' + icon('alert') + '<div><b>Sending from ' + escHtml(m.email) +
+        ' is paused</b><p>' + escHtml(m.reason) + '. Its approved mail waits; the other mailboxes ' +
+        'carry on.</p></div>' +
+        '<button class="btn btn-secondary btn-sm" onclick="sendingToggle(\'resume\', ' + jsq(m.email) + ')">' +
+        'Resume ' + escHtml(m.email) + '</button></div>').join('');
   // Only once there is mail to warn about: a fresh install sends nothing.
   const anyMail = pending.length || (data.approved || []).length || (data.sent || []).length;
   if (data.compliance_notice && anyMail) {
@@ -1667,17 +1679,19 @@ async function loadOutbox() {
     return h + '</tbody></table></div>';
   };
 
+  // Several mailboxes: which one each email goes out from.
+  const from = data.paused_mailboxes ? [['From', r => r.mailbox_address, true]] : [];
   list.innerHTML =
     table('Approved &amp; scheduled', data.approved, [
-      ['To', r => r.to_email], ['Step', r => r.step], ['Subject', r => r.subject],
+      ['To', r => r.to_email], ...from, ['Step', r => r.step], ['Subject', r => r.subject],
       ['Sends', r => r.status === 'sending' ? badge(r.status) : escHtml(formatDate(r.send_at)), true, true],
     ]) +
     table('Recently sent', data.sent, [
-      ['To', r => r.to_email], ['Step', r => r.step], ['Subject', r => r.subject],
+      ['To', r => r.to_email], ...from, ['Step', r => r.step], ['Subject', r => r.subject],
       ['Sent', r => formatDate(r.sent_at), true],
     ]) +
     table('Didn\'t send', data.failed, [
-      ['To', r => r.to_email], ['Status', r => badge(r.status), false, true],
+      ['To', r => r.to_email], ...from, ['Status', r => badge(r.status), false, true],
       ['Reason', r => r.error, true], ['Updated', r => formatDate(r.updated_at), true],
     ]);
 }
@@ -1857,8 +1871,8 @@ function renderDesk(items, i) {
         fixedSubject + ' oninput="deskKeep()">' +
       '<textarea id="desk-body" class="desk-edit-body" rows="14" oninput="deskKeep()">' +
         escHtml(unsaved.body) + '</textarea>'
-    : '<div class="subject">' + escHtml(cur.subject || '(no subject)') + '</div>' +
-      '<div class="body">' + escHtml(cur.body) + '</div>';
+    : '<div class="subject">' + escHtml(fillSender(cur.subject || '(no subject)', cur)) + '</div>' +
+      '<div class="body">' + escHtml(fillSender(cur.body, cur)) + '</div>';
   // Cold email leaves with the footer underneath; show it as it will go out.
   // Not added again when the body already ends with it, as in the Sender.
   const added = cur.kind === 'sequence' && !(cur.body || '').trimEnd().endsWith(_desk.footer)
@@ -1880,6 +1894,7 @@ function renderDesk(items, i) {
     '<div class="desk-list">' + rail + '</div>' +
     '<div class="desk-pane">' +
       '<div class="to-line">To <b>' + escHtml(cur.to_email) + '</b>' +
+        (cur.mailbox_address ? ' <span class="muted">from ' + escHtml(cur.mailbox_address) + '</span>' : '') +
         '<span class="tag">' + (cur.kind === 'reply' ? 'Reply' : 'Email ' + escHtml(String(cur.step))) + '</span>' +
         '<span class="muted">sends ' + formatDate(cur.send_at) + '</span></div>' +
       renderDeskContext(cur.context) +
@@ -1988,9 +2003,11 @@ async function outboxApproveAll() {
   loadOutbox();
 }
 
-async function sendingToggle(action) {
-  const data = await api('/api/sending/' + action, {method: 'POST'});
-  if (data && data.success) showToast(action === 'pause' ? 'Sending paused.' : 'Sending resumed.', 'success');
+async function sendingToggle(action, mailbox) {
+  const data = await api('/api/sending/' + action +
+    (mailbox ? '?mailbox=' + encodeURIComponent(mailbox) : ''), {method: 'POST'});
+  if (data && data.success) showToast((mailbox ? mailbox + ': s' : 'S') +
+    (action === 'pause' ? 'ending paused.' : 'ending resumed.'), 'success');
   else showToast(failMsg(data, action === 'pause' ? 'Could not pause sending.' : 'Could not resume sending.'), 'error');
   loadOutbox();
 }
@@ -2271,10 +2288,19 @@ function fillMergeVars(text, r) {
     company: r.company || '', title: r.title || '',
     personalization: r.personalization_notes || '',
   };
+  // Several mailboxes: the sign-off is the first name of their mailbox.
+  if (r.sender_first_name) vals.sender_first_name = r.sender_first_name;
   return String(text || '').replace(/\{\{\s*(\w+)\s*\}\}/g, (m, k) => {
     k = k.toLowerCase();
     return Object.prototype.hasOwnProperty.call(vals, k) ? vals[k] : m;
   });
+}
+
+// The sign-off tag alone, as the Sender fills it in from the row's mailbox
+// (several mailboxes; the row says which first name it becomes).
+function fillSender(text, row) {
+  const name = row && row.sender_first_name;
+  return name ? String(text || '').replace(/\{\{\s*sender_first_name\s*\}\}/gi, name) : String(text || '');
 }
 
 let _gmailBusy = false;  // one compose window per click, never two
@@ -2291,7 +2317,7 @@ async function openInGmail(ci, si, ri) {
   // authuser picks the Google account Harvey sends as, not just whichever
   // one the browser happens to be signed into.
   const url = 'https://mail.google.com/mail/?view=cm&fs=1' +
-    (c.send_as ? '&authuser=' + encodeURIComponent(c.send_as) : '') +
+    ((r.send_as || c.send_as) ? '&authuser=' + encodeURIComponent(r.send_as || c.send_as) : '') +
     '&to=' + encodeURIComponent(r.email) +
     '&su=' + encodeURIComponent(fillMergeVars(step.subject, r)) +
     '&body=' + encodeURIComponent(body);
@@ -2504,7 +2530,8 @@ function convoCard(c) {
   return '<div class="convo-card"><div class="convo-head">' +
     '<span class="avatar">' + initials(c.first_name, c.last_name) + '</span>' +
     '<div><h3>' + escHtml(name) + '</h3><div class="sub">' +
-      escHtml([c.company, c.prospect_email].filter(Boolean).join(' · ')) + ' · ' + relTime(c.updated_at) + '</div></div>' +
+      escHtml([c.company, c.prospect_email].filter(Boolean).join(' · ')) + ' · ' + relTime(c.updated_at) +
+      (c.mailbox_address ? ' · with ' + escHtml(c.mailbox_address) : '') + '</div></div>' +
     // An escalation's intent badge says the same as its status: show one.
     '<div class="tags">' + (c.intent && !(c.status === 'needs_human' && c.intent === 'escalate') ? badge(c.intent) : '') +
       stage + badge(c.status) + '</div></div>' +

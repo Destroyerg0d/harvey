@@ -361,9 +361,13 @@ async def get_settings():
 
     # Gmail is authorized once harvey gmail auth has stored a token file.
     gmail_token = (PROJECT_ROOT / "data" / "gmail_token.json").is_file()
+    # Several mailboxes: how many of them are signed in.
+    mailboxes = _configured_mailboxes()
 
     return {
         "provider": _current_provider(),
+        "mailboxes_configured": len(mailboxes),
+        "mailboxes_connected": sum(1 for m in mailboxes if _mailbox_connected(m)),
         # Non-secret values echo back so fields repopulate; secrets are
         # presence-only so keys never leave the box.
         "instantly_api_key_set": is_set("INSTANTLY_API_KEY"),
@@ -1017,7 +1021,7 @@ async def get_outbox_api():
         # A send cut off mid-way shows up under Didn't send even when Harvey
         # isn't running.
         await state.fail_stale_sending_outbox()
-        return {
+        out = {
             **_compliance_view(),
             "paused": await state.get_setting("sending_paused"),
             "pending": await _with_context(
@@ -1032,6 +1036,19 @@ async def get_outbox_api():
                 "SELECT * FROM outbox WHERE status IN ('failed','rejected','cancelled') "
                 "ORDER BY updated_at DESC LIMIT 25")),
         }
+        names = _mailbox_names()
+        if names:
+            # Several mailboxes: which one each email goes out from, and the
+            # first name its sign-off ({{sender_first_name}}) becomes.
+            for key in ("pending", "approved", "sent", "failed"):
+                for row in out[key]:
+                    _add_mailbox(row, names)
+            from harvey.mailboxes import paused_key
+            out["paused_mailboxes"] = [
+                {"email": address, "reason": reason}
+                for address in names
+                if (reason := await state.get_setting(paused_key(address)))]
+        return out
     except Exception as e:
         return {"error": str(e)}
 
@@ -1145,11 +1162,12 @@ async def outbox_edit(item_id: str, request: Request):
         # instead of failing quietly at send time. Content rules only: the
         # recipient isn't something an edit can change.
         from harvey.gate import pre_send_check
-        checked = text
+        # The sign-off tag is filled in when it sends, from its mailbox.
+        checked = _as_sent_from_row(text, item)
         footer = _compliance_view()["footer"]
         if item.get("kind") == "sequence" and footer and not text.rstrip().endswith(footer):
-            checked = text.rstrip() + "\n\n" + footer  # as the Sender will send it
-        gate = pre_send_check("reviewer@example.com", subject, checked)
+            checked = checked.rstrip() + "\n\n" + footer  # as the Sender will send it
+        gate = pre_send_check("reviewer@example.com", _as_sent_from_row(subject, item), checked)
         if not gate:
             return JSONResponse({"success": False,
                                  "message": "The sender would have blocked this: "
@@ -1190,6 +1208,11 @@ def _harvey_can_send() -> bool:
         if not email.enabled or legacy_sending_held(config):
             return False
         if (email.provider or "").strip().lower() in NATIVE_PROVIDERS:
+            from harvey import mailboxes as mb
+            if mb.is_multi(config):
+                # Any one of the mailboxes signed in is Harvey sending.
+                return any(get_mail_provider(config, env, mailbox=m).is_configured()
+                           for m in mb.configured_mailboxes(config))
             provider = get_mail_provider(config, env)
             return bool(provider and provider.is_configured())
         return bool(env.instantly_api_key)
@@ -1204,6 +1227,55 @@ def _send_as() -> str:
         return load_config().persona.email or ""
     except Exception:
         return ""
+
+
+def _configured_mailboxes() -> list:
+    """channels.email.mailboxes as Mailbox objects ([] with one mailbox,
+    or when the config can't be read)."""
+    try:
+        from harvey import mailboxes as mb
+        from harvey.config import load_config
+        config = load_config()
+        return mb.configured_mailboxes(config) if mb.is_multi(config) else []
+    except Exception:
+        return []
+
+
+def _mailbox_connected(mailbox) -> bool:
+    from harvey import mailboxes as mb
+    return mb.is_connected(mailbox)
+
+
+def _mailbox_names() -> dict[str, str]:
+    """{address: first name} of every mailbox, primary first, with several
+    configured; {} with one (nothing changes on the page then)."""
+    boxes = _configured_mailboxes()
+    return {m.email: m.first_name
+            for m in sorted(boxes, key=lambda m: not m.is_primary)}
+
+
+def _row_mailbox(value, names: dict[str, str]) -> str:
+    """A stored mailbox as an address: "" is the primary (the first name)."""
+    address = (value or "").strip().lower()
+    return address or next(iter(names), "")
+
+
+def _add_mailbox(row: dict, names: dict[str, str]):
+    address = _row_mailbox(row.get("mailbox"), names)
+    row["mailbox_address"] = address
+    row["sender_first_name"] = names.get(address, "")
+
+
+def _as_sent_from_row(text: str, item: dict) -> str:
+    """``text`` with the sign-off tag filled in from the row's mailbox (as
+    the Sender will), with several mailboxes; unchanged otherwise."""
+    names = _mailbox_names()
+    if not names:
+        return text
+    first = names.get(_row_mailbox(item.get("mailbox"), names), "")
+    import re
+    return re.sub(r"\{\{\s*sender_first_name\s*\}\}", lambda _: first, text,
+                  flags=re.IGNORECASE) if first else text
 
 
 def _compliance_view() -> dict:
@@ -1363,12 +1435,25 @@ async def outbox_reject(item_id: str):
 
 
 @app.post("/api/sending/{action}")
-async def sending_toggle(action: str):
+async def sending_toggle(action: str, mailbox: str = ""):
+    """The kill switch for all sending, or with ``mailbox`` (several
+    mailboxes) that mailbox's own: resuming one resets its bounce count."""
     if action not in ("pause", "resume"):
         return JSONResponse({"success": False, "message": "unknown action"}, status_code=400)
     try:
         state = _state()
         await state.init_db()
+        if mailbox:
+            from harvey.mailboxes import bounce_key, paused_key
+            address = mailbox.strip().lower()
+            if address not in _mailbox_names():
+                return _refuse(f"{address} isn't one of the configured mailboxes.", 404)
+            if action == "pause":
+                await state.set_setting(paused_key(address), "paused from dashboard")
+            else:
+                await state.set_setting(paused_key(address), "")
+                await state.set_setting(bounce_key(address), "0")
+            return {"success": True}
         if action == "pause":
             await state.set_setting("sending_paused", "paused from dashboard")
         else:
@@ -1407,6 +1492,7 @@ async def get_campaigns():
     rows = await query_db("SELECT * FROM campaigns ORDER BY created_at DESC LIMIT 100")
     harvey_sends = _harvey_can_send()
     send_as = "" if harvey_sends else _send_as()
+    names = _mailbox_names()
     footer = _compliance_view()["footer"]
     committed = await _harvey_committed_ids()
     hand_sent = await _hand_sent_ids()
@@ -1423,7 +1509,7 @@ async def get_campaigns():
         ids = row["prospect_ids"]
         row["recipients"] = await query_db(
             f"SELECT id, email, first_name, last_name, company, title, status, email_status, "
-            f"source, personalization_notes FROM prospects "
+            f"source, personalization_notes, mailbox FROM prospects "
             f"WHERE id IN ({','.join('?' * len(ids))}) AND email != ''",
             tuple(ids),
         ) if ids else []
@@ -1431,6 +1517,10 @@ async def get_campaigns():
         # A cold email sent by hand needs the same footer Harvey adds.
         row["footer"] = footer
         for r in row["recipients"]:
+            if names and not harvey_sends:
+                # Several mailboxes: opened in, and signed as, their own.
+                _add_mailbox(r, names)
+                r["send_as"] = r["mailbox_address"]
             r["sent_by_hand"] = r["id"] in hand_sent
             # "I already emailed them": always recordable before Harvey commits.
             r["can_mark_sent"] = (
@@ -1544,6 +1634,10 @@ async def get_conversations(awaiting: bool = False):
         row["draft"] = drafts.get(row["id"])
     if awaiting:
         rows += await _awaiting_reply()
+    names = _mailbox_names()
+    if names:
+        for row in rows:
+            _add_mailbox(row, names)
     return rows
 
 
@@ -1557,7 +1651,7 @@ async def _awaiting_reply() -> list[dict]:
     # one past the tab's latest 100), a bounced address, or who's otherwise done
     # isn't. Bounded because this runs on every load of the tab.
     sent = await query_db(
-        "SELECT o.prospect_id, o.step, o.subject, o.body, o.sent_at, "
+        "SELECT o.prospect_id, o.step, o.subject, o.body, o.sent_at, o.mailbox, "
         "p.first_name, p.last_name, p.email AS prospect_email, p.company, "
         "p.status AS prospect_status FROM outbox o "
         "JOIN prospects p ON p.id = o.prospect_id "
@@ -1576,6 +1670,7 @@ async def _awaiting_reply() -> list[dict]:
             "first_name": e.get("first_name") or "", "last_name": e.get("last_name") or "",
             "prospect_email": e.get("prospect_email") or "", "company": e.get("company") or "",
             "prospect_status": e.get("prospect_status") or "",
+            "mailbox": e.get("mailbox") or "",
         })
         row["emails"].append({"step": e["step"], "subject": e["subject"],
                               "body": e["body"], "sent_at": e["sent_at"]})

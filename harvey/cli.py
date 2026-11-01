@@ -259,6 +259,8 @@ def cmd_status(args):
             print("  Postal address:       MISSING")
             print(textwrap.fill(address_notice, width=72, initial_indent="                        ",
                                 subsequent_indent="                        "))
+        if loaded is not None:
+            await _mailbox_status(state, loaded, check=getattr(args, "check", False))
         from harvey.brain import BRAIN_STATUS_KEY, Brain, active_brain_status
         from harvey.config import ConfigError, load_brain_config
         try:
@@ -299,6 +301,58 @@ def cmd_status(args):
     if not asyncio.run(_status()):
         # `harvey status --check` failing is something scripts can act on.
         raise SystemExit(1)
+
+
+async def _mailbox_status(state, config, check: bool = False):
+    """harvey status with several mailboxes: each one's state, and a warning
+    when a running Harvey uses another list than the config file has."""
+    from datetime import datetime, timedelta, timezone
+
+    from harvey import mailboxes as mb
+    from harvey.pidfile import loop_lock_held
+
+    boxes = mb.configured_mailboxes(config)
+    if loop_lock_held():
+        # A running Harvey read its config when it started.
+        running = await state.get_setting(mb.IN_USE_KEY)
+        listed = mb.in_use_value(config)
+        if running and running != listed:
+            print("  Mailboxes:            RESTART NEEDED: the running Harvey sends from "
+                  f"{running.replace(',', ', ')}; the config file now has {listed.replace(',', ', ')}.")
+    if not mb.is_multi(config):
+        return
+    primary = mb.primary_mailbox(config).email
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    day_ago = (now - timedelta(hours=24)).isoformat()
+    print(f"  Mailboxes:            {len(boxes)} configured, "
+          f"{sum(1 for m in boxes if mb.is_connected(m))} signed in")
+    env = None
+    if check:
+        from harvey.config import load_env
+        env = load_env()
+    for m in boxes:
+        sent = await state.count_outbox_sent_since(day_ago, mailbox=m.email, primary=primary)
+        queued = await state.get_outbox(limit=10_000, mailboxes=[m.email], primary=primary)
+        queue = sum(1 for r in queued if r["status"] in ("pending_review", "approved"))
+        waiting = sum(1 for r in queued if r["status"] == "approved"
+                      and (r.get("send_at") or "") <= now.isoformat())
+        paused = await state.get_setting(mb.paused_key(m.email))
+        down = await state.get_setting(mb.down_since_key(m.email))
+        read_ok = await state.get_setting(mb.read_ok_key(m.email))
+        print(f"    {m.email}{' (primary)' if m.is_primary else ''}, signs as {m.first_name}")
+        print(f"      {'signed in' if mb.is_connected(m) else 'NOT SIGNED IN (harvey gmail auth --mailbox ' + m.email + ')'}"
+              f"; sent {sent}/{m.daily_limit} in 24h; queue {queue}; {waiting} due and waiting")
+        if check:
+            from harvey.integrations.gmail import GmailProvider
+            ok, detail = await GmailProvider(config, env, mailbox=m).test_connection()
+            print(f"      account: {'OK' if ok else 'PROBLEM: ' + detail}")
+        else:
+            print("      account: not checked here (harvey status --check, or harvey gmail test)")
+        if paused:
+            print(f"      PAUSED: {paused} (harvey sending resume --mailbox {m.email})")
+        if down:
+            print(f"      failing since {down} UTC")
+        print(f"      last complete inbox read: {read_ok + ' UTC' if read_ok else 'never'}")
 
 
 def cmd_usage(args):
@@ -833,32 +887,78 @@ def cmd_warmup(args):
         print(f"\n  {e}\n")
         raise SystemExit(1)
     email = config.channels.email
-    smtp_user = os.getenv("SMTP_USERNAME", "").strip() if email.provider == "smtp" else ""
-    sender = smtp_user if "@" in smtp_user else config.persona.email
-    domain = (args.domain or sender.rpartition("@")[2]).strip().lower().rstrip(".")
-    if not d.DOMAIN_RE.match(domain):
-        print("\n  No valid sending domain found. Pass one: harvey warmup yourdomain.com\n")
+    from harvey import mailboxes as mb
+    smtp_host = os.getenv("SMTP_HOST", "").strip() if email.provider == "smtp" else ""
+    if not args.domain and mb.is_multi(config):
+        # Several mailboxes: each sending domain, with its mailboxes' limits
+        # and history together.
+        by_domain: dict[str, list] = {}
+        for m in mb.configured_mailboxes(config):
+            by_domain.setdefault(m.domain, []).append(m)
+        primary = mb.primary_mailbox(config).email
+
+        async def _domain_history(boxes):
+            state = StateManager()
+            await state.init_db()
+            sent = bounces = 0
+            for m in boxes:
+                sent += await state.count_outbox_sent_since("0001-01-01T00:00:00",
+                                                            mailbox=m.email, primary=primary)
+                bounces += int(await state.get_setting(mb.bounce_key(m.email)) or 0)
+            return sent, bounces
+
+        failed = unknown = 0
+        for domain, boxes in by_domain.items():
+            f, u = _warmup_report(d, domain, boxes[0].email, sum(m.daily_limit for m in boxes),
+                                  asyncio.run(_domain_history(boxes)), email, smtp_host,
+                                  mailboxes=[m.email for m in boxes])
+            failed += f
+            unknown += u
+    else:
+        smtp_user = os.getenv("SMTP_USERNAME", "").strip() if email.provider == "smtp" else ""
+        sender = smtp_user if "@" in smtp_user else config.persona.email
+        domain = (args.domain or sender.rpartition("@")[2]).strip().lower().rstrip(".")
+        if not d.DOMAIN_RE.match(domain):
+            print("\n  No valid sending domain found. Pass one: harvey warmup yourdomain.com\n")
+            raise SystemExit(1)
+
+        async def _history():
+            state = StateManager()
+            await state.init_db()
+            return (await state.count_outbox_sent(),
+                    int(await state.get_setting(BOUNCE_COUNT_KEY) or 0))
+
+        failed, unknown = _warmup_report(d, domain, sender, email.max_daily_sends,
+                                         asyncio.run(_history()), email, smtp_host)
+    print("\n  What DNS can't tell you (the real reputation signal):")
+    print("    - Google Postmaster Tools: https://postmaster.google.com - add the domain;")
+    print("      it shows Gmail's spam rate and domain reputation once you send volume.")
+    print("    - Inbox placement: send one email to a seed test (mail-tester.com is free)")
+    print("      and aim for 9/10+. TrulyInbox shows the warmup inbox rate, and with it")
+    print("      connected (harvey trulyinbox connect) Harvey reads it into this report.")
+    print("      Wait for ~95%+ inbox for a week before relying on cold sends.\n")
+    if failed or unknown:
         raise SystemExit(1)
 
-    async def _history():
-        state = StateManager()
-        await state.init_db()
-        return (await state.count_outbox_sent(),
-                int(await state.get_setting(BOUNCE_COUNT_KEY) or 0))
 
-    smtp_host = os.getenv("SMTP_HOST", "").strip() if email.provider == "smtp" else ""
+def _warmup_report(d, domain: str, sender: str, ceiling: int, history: tuple[int, int],
+                   email, smtp_host: str, mailboxes: list[str] | None = None) -> tuple[int, int]:
+    """Print one domain's deliverability report; (FAIL items, failed DNS
+    lookups). ``mailboxes``: the several mailboxes on it, each checked for
+    warmup; else ``sender`` alone."""
     print(f"\n  Deliverability check - {domain}")
     print("  " + "=" * 56)
+    if mailboxes:
+        print(f"  Mailboxes: {', '.join(mailboxes)}")
     sections = [
         ("Authentication", [d.check_mx(domain), d.check_spf(domain),
                             d.check_dkim(domain, email.warmup.dkim_selector),
                             d.check_dmarc(domain)]),
         ("Reputation", [d.check_domain_age(domain), *d.check_domain_blocklists(domain)]
          + (d.check_ip_blocklists(smtp_host) if smtp_host else [])),
-        ("Warmup & sending", [d.check_warmup(email.warmup, email.max_daily_sends,
-                                             provider=email.provider),
-                              _warmup_service_check(sender, email.warmup),
-                              d.check_send_history(*asyncio.run(_history()))]),
+        ("Warmup & sending", [d.check_warmup(email.warmup, ceiling, provider=email.provider),
+                              *[_warmup_service_check(a, email.warmup) for a in (mailboxes or [sender])],
+                              d.check_send_history(*history)]),
     ]
     icons = {d.OK: "OK  ", d.WARN: "WARN", d.FAIL: "FAIL", d.INFO: "info"}
     failed = warned = unknown = 0
@@ -879,15 +979,7 @@ def cmd_warmup(args):
         print(f"  READY WITH CAVEATS - {warned} warning(s); keep volume low.")
     else:
         print("  READY - send within today's cap and watch bounces.")
-    print("\n  What DNS can't tell you (the real reputation signal):")
-    print("    - Google Postmaster Tools: https://postmaster.google.com - add the domain;")
-    print("      it shows Gmail's spam rate and domain reputation once you send volume.")
-    print("    - Inbox placement: send one email to a seed test (mail-tester.com is free)")
-    print("      and aim for 9/10+. TrulyInbox shows the warmup inbox rate, and with it")
-    print("      connected (harvey trulyinbox connect) Harvey reads it into this report.")
-    print("      Wait for ~95%+ inbox for a week before relying on cold sends.\n")
-    if failed or unknown:
-        raise SystemExit(1)
+    return failed, unknown
 
 
 def _warmup_service_check(address: str, warmup):
