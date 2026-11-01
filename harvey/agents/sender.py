@@ -15,18 +15,24 @@ import logging
 import random
 import re
 import time
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 
 from harvey.brain import Brain
 from harvey.config import (
-    HarveyConfig, EnvConfig, cold_daily_cap, compliance_footer_lines, compliance_notice,
-    compliance_of, live_do_not_contact, operator_timezone, send_window_of,
+    HarveyConfig, EnvConfig, WarmupConfig, cold_daily_cap, compliance_footer_lines,
+    compliance_notice, compliance_of, live_do_not_contact, operator_timezone, send_window_of,
 )
 from harvey.gate import autopilot_review, do_not_contact_match, pre_send_check
 from harvey.send_window import in_window, next_send_time, recipient_country, recipient_zone
 from harvey.integrations.instantly import InstantlyClient
 from harvey.integrations.mail_provider import NATIVE_PROVIDERS, get_mail_provider
 from harvey.integrations.precleared import PreclearedClient, clear_hold, record_hold
+from harvey.mailboxes import (
+    Mailbox, MailboxProviders, companies_of, configured_mailboxes, connection_problem,
+    down_since_key, is_multi, least_loaded, mailbox_for, normalize, pause_problem,
+    primary_mailbox, render_sender, takes_new_prospects,
+)
 from harvey.sending_mode import sync_sending_mode
 from harvey.state import (
     AUTOPILOT_OFF_REASON, COLLEAGUE_REPLIED, HAND_SENT_REASON, HELD_FOR_REVIEW,
@@ -42,6 +48,19 @@ logger = logging.getLogger("harvey.sender")
 # Max sends drained per heartbeat cycle — spreads volume through the day
 # instead of bursting the daily cap in one minute.
 MAX_SENDS_PER_CYCLE = 8
+# With several mailboxes: each sends at most this many a cycle, taking turns,
+# and all of them together at most MULTI_SENDS_PER_CYCLE. With the pacing
+# below that stays well inside a cycle's ten minutes, and a mailbox that can't
+# send (capped, not signed in, paused) never holds up the others.
+MAILBOX_SENDS_PER_CYCLE = 3
+MULTI_SENDS_PER_CYCLE = 12
+# Gmail's answers to a send that mean the mailbox is the problem, not the
+# email: the sign-in was refused (401/403) or it is being rate limited (429).
+# Nothing went out, so the email waits and the mailbox rests for the cycle.
+MAILBOX_REFUSED_STATUSES = (401, 403, 429)
+# A mailbox down this long (not signed in, wrong account, refused) gives
+# the prospects nothing has gone to yet to another mailbox.
+MOVE_AFTER_DOWN = timedelta(hours=24)
 # How many due emails quiet hours look through for one that can go now.
 QUIET_HOURS_SCAN = 200
 SEND_JITTER_SECONDS = (4, 15)
@@ -79,6 +98,38 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+def _local_midnight_utc() -> str:
+    """Today's local midnight as a naive UTC ISO time: the day the warmup
+    ramp counts in."""
+    midnight = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    return midnight.astimezone(timezone.utc).replace(tzinfo=None).isoformat()
+
+
+@dataclass
+class _Lane:
+    """One mailbox's share of a drain (several mailboxes)."""
+    mailbox: Mailbox
+    provider: object
+    daily_left: int          # sends left in its last 24 hours
+    cold_left: int           # cold email left today under its warmup ramp
+    cold_held: str = ""      # why its cold email waits this cycle
+    sent: int = 0
+    sent_cold: int = 0
+    stopped: str = ""        # why it can't send for the rest of this cycle
+
+
+def _in_turn(queues: list[list]) -> list:
+    """The rows of each mailbox's queue taken in turn: the first of each,
+    then the second of each, and so on."""
+    out = []
+    for i in range(max((len(q) for q in queues), default=0)):
+        out += [q[i] for q in queues if i < len(q)]
+    return out
+
+
+_WORD_RE = re.compile(r"[^\W\d_][\w'’.-]*")
+
+
 class Sender:
     def __init__(
         self,
@@ -92,6 +143,14 @@ class Sender:
         self.config = config
         self.instantly = InstantlyClient(env.instantly_api_key)
         self.provider = get_mail_provider(config, env)
+        # With several mailboxes, each one's own provider (self.provider is
+        # then only the primary's, for its name and the single-mailbox path).
+        self.mailbox_providers = MailboxProviders(config, env)
+        # Set by the heartbeat from this cycle's reply reading: cold email to
+        # these prospects, or from these mailboxes, waits for a later cycle,
+        # because an inbox that could hold their reply wasn't read completely.
+        self.hold_prospects: set[str] = set()
+        self.hold_mailboxes: set[str] = set()
         # Optional per-recipient compliance check; None unless enabled.
         self.precleared = PreclearedClient.from_config(config, env)
         # Domains whose check failed since Precleared last answered. Kept
@@ -204,31 +263,29 @@ class Sender:
         window = send_window_of(self.config)
         if window is None or not self.is_native:
             return False
-        if not self.provider.is_configured() or await self.state.get_setting(KILL_SWITCH_KEY):
-            return False
-        email = self.config.channels.email
-        if email.max_daily_sends - await self.state.count_outbox_sent_today() <= 0:
-            return False
-        midnight = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
-        if cold_daily_cap(email) - await self.state.count_outbox_sent_today(
-                kind="sequence",
-                since=midnight.astimezone(timezone.utc).replace(tzinfo=None).isoformat()) <= 0:
-            return False
-        now = _utcnow()
         due_before = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
-        due = await self.state.get_outbox(
-            status="approved", due_before=due_before,
-            limit=QUIET_HOURS_SCAN, skip_unready_follow_ups=True, kind="sequence",
-        )
-        if self.compliance_held and self.precleared is not None:
-            # Match the drain's separate follow-up scan: waiting first emails
-            # must not hide a cleared follow-up and prevent the loop waking.
-            seen = {item["id"] for item in due}
-            follow_ups = await self.state.get_outbox(
-                status="approved", due_before=due_before,
-                limit=QUIET_HOURS_SCAN, skip_unready_follow_ups=True, follow_ups_only=True,
-            )
-            due += [item for item in follow_ups if item["id"] not in seen]
+        if is_multi(self.config):
+            # Each mailbox that can send cold email now, under its own caps.
+            if await self.state.get_setting(KILL_SWITCH_KEY):
+                return False
+            lanes, _ = await self._mailbox_lanes(record=False)
+            primary = primary_mailbox(self.config).email
+            due = []
+            for lane in lanes.values():
+                if lane.daily_left > 0 and lane.cold_left > 0:
+                    due += await self._quiet_hours_rows(
+                        due_before, mailboxes=[lane.mailbox.email], primary=primary)
+        else:
+            if not self.provider.is_configured() or await self.state.get_setting(KILL_SWITCH_KEY):
+                return False
+            email = self.config.channels.email
+            if email.max_daily_sends - await self.state.count_outbox_sent_today() <= 0:
+                return False
+            if cold_daily_cap(email) - await self.state.count_outbox_sent_today(
+                    kind="sequence", since=_local_midnight_utc()) <= 0:
+                return False
+            due = await self._quiet_hours_rows(due_before)
+        now = _utcnow()
         for item in due:
             if item["kind"] != "sequence":
                 continue
@@ -246,6 +303,26 @@ class Sender:
                     now, await self._zone_or_default(prospect, given=country, names=names), window):
                 return True
         return False
+
+    async def _quiet_hours_rows(self, due_before: str, mailboxes=None, primary: str = "") -> list[dict]:
+        """Due cold email for cold_due_in_window (from these mailboxes when
+        given): approved first emails and follow-ups that are ready."""
+        where = {"mailboxes": mailboxes, "primary": primary} if mailboxes is not None else {}
+        due = await self.state.get_outbox(
+            status="approved", due_before=due_before,
+            limit=QUIET_HOURS_SCAN, skip_unready_follow_ups=True, kind="sequence", **where,
+        )
+        if self.compliance_held and self.precleared is not None:
+            # Match the drain's separate follow-up scan: waiting first emails
+            # must not hide a cleared follow-up and prevent the loop waking.
+            seen = {item["id"] for item in due}
+            follow_ups = await self.state.get_outbox(
+                status="approved", due_before=due_before,
+                limit=QUIET_HOURS_SCAN, skip_unready_follow_ups=True, follow_ups_only=True,
+                **where,
+            )
+            due += [item for item in follow_ups if item["id"] not in seen]
+        return due
 
     async def _outside_window(self, item: dict, zone: str, window) -> bool:
         """Move a cold email that isn't in its send window to the window's
@@ -565,13 +642,175 @@ class Sender:
             )
             return
 
+        if is_multi(self.config):
+            try:
+                await self._move_from_down_mailboxes()
+            except Exception as e:
+                # Moving is housekeeping: it never stops the sending.
+                logger.error(f"Sender: couldn't move prospects off a down mailbox: {e}")
+
         for campaign in await self.state.get_campaigns_by_status("draft"):
             try:
                 await self._stage_campaign_native(campaign)
             except Exception as e:
                 logger.error(f"Sender: staging '{campaign.name}' failed: {e}")
 
+        if is_multi(self.config):
+            try:
+                await self._hold_mis_signed_drafts()
+            except Exception as e:
+                logger.error(f"Sender: couldn't check the drafts' sign-offs: {e}")
+
         await self._drain_due()
+
+    # ── Several mailboxes ──
+
+    async def _mailbox_lanes(self, record: bool = True) -> tuple[dict[str, "_Lane"], dict[str, str]]:
+        """The mailboxes that can send now, by address, and why each of the
+        others can't. Each lane carries what its own limits leave: its daily
+        limit over the last 24 hours (replies count, but are never held by
+        it) and its cold cap today (its daily limit under the warmup ramp).
+        ``record``: note when a mailbox stopped working (down_since_key)."""
+        primary = primary_mailbox(self.config).email
+        day_ago = (_utcnow() - timedelta(hours=24)).isoformat()
+        midnight = _local_midnight_utc()
+        warmup = getattr(self.config.channels.email, "warmup", None)
+        lanes: dict[str, _Lane] = {}
+        out: dict[str, str] = {}
+        for m in configured_mailboxes(self.config):
+            provider = self.mailbox_providers.get(m)
+            problem = connection_problem(m, provider)
+            if problem:
+                out[m.email] = problem
+                if record:
+                    await self._mark_down(m)
+                continue
+            paused = await pause_problem(self.state, m)
+            if paused:
+                out[m.email] = paused
+                continue
+            sent_day = await self.state.count_outbox_sent_since(
+                day_ago, mailbox=m.email, primary=primary)
+            cap = warmup.daily_cap(m.daily_limit) if isinstance(warmup, WarmupConfig) else m.daily_limit
+            sent_cold = await self.state.count_outbox_sent_since(
+                midnight, mailbox=m.email, primary=primary, kind="sequence")
+            lane = _Lane(mailbox=m, provider=provider,
+                         daily_left=m.daily_limit - sent_day, cold_left=cap - sent_cold)
+            if m.email in self.hold_mailboxes:
+                lane.cold_held = "its inbox couldn't be read completely"
+            lanes[m.email] = lane
+        return lanes, out
+
+    async def _mark_down(self, mailbox: Mailbox):
+        if not await self.state.get_setting(down_since_key(mailbox.email)):
+            await self.state.set_setting(down_since_key(mailbox.email), _utcnow().isoformat())
+
+    async def _mark_up(self, mailbox: Mailbox):
+        if await self.state.get_setting(down_since_key(mailbox.email)):
+            await self.state.delete_setting(down_since_key(mailbox.email))
+
+    async def _move_from_down_mailboxes(self):
+        """A mailbox down for MOVE_AFTER_DOWN gives the prospects nothing
+        has gone to (nor to anyone at their company), and what's queued for
+        them, to the least busy mailbox that can take new prospects, company
+        by company. Anyone it already emailed waits for it to come back. The
+        moved emails sign with their new sender (the sender tag)."""
+        primary = primary_mailbox(self.config).email
+        mailboxes = configured_mailboxes(self.config)
+        targets = None
+        for m in mailboxes:
+            since = await self.state.get_setting(down_since_key(m.email))
+            try:
+                down_at = datetime.fromisoformat(since) if since else None
+            except ValueError:
+                down_at = None
+            if down_at is None or _utcnow() - down_at < MOVE_AFTER_DOWN:
+                continue
+            movable = await self.state.movable_prospects(m.email, primary)
+            if not movable:
+                continue
+            if targets is None:
+                targets = [o for o in mailboxes
+                           if not await takes_new_prospects(self.state, o, self.mailbox_providers.get(o))]
+            open_ = [o for o in targets if o.email != m.email]
+            if not open_:
+                logger.warning(f"Sender: {m.email} has been down since {since}, and no other "
+                               f"mailbox can take its {len(movable)} prospect(s); they wait.")
+                continue
+            for company in await companies_of(self.state, movable):
+                chosen = await least_loaded(self.state, self.config, open_)
+                rows = await self.state.move_prospects_to_mailbox(company, chosen.email)
+                logger.warning(f"Sender: {m.email} has been down since {since}: moved "
+                               f"{len(company)} prospect(s) and {rows} queued email(s) to {chosen.email}.")
+                await self.state.log_action(
+                    action_type="mailbox_reassigned", agent="sender",
+                    details={"from": m.email, "to": chosen.email,
+                             "prospects": len(company), "emails": rows})
+
+    def _sign_off_problems(self, item: dict, mailbox: Mailbox) -> list[str]:
+        """Several mailboxes: why this email (as it will read, sender tag
+        filled in, without the footer) doesn't fit the mailbox it goes out
+        from. A cold email must close with that sender's name (first, or
+        full); no email may sign as, or introduce itself as, another of them."""
+        text = (item.get("body") or "").rstrip()
+        footer = "\n".join(compliance_footer_lines(self.config))
+        if footer and text.endswith(footer):
+            text = text[:-len(footer)].rstrip()
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if not lines:
+            return []
+        words = [w.strip(".,'’-").lower() for w in _WORD_RE.findall(lines[-1])]
+
+        def signs_as(m: Mailbox) -> bool:
+            # "Sam", "Thanks, Sam", "Best wishes, Sam Sample": a short closing
+            # line that ends with the name.
+            full = m.name.lower().split()
+            if not words or not full or len(words) > 3 + len(full):
+                return False
+            return words[-1] == full[0] or words[-len(full):] == full
+
+        own = mailbox.first_name
+        problems = []
+        if item.get("kind") == "sequence" and not signs_as(mailbox):
+            problems.append(f"it doesn't sign off as {own}, the mailbox it goes out from")
+        # Below the greeting: "Hi Mary," greets a prospect called Mary.
+        body = "\n".join(lines[1:])
+        seen = {own.lower()}
+        for other in configured_mailboxes(self.config):
+            if not other.first_name or other.first_name.lower() in seen:
+                continue
+            seen.add(other.first_name.lower())
+            name = re.escape(other.first_name)
+            if signs_as(other):
+                problems.append(f"it signs off as {other.first_name}, but goes out from {mailbox.email}")
+            elif re.search(rf"\b(?:I['’]?m|I am)\s+{name}\b|\b{name}\s+here\b", body, re.IGNORECASE):
+                problems.append(f"it introduces the sender as {other.first_name}, but goes out "
+                                f"from {mailbox.email}")
+        return problems
+
+    def _as_sent_from(self, item: dict, mailbox: Mailbox | None) -> dict:
+        """The row with the sender tag filled in from ``mailbox`` (several
+        mailboxes; unchanged with one)."""
+        if mailbox is None:
+            return item
+        return {**item, "subject": render_sender(item.get("subject") or "", mailbox),
+                "body": render_sender(item.get("body") or "", mailbox)}
+
+    async def _hold_mis_signed_drafts(self):
+        """Several mailboxes: drafts waiting for review whose sign-off
+        doesn't fit their mailbox are marked held, so "Approve all" leaves
+        them for a one-by-one look. Once you approve one, it's yours."""
+        drafts = await self.state.get_outbox(status="pending_review", limit=500)
+        for item in drafts:
+            if item.get("error"):
+                continue      # already says why it waits
+            mailbox = mailbox_for(self.config, item.get("mailbox"))
+            if mailbox is None:
+                continue
+            problems = self._sign_off_problems(self._as_sent_from(item, mailbox), mailbox)
+            if problems:
+                await self.state.update_outbox_item(
+                    item["id"], error=(HELD_FOR_REVIEW + "; ".join(problems))[:300])
 
     def _render(self, text: str, prospect) -> str:
         """Fill merge variables. The pre-send gate rejects any leftovers."""
@@ -753,8 +992,12 @@ class Sender:
             error=f"{RECHECK_PREFIX}{retry_at:%Y-%m-%d %H:%M} UTC: {reason}"[:300])
         return retry_at
 
-    async def _blocked(self, item: dict, prospect, allow_risky: bool) -> tuple[str, str] | None:
-        """Why this email must not go out, as (status, error), or None."""
+    async def _blocked(self, item: dict, prospect, allow_risky: bool,
+                       mailbox: Mailbox | None = None) -> tuple[str, str] | None:
+        """Why this email must not go out, as (status, error), or None.
+        ``mailbox``: the one it goes out from, with several (its sender tag
+        already filled in): a sign-off for someone else, or a cold email
+        from a mailbox other than the prospect's, waits for you."""
         await sync_sending_mode(self.config, self.state)   # "Turn off autopilot" counts at once
         if prospect is None:
             return "failed", "prospect missing"
@@ -795,45 +1038,30 @@ class Sender:
             # instruction would add sends it back to you instead.
             held = autopilot_review(item["subject"], self._outgoing_body(item), self.config,
                                     recipient=item["to_email"])
+            if mailbox is not None:
+                # Nobody read who it signs as, or noticed it moved mailbox.
+                theirs = normalize(self.config, getattr(prospect, "mailbox", ""))
+                if item["kind"] == "sequence" and theirs != mailbox.email:
+                    held.append(f"it goes out from {mailbox.email}, but {prospect.email} "
+                                f"belongs to {theirs}")
+                held += self._sign_off_problems(item, mailbox)
             if held:
                 logger.warning(f"Sender: holding email to {item['to_email']} for review: {held}")
                 return "pending_review", (HELD_FOR_REVIEW + "; ".join(held))[:300]
         return None
 
-    async def _drain_due(self):
-        """Send due, approved outbox items through the provider."""
-        if self.precleared is None:
-            # Check switched off: cold email no longer waits on it, so a
-            # hold recorded while it was on must not stay on Today.
-            await clear_hold(self.state)
-        if not self.provider.is_configured():
-            logger.warning(
-                f"Sender: mail provider '{self.provider.name}' is not configured "
-                "yet — outbox is holding. See CLAUDE.md → provider setup."
-            )
-            return
-
-        max_daily = self.config.channels.email.max_daily_sends
-        sent_today = await self.state.count_outbox_sent_today()
-        budget = min(MAX_SENDS_PER_CYCLE, max_daily - sent_today)
-        if budget <= 0:
-            logger.info(f"Sender: daily send cap reached ({sent_today}/{max_daily}).")
-            return
-        # Cold email has its own cap under the warmup ramp; replies don't.
-        # Counted from local midnight, the day the ramp counts in.
-        cold_cap = cold_daily_cap(self.config.channels.email)
-        midnight = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
-        cold_left = cold_cap - await self.state.count_outbox_sent_today(
-            kind="sequence",
-            since=midnight.astimezone(timezone.utc).replace(tzinfo=None).isoformat())
-
-        now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+    async def _due_rows(self, now: str, page: int, cold: bool = True,
+                        mailboxes=None, primary: str = "") -> list[dict]:
+        """The due, approved rows a drain goes through (only those going out
+        from ``mailboxes`` when given), oldest first. ``cold``: False when no
+        cold email can go this cycle, so only the rest is read."""
+        where = {"mailboxes": mailboxes, "primary": primary} if mailboxes is not None else {}
         # In quiet hours only cold email can go, so only cold email is
         # fetched: replies due ahead of it can't fill the page.
         due = await self.state.get_outbox(
-            status="approved", due_before=now, limit=budget * 3,
-            skip_unready_follow_ups=True, kind="sequence" if self.cold_only else None,
-        )
+            status="approved", due_before=now, limit=page,
+            skip_unready_follow_ups=True, kind="sequence" if self.cold_only else None, **where,
+        ) if cold else []
         # Cold emails held (by an unavailable compliance check, the cold
         # cap, a follow-up's spacing) stay approved and could fill the
         # page above, so replies (and any other kind) are fetched on
@@ -841,18 +1069,18 @@ class Sender:
         # query of the same size.
         seen = {item["id"] for item in due}
         unchecked = [] if self.cold_only else await self.state.get_outbox(
-            status="approved", due_before=now, limit=budget * 3,
-            exclude_kind="sequence",
+            status="approved", due_before=now, limit=page,
+            exclude_kind="sequence", **where,
         )
         extra = [item for item in unchecked if item["id"] not in seen]
-        if self.precleared is not None:
+        if cold and self.precleared is not None:
             # First emails waiting on Precleared keep their place and could
             # fill the page too, hiding follow-ups to people already cleared,
             # which a stored verdict lets go out. Fetched on their own as well.
             seen.update(item["id"] for item in extra)
             follow_ups = await self.state.get_outbox(
-                status="approved", due_before=now, limit=budget * 3,
-                skip_unready_follow_ups=True, follow_ups_only=True,
+                status="approved", due_before=now, limit=page,
+                skip_unready_follow_ups=True, follow_ups_only=True, **where,
             )
             extra += [item for item in follow_ups if item["id"] not in seen]
         if extra:
@@ -860,14 +1088,78 @@ class Sender:
                 due + extra,
                 key=lambda i: (i.get("send_at") or "", i.get("created_at") or ""),
             )
+        return due
+
+    async def _drain_due(self):
+        """Send due, approved outbox items through the provider. With
+        several mailboxes, each row goes out from its own mailbox, and the
+        mailboxes take turns."""
+        if self.precleared is None:
+            # Check switched off: cold email no longer waits on it, so a
+            # hold recorded while it was on must not stay on Today.
+            await clear_hold(self.state)
+        multi = is_multi(self.config)
+        now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+        lanes: dict[str, _Lane] = {}
+        if multi:
+            lanes, down = await self._mailbox_lanes()
+            for address, why in down.items():
+                logger.warning(f"Sender: not sending from {address}: {why}")
+            if not lanes:
+                logger.warning("Sender: no mailbox can send right now; the outbox is holding.")
+                return
+            # Each mailbox under its own limits (_Lane); together, the cycle's.
+            max_daily = sum(lane.mailbox.daily_limit for lane in lanes.values())
+            sent_today = 0
+            budget = cycle_cap = MULTI_SENDS_PER_CYCLE
+            cold_cap = cold_left = MULTI_SENDS_PER_CYCLE
+            primary = primary_mailbox(self.config).email
+            queues = []
+            for lane in lanes.values():
+                cold = lane.daily_left > 0 and lane.cold_left > 0 and not lane.cold_held
+                queues.append(await self._due_rows(
+                    now, MAILBOX_SENDS_PER_CYCLE * 3, cold=cold,
+                    mailboxes=[lane.mailbox.email], primary=primary))
+            # One mailbox's backlog can't fill the page: each has its own,
+            # taken in turn.
+            due = _in_turn(queues)
+        else:
+            if not self.provider.is_configured():
+                logger.warning(
+                    f"Sender: mail provider '{self.provider.name}' is not configured "
+                    "yet — outbox is holding. See CLAUDE.md → provider setup."
+                )
+                return
+            max_daily = self.config.channels.email.max_daily_sends
+            sent_today = await self.state.count_outbox_sent_today()
+            # Cold email's share of the cycle: the daily cap counts every
+            # send, but a spent one holds only cold email; replies still go.
+            budget = min(MAX_SENDS_PER_CYCLE, max_daily - sent_today)
+            cycle_cap = MAX_SENDS_PER_CYCLE
+            if budget <= 0:
+                logger.info(f"Sender: daily send cap reached ({sent_today}/{max_daily}); "
+                            "only replies go out.")
+                if self.cold_only:
+                    return
+            # Cold email has its own cap under the warmup ramp; replies don't.
+            # Counted from local midnight, the day the ramp counts in.
+            cold_cap = cold_daily_cap(self.config.channels.email)
+            cold_left = cold_cap - await self.state.count_outbox_sent_today(
+                kind="sequence", since=_local_midnight_utc())
+            due = await self._due_rows(
+                now, (budget if budget > 0 else MAX_SENDS_PER_CYCLE) * 3, cold=budget > 0)
         if not due:
             return
+        # Whether cold email had a chance this cycle (what the compliance
+        # notes below say about it).
+        cold_possible = multi or budget > 0
 
         allow_risky = getattr(self.config.channels.email, "send_to_risky", False)
         window = send_window_of(self.config)
         sent = 0
         sent_cold = 0
         outside_window = 0
+        held_unread = 0
         # Set when Precleared can't be asked (allowance used up, network):
         # cold emails wait for a later cycle, replies still go out.
         compliance_paused = False
@@ -884,17 +1176,37 @@ class Sender:
         failed_addresses: set[str] = set()
         check_seconds = 0.0
         for item in due:
-            if sent >= budget:
+            if sent >= cycle_cap:
                 break
             if self.cold_only and item["kind"] != "sequence":
                 continue  # quiet hours: replies wait for the operator's hours
-            if item["kind"] == "sequence" and sent_cold >= cold_left:
+            is_cold = item["kind"] == "sequence"
+            lane = None
+            if multi:
+                lane = lanes.get(normalize(self.config, item.get("mailbox")))
+                if lane is None or lane.stopped or lane.sent >= MAILBOX_SENDS_PER_CYCLE:
+                    continue
+                if is_cold and (lane.sent >= lane.daily_left or lane.cold_held):
+                    continue  # its own daily limit or an unread inbox; replies still go
+                if is_cold and lane.sent_cold >= lane.cold_left:
+                    held_cold += 1
+                    continue
+            elif is_cold and sent >= budget:
+                continue  # the day's cap is spent: only replies go
+            if is_cold and item["prospect_id"] in self.hold_prospects:
+                # An inbox their reply could be in wasn't read completely.
+                held_unread += 1
+                continue
+            if not multi and is_cold and sent_cold >= cold_left:
                 held_cold += 1
                 continue
-            needs_check = self.precleared is not None and item["kind"] == "sequence"
+            needs_check = self.precleared is not None and is_cold
+            mailbox = lane.mailbox if lane is not None else None
+            provider = lane.provider if lane is not None else self.provider
 
             prospect = await self.state.get_prospect(item["prospect_id"])
-            blocked = await self._blocked(item, prospect, allow_risky)
+            item = self._as_sent_from(item, mailbox)
+            blocked = await self._blocked(item, prospect, allow_risky, mailbox)
             if blocked:
                 await self.state.update_outbox_item(
                     item["id"], status=blocked[0], error=blocked[1])
@@ -912,7 +1224,7 @@ class Sender:
             names = await self._recipient_names(prospect) if needs_check else ("", "")
             # Cold email waits for the recipient's send window, however
             # late it was approved; replies don't.
-            if (window is not None and item["kind"] == "sequence"
+            if (window is not None and is_cold
                     and await self._outside_window(
                         item, await self._zone_or_default(prospect, given=country, names=names),
                         window)):
@@ -1005,11 +1317,16 @@ class Sender:
             # Send the email as it is now, not as the queue read it: it may
             # have been edited and approved again since.
             item = await self.state.get_outbox_item(item["id"]) or item
+            if mailbox is not None and normalize(self.config, item.get("mailbox")) != mailbox.email:
+                # Moved to another mailbox meanwhile: that one sends it.
+                await self.state.release_outbox_item(item["id"])
+                continue
+            item = self._as_sent_from(item, mailbox)
             # Whatever landed between the checks above and the claim (a reply
             # sets the status before it cancels) is caught here, with fresh
             # data. From now on nothing else can cancel this email.
             prospect = await self.state.get_prospect(item["prospect_id"])
-            blocked = await self._blocked(item, prospect, allow_risky)
+            blocked = await self._blocked(item, prospect, allow_risky, mailbox)
             if blocked:
                 await self.state.update_outbox_item(
                     item["id"], status=blocked[0], error=blocked[1])
@@ -1017,7 +1334,7 @@ class Sender:
 
             body = self._outgoing_body(item)
             try:
-                result = await self.provider.send_email(
+                result = await provider.send_email(
                     item["to_email"], item["subject"], body,
                     thread_ref=item.get("thread_ref", ""),
                     in_reply_to=item.get("in_reply_to", ""),
@@ -1031,14 +1348,30 @@ class Sender:
                 logger.warning(f"Sender: send to {item['to_email']} raised: {e}")
                 continue
             if not result.ok:
+                if lane is not None and (not result.attempted
+                                         or result.status in MAILBOX_REFUSED_STATUSES):
+                    # The mailbox, not the email: nothing went out, so the
+                    # email waits and this mailbox rests for the cycle.
+                    await self.state.release_outbox_item(item["id"])
+                    lane.stopped = (result.error or f"HTTP {result.status}")[:200]
+                    await self._mark_down(lane.mailbox)
+                    logger.warning(
+                        f"Sender: {lane.mailbox.email} couldn't send ({lane.stopped}); its "
+                        "email waits and the other mailboxes carry on.")
+                    continue
                 await self.state.update_outbox_item(
                     item["id"], status="failed", error=result.error[:300]
                 )
                 continue
 
             sent += 1
-            if item["kind"] == "sequence":
+            if is_cold:
                 sent_cold += 1
+            if lane is not None:
+                lane.sent += 1
+                if is_cold:
+                    lane.sent_cold += 1
+                await self._mark_up(lane.mailbox)
             now_iso = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
             # A note that the check moved it back no longer applies.
             note = {"error": ""} if (item.get("error") or "").startswith(RECHECK_PREFIX) else {}
@@ -1065,8 +1398,10 @@ class Sender:
                     logger.debug(f"Sender: convo append failed: {e}")
             details = {
                 "to": item["to_email"], "step": item["step"],
-                "kind": item["kind"], "provider": self.provider.name,
+                "kind": item["kind"], "provider": provider.name,
             }
+            if mailbox is not None:
+                details["mailbox"] = mailbox.email
             if receipt_id:
                 details["precleared_receipt"] = receipt_id
             await self.state.log_action(
@@ -1076,19 +1411,24 @@ class Sender:
             )
             logger.info(
                 f"Sender: sent step {item['step']} to {item['to_email']} "
-                f"via {self.provider.name}."
+                f"via {provider.name}" + (f" from {mailbox.email}." if mailbox else ".")
             )
             # Human-ish pacing BETWEEN sends (not after the last, and never
             # in tests where pacing is disabled).
-            if self.send_pacing and sent < budget:
+            if self.send_pacing and sent < cycle_cap:
                 await asyncio.sleep(random.uniform(*SEND_JITTER_SECONDS))
 
-        self.compliance_held = compliance_paused
+        if cold_possible:
+            self.compliance_held = compliance_paused
         if outside_window:
             logger.info(
                 f"Sender: {outside_window} cold email(s) wait for the recipient's "
                 f"send window ({window.start}-{window.end} their time).")
-        if self.precleared is not None:
+        if held_unread:
+            logger.info(
+                f"Sender: {held_unread} cold email(s) wait a cycle: an inbox their reply "
+                "could be in wasn't read completely.")
+        if self.precleared is not None and cold_possible:
             if hold is not None:
                 # The page read above stops at a few times the cycle's
                 # budget; count every cold email still waiting on the check:
@@ -1102,7 +1442,10 @@ class Sender:
         if held_cold:
             warmup = getattr(self.config.channels.email, "warmup", None)
             days = warmup.days_in() if warmup is not None else None
-            if days is not None and cold_cap < max_daily:
+            if multi:
+                logger.info(f"Sender: {held_cold} cold email(s) wait: their mailboxes reached "
+                            "today's cold cap. Replies still go out. See `harvey status`.")
+            elif days is not None and cold_cap < max_daily:
                 logger.info(
                     f"Sender: warmup day {days}: {held_cold} cold email(s) wait; today's "
                     f"cold cap is {cold_cap}. Replies still go out. See `harvey warmup`.")
@@ -1114,5 +1457,10 @@ class Sender:
             if notice:
                 logger.warning(f"Sender: {notice}")
         if sent:
-            logger.info(f"Sender: {sent} email(s) sent this cycle "
-                        f"({sent_today + sent}/{max_daily} today).")
+            if multi:
+                logger.info(f"Sender: {sent} email(s) sent this cycle (" + ", ".join(
+                    f"{lane.mailbox.email} {lane.sent}" for lane in lanes.values() if lane.sent)
+                    + ").")
+            else:
+                logger.info(f"Sender: {sent} email(s) sent this cycle "
+                            f"({sent_today + sent}/{max_daily} today).")

@@ -361,15 +361,18 @@ def _booking_prefix(config) -> str:
 
 
 def allowed_link_domains(config) -> set[str]:
-    """Your own domains: the sending address's and any listed in
-    channels.email.link_domains. (The booking link allows its own page,
-    not its whole host: cal.com is everyone's.)"""
+    """Your own domains: the sending address's (every mailbox's, with
+    channels.email.mailboxes) and any listed in channels.email.link_domains.
+    (The booking link allows its own page, not its whole host: cal.com is
+    everyone's.)"""
     persona = getattr(config, "persona", None)
     email_cfg = getattr(getattr(config, "channels", None), "email", None)
     out: set[str] = set()
-    address = str(getattr(persona, "email", "") or "")
-    if "@" in address:
-        out.add(_host(address.rsplit("@", 1)[1]))
+    addresses = [str(getattr(persona, "email", "") or "")]
+    addresses += [str(getattr(m, "email", "") or "") for m in getattr(email_cfg, "mailboxes", None) or []]
+    for address in addresses:
+        if "@" in address:
+            out.add(_host(address.rsplit("@", 1)[1]))
     for entry in getattr(email_cfg, "link_domains", None) or []:
         out.update(find_link_domains(str(entry)) or [_host(str(entry))])
     return {d for d in out if d}
