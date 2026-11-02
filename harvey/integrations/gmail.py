@@ -366,6 +366,13 @@ class GmailProvider(MailProvider):
         msg["To"] = to_email
         msg["From"] = f"{from_name} <{from_address}>" if from_address else from_name
         msg["Subject"] = subject
+        if from_address:
+            # Gmail and Yahoo show an Unsubscribe link for this header, so a
+            # recipient who is done can say so instead of marking the email
+            # as spam, which is what harms a sending domain. The request
+            # arrives as an email with this subject; the reply handler reads
+            # it as an opt-out.
+            msg["List-Unsubscribe"] = f"<mailto:{from_address}?subject=unsubscribe>"
         if in_reply_to:
             msg["In-Reply-To"] = in_reply_to
             msg["References"] = in_reply_to

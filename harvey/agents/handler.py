@@ -75,6 +75,9 @@ NO_COMPANY_STOP_INTENTS = {"ooo", "wrong_person"}
 
 # Hard opt-out phrases. If any of these appear, we ALWAYS honor the
 # opt-out regardless of what the LLM classifier says.
+# The subject Harvey's List-Unsubscribe mailto asks the mail client to send.
+LIST_UNSUBSCRIBE_SUBJECT = "unsubscribe"
+
 OPT_OUT_PATTERNS = (
     "unsubscribe",
     "opt out",
@@ -895,12 +898,17 @@ class Handler:
     async def _handle_message(self, msg):
         """One inbound message: a bounce, or a reply (from the mailbox it
         arrived in, with several)."""
+        text = msg.body.strip()
+        if (msg.subject or "").strip().lower() == LIST_UNSUBSCRIBE_SUBJECT:
+            # The mail client's own Unsubscribe button (the List-Unsubscribe
+            # header): its body is boilerplate, the subject is the request.
+            text = f"{LIST_UNSUBSCRIBE_SUBJECT}\n{text}".strip()
         if msg.is_bounce:
             await self._handle_bounce(msg)
-        elif msg.body.strip():
+        elif text:
             await self._process_reply(
                 msg.from_email,
-                msg.body.strip(),
+                text,
                 reply_uuid="",
                 reply_meta={
                     "thread_ref": msg.thread_ref,

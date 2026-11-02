@@ -95,6 +95,15 @@ async def test_a_mailbox_sends_from_its_own_name_and_address(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_every_email_offers_an_unsubscribe_to_its_own_mailbox(monkeypatch):
+    # Mail clients show an Unsubscribe link for the header, so a recipient
+    # who is done can say so rather than marking the email as spam.
+    p, calls = scripted(monkeypatch, mailbox=box())
+    await p.send_email("lead@prospect.test", "Hi", "Hello there")
+    assert sent_header(calls, "List-Unsubscribe") == f"<mailto:{SECOND}?subject=unsubscribe>"
+
+
+@pytest.mark.asyncio
 async def test_without_a_mailbox_the_persona_sends_as_before(monkeypatch):
     p, calls = scripted(monkeypatch, profile=THIRD)
     result = await p.send_email("lead@prospect.test", "Hi", "Hello there")
