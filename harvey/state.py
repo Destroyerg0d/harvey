@@ -2441,17 +2441,45 @@ class StateManager:
                 return (await cursor.fetchone())[0]
 
     async def count_recent_unusable_prospects(self, hours: int = 24) -> int:
-        """New prospects found in the last ``hours`` that the Writer can't use."""
+        """Prospects Scout found in the last ``hours`` whose email no
+        verifier could judge: the sign that verification isn't working (no
+        key, or the credits ran out), which is what pausing Scout is for.
+
+        Not counted: an address a verifier called invalid (the verifier
+        worked), a guess on a catch-all domain (no verifier can judge those),
+        and prospects brought in by an import rather than found by Scout."""
         since = (_utcnow() - timedelta(hours=hours)).isoformat()
         marks = ",".join("?" for _ in WRITABLE_EMAIL_STATUSES)
         async with self._connect() as db:
             async with db.execute(
-                f"""SELECT COUNT(*) FROM prospects
-                    WHERE status = 'new'
-                      AND NOT (COALESCE(email, '') != ''
-                               AND COALESCE(email_status, '') IN ({marks}))
-                      AND datetime(created_at) >= datetime(?)""",
+                f"""SELECT COUNT(*) FROM prospects p
+                    WHERE p.status = 'new'
+                      AND NOT (COALESCE(p.email, '') != ''
+                               AND COALESCE(p.email_status, '') IN ({marks}))
+                      AND COALESCE(p.email_status, '') != 'invalid'
+                      AND COALESCE(p.source, '') NOT LIKE 'import:%'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM email_patterns ep
+                          WHERE ep.is_catch_all = 1 AND p.email LIKE '%@%'
+                            AND ep.domain = LOWER(SUBSTR(p.email, INSTR(p.email, '@') + 1)))
+                      AND datetime(p.created_at) >= datetime(?)""",
                 (*WRITABLE_EMAIL_STATUSES, since),
+            ) as cursor:
+                return (await cursor.fetchone())[0]
+
+    async def count_companies_needing_prospects(self, stale_days: int = 14) -> int:
+        """How many companies companies_needing_prospects would still hand
+        to Scout's backfill: a look that costs no search credits."""
+        async with self._connect() as db:
+            async with db.execute(
+                """SELECT COUNT(*) FROM (
+                       SELECT c.id FROM companies c
+                       LEFT JOIN prospects p ON p.company_id = c.id
+                       WHERE c.domain != ''
+                         AND (c.prospects_checked_at IS NULL
+                              OR c.prospects_checked_at < datetime('now', ?))
+                       GROUP BY c.id HAVING COUNT(p.id) = 0)""",
+                (f"-{int(stale_days)} days",),
             ) as cursor:
                 return (await cursor.fetchone())[0]
 
@@ -2934,6 +2962,8 @@ class StateManager:
             # Unusable ones found in the last day: the heartbeat pauses
             # prospecting for the day when these alone fill the backlog.
             "recent_unusable_prospects": await self.count_recent_unusable_prospects(),
+            # Known companies still waiting for a first look for contacts.
+            "companies_needing_prospects": await self.count_companies_needing_prospects(),
             "draft_campaigns": draft_campaigns,
             "active_campaigns": active_campaigns,
             # The kill switch: native sending stages nothing while it's set.

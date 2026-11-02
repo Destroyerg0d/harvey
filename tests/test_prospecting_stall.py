@@ -104,6 +104,66 @@ async def test_old_guesses_do_not_stop_a_mixed_setup_returning_to_prospecting(st
     assert await decide_next_action(None, state, CONFIG, summary=summary) == "prospect"
 
 
+async def add_from(state, n, email, email_status, source):
+    await state.add_prospect(Prospect(
+        first_name=f"P{n}", last_name="Doe", title="Owner", company=f"Co{n}",
+        email=email, email_status=email_status, source=source,
+    ))
+
+
+@pytest.mark.asyncio
+async def test_addresses_a_verifier_called_invalid_do_not_pause_prospecting(state):
+    # An invalid verdict shows the verifier is working: no reason to stop.
+    from harvey.main import PROSPECT_BACKLOG, unusable_backlog_notice
+    for n in range(PROSPECT_BACKLOG + 5):
+        await add(state, n, f"p{n}@co{n}.test", "invalid")
+    summary = await state.get_state_summary()
+    assert summary["recent_unusable_prospects"] == 0
+    assert unusable_backlog_notice(summary) == ""
+    assert await decide_next_action(None, state, CONFIG, summary=summary) == "prospect"
+
+
+@pytest.mark.asyncio
+async def test_guesses_on_catch_all_domains_do_not_pause_prospecting(state):
+    # No verifier can judge a catch-all mailbox, so those guesses say
+    # nothing about whether verification is working.
+    from harvey.main import PROSPECT_BACKLOG
+    for n in range(PROSPECT_BACKLOG + 5):
+        await state.save_email_pattern(f"co{n}.test", mx_type="google", is_catch_all=1)
+        await add(state, n, f"p{n}@co{n}.test", "guess")
+    summary = await state.get_state_summary()
+    assert summary["recent_unusable_prospects"] == 0
+    assert await decide_next_action(None, state, CONFIG, summary=summary) == "prospect"
+
+
+@pytest.mark.asyncio
+async def test_imported_guesses_do_not_pause_prospecting(state):
+    from harvey.main import PROSPECT_BACKLOG
+    for n in range(PROSPECT_BACKLOG + 5):
+        await add_from(state, n, f"p{n}@co{n}.test", "guess", "import:a_list")
+    summary = await state.get_state_summary()
+    assert summary["recent_unusable_prospects"] == 0
+    # Scout's own guesses on ordinary domains still count.
+    for n in range(100, 100 + PROSPECT_BACKLOG):
+        await add_from(state, n, f"p{n}@co{n}.test", "guess", "known_company_backfill")
+    assert (await state.get_state_summary())["recent_unusable_prospects"] == PROSPECT_BACKLOG
+
+
+@pytest.mark.asyncio
+async def test_scout_rides_along_while_the_contact_buffer_is_low(state):
+    from harvey.main import CONTACT_BUFFER, keep_scouting
+    from harvey.models.company import Company
+    await state.add_company(Company(name="Waiting Co", domain="waiting.test"))
+    await add(state, 1, "v@verified.test", "verified")
+    summary = await state.get_state_summary()
+    assert summary["companies_needing_prospects"] == 1
+    assert await decide_next_action(None, state, CONFIG, summary=summary) == "write_campaign"
+    assert keep_scouting(summary)
+    # A full buffer, or nothing left to look at, and the writer runs alone.
+    assert not keep_scouting({**summary, "writable_prospects": CONTACT_BUFFER})
+    assert not keep_scouting({**summary, "companies_needing_prospects": 0})
+
+
 @pytest.mark.asyncio
 async def test_no_backlog_notice_while_things_are_moving(state):
     from harvey.main import unusable_backlog_notice

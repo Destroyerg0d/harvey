@@ -109,6 +109,20 @@ def seconds_until_quiet_hours_end(config: HarveyConfig) -> int:
 # is a day, never all time: an all-time count would stop Scout for good.
 PROSPECT_BACKLOG = 20
 
+# Contacts with a deliverable email the Writer hasn't used yet. Below this,
+# Scout also runs in a cycle that writes or sends, as long as known companies
+# are still waiting for a look (that backfill costs no search credits), so
+# the next day's first emails are found before they are needed instead of
+# one cycle in two.
+CONTACT_BUFFER = 60
+
+
+def keep_scouting(summary: dict) -> bool:
+    """Whether Scout should ride along with this cycle's writing or sending."""
+    _, writable = _new_counts(summary)
+    waiting = summary.get("companies_needing_prospects", 0) or 0
+    return waiting > 0 and writable < CONTACT_BUFFER and not unusable_backlog_notice(summary)
+
 
 def _new_counts(summary: dict) -> tuple[int, int]:
     """(all 'new' prospects, the ones the Writer can draft for)."""
@@ -417,6 +431,10 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
                 tasks.append(("analyze", analyst.run()))
             elif action == "write_campaign":
                 tasks.append(("write_campaign", writer.run()))
+                if keep_scouting(summary):
+                    tasks.append(("prospect", scout.run()))
+            elif action == "send_campaign" and keep_scouting(summary):
+                tasks.append(("prospect", scout.run()))
             elif action == "idle":
                 tasks.append(("analyze", analyst.run()))
 
