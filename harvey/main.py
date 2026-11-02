@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import re
 import signal
 import sys
 from datetime import datetime, time, timedelta
@@ -27,6 +28,23 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("harvey")
+
+
+class RedactKeysFilter(logging.Filter):
+    """httpx logs every request URL, and several verifiers take their API
+    key as a query parameter: keep the key out of the terminal and logs."""
+
+    KEY_PARAM = re.compile(r"(?i)\b((?:api_?key|key|token|access_token)=)[^&\s\"']+")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        redacted = self.KEY_PARAM.sub(r"\1<redacted>", message)
+        if redacted != message:
+            record.msg, record.args = redacted, ()
+        return True
+
+
+logging.getLogger("httpx").addFilter(RedactKeysFilter())
 
 # Backoff for consecutive failed cycles: 60s, 120s, 240s, ... capped at 15 min
 ERROR_BACKOFF_BASE = 60
