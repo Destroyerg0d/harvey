@@ -181,12 +181,37 @@ async def test_find_email_catch_all_is_risky(state, monkeypatch):
         return {"status": "valid", "catch_all": True}
     monkeypatch.setattr(ef, "verify_zerobounce", fake_zb)
 
+    # The pattern is confirmed by a real address seen at the company.
+    result = await find_email(
+        "Jane", "Doe", "acme.com", env=Env(zerobounce="k"), state=state,
+        known_emails=[("sam.lee@acme.com", "Sam", "Lee")],
+    )
+    assert result.status == "risky"
+    assert result.email == "jane.doe@acme.com"
+    assert not result.sendable   # verified-only by default
+    # catch-all flag persisted
+    cached = await state.get_email_pattern("acme.com")
+    assert cached["is_catch_all"] == 1
+
+
+@pytest.mark.asyncio
+async def test_find_email_catch_all_with_an_unconfirmed_pattern_is_a_guess(state, monkeypatch):
+    """A catch-all accepts any address, so the default pattern there stays a
+    guess (never sent), not risky."""
+    async def google_mx(domain):
+        return "aspmx.l.google.com"
+    monkeypatch.setattr(ef, "get_mx_host", google_mx)
+    monkeypatch.setattr(ef, "_hunter_api_key", lambda: "")
+
+    async def fake_zb(email, key):
+        return {"status": "valid", "catch_all": True}
+    monkeypatch.setattr(ef, "verify_zerobounce", fake_zb)
+
     result = await find_email(
         "Jane", "Doe", "acme.com", env=Env(zerobounce="k"), state=state
     )
-    assert result.status == "risky"
-    assert not result.sendable   # verified-only by default
-    # catch-all flag persisted
+    assert result.status == "guess"
+    assert not result.sendable
     cached = await state.get_email_pattern("acme.com")
     assert cached["is_catch_all"] == 1
 

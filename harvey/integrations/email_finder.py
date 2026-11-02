@@ -1133,6 +1133,14 @@ async def find_email(
     if status is None:
         # Verification couldn't decide — an honest guess, never "verified".
         status = "guess"
+    elif status == "risky" and source in WEAK_SOURCES:
+        # A catch-all domain accepts every address at check time, so "risky"
+        # says nothing about this mailbox. With a pattern Harvey never saw a
+        # real address use, it is only a guess: in production about half of
+        # those bounced, which pauses a mailbox within a day.
+        logger.info(f"Email for {first_name} {last_name}@{domain}: {candidate} is on a "
+                    "catch-all domain with an unconfirmed pattern; graded guess, not sent")
+        status = "guess"
 
     logger.info(f"Email for {first_name} {last_name}@{domain}: {candidate} [{status}]")
     return EmailResult(email=candidate, status=status, pattern=pattern, mx_type=mx_type)
