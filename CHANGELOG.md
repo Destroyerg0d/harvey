@@ -9,6 +9,23 @@ minor versions can still change behaviour.
 
 ### Added
 
+- **Mailboxes tab on the dashboard.** Sending health and results for every
+  configured mailbox and sending domain, read-only. A summary (sent today
+  against the sum of the mailboxes' daily limits, 7-day sends, bounce rate
+  over 7 days and all time, reply rate, mailboxes sending or paused, queued
+  emails); a card per domain with its SPF, DKIM, DMARC, MX, domain age and
+  blocklist checks and a 0-100 health score whose working is listed on the
+  card (start at 100; bounce rate over 2/3/5% takes 10/25/40; each of SPF,
+  DKIM and DMARC takes 15 when missing or broken and 5 when weak; no MX 10; a
+  blocklist listing 30; a domain under 30/90 days old 10/5; each paused
+  mailbox 10). DNS runs off the event loop and is cached per domain for an
+  hour, with a **Re-check DNS now** button (at most once a minute). A row per
+  mailbox (status and why, today against its limit, 7 days, total, bounces
+  since resume and all time, replies, opt-outs, queue, last send), 14 days of
+  sends per mailbox and bounces as small multiples, and the results funnel
+  counted as the Today tab counts it. `GET /api/mailboxes`, logic in
+  `harvey/mailbox_health.py`.
+
 - **Your own email shape** (`writer.email_rules`). Point it at a markdown file
   (`skills/email_rules.md` is gitignored) and its rules replace the Writer's
   built-in shape, which ends every prompt and so beat anything in the skills:

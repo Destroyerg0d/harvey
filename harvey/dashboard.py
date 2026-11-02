@@ -1740,6 +1740,30 @@ async def get_trend(days: int = 14, tz: int = 0):
     }
 
 
+@app.get("/api/mailboxes")
+async def get_mailboxes(tz: int = 0, dns: str = "cached", refresh: bool = False):
+    """Sending health and results for every mailbox and sending domain (the
+    Mailboxes tab). Read-only. ``tz``: the viewer's minutes east of UTC, for
+    "today" and the chart's days. ``dns=wait`` looks up each domain's DNS
+    and blocklists (cached for an hour; ``refresh=true`` looks again);
+    otherwise only cached answers are used, so the page never waits on DNS."""
+    from harvey import mailbox_health as health
+    from harvey.config import load_config
+    try:
+        config = load_config()
+    except Exception as e:
+        return JSONResponse({"error": f"Couldn't read the config: {e}"}, status_code=500)
+    try:
+        state = _state()
+        await state.init_db()
+        report = await health.collect(DB_PATH, config, tz_minutes=tz)
+        await health.add_domain_checks(report, config, wait=dns == "wait", refresh=refresh)
+        return report
+    except Exception as e:
+        logger.exception("mailboxes load failed")
+        return {"error": str(e)}
+
+
 @app.get("/api/activity")
 async def get_activity():
     rows = await query_db("SELECT * FROM actions ORDER BY created_at DESC LIMIT 100")

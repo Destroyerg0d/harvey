@@ -415,6 +415,7 @@ function loadCurrentTab() {
     case 'campaigns': loadCampaigns(); break;
     case 'outbox': loadOutbox(); break;
     case 'conversations': loadConversations(); break;
+    case 'mailboxes': loadMailboxes(); break;
     case 'activity': loadActivity(); break;
     case 'usage': loadUsage(); break;
     case 'settings': loadSettings(); loadSendingModeCard(); break;
@@ -2614,6 +2615,347 @@ async function loadActivity() {
   el.innerHTML = html + '</div></div>';
 }
 
+// ── Mailboxes: sending health and results ──
+//
+// One card per sending domain (DNS, blocklists, a health score with its
+// working shown), one row per mailbox, 14 days of sends as small multiples,
+// and the pipeline funnel. Everything is read-only: a paused mailbox points
+// at the Outbox, where it is resumed. DNS answers are cached on the server
+// for an hour; the first load asks for cached ones only, then waits for the
+// lookups, so the numbers never wait on DNS.
+
+let _mbx = null, _mbxDnsBusy = false;
+const _mbxOpen = new Set();   // domains whose score working is unfolded
+
+function mbxTz() { return -new Date().getTimezoneOffset(); }
+
+async function loadMailboxes() {
+  const data = await api('/api/mailboxes?tz=' + mbxTz());
+  if (currentTab !== 'mailboxes') return;
+  renderMailboxes(data);
+  if (data && !data.error && (data.domains || []).some(d => d.checking)) mbxLookUpDns(false);
+}
+
+async function mbxLookUpDns(refresh, btn) {
+  if (_mbxDnsBusy) return null;
+  _mbxDnsBusy = true;
+  if (btn) btn.disabled = true;
+  const when = document.getElementById('mbx-dns-when');
+  if (when) when.textContent = 'checking DNS and blocklists…';
+  try {
+    const data = await api('/api/mailboxes?tz=' + mbxTz() + '&dns=wait' + (refresh ? '&refresh=true' : ''));
+    _mbxDnsBusy = false;
+    if (data && !data.error && currentTab === 'mailboxes') renderMailboxes(data);
+    return data && !data.error ? data : null;
+  } finally {
+    _mbxDnsBusy = false;
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function recheckMailboxDns(btn) {
+  const stamps = d => ((d && d.domains) || []).map(x => x.checked_at || '').join(',');
+  const before = stamps(_mbx);
+  const data = await mbxLookUpDns(true, btn);
+  if (!data) { showToast('Couldn\'t check right now.', 'error'); return; }
+  // The server looks again at most once a minute (blocklists rate-limit).
+  showToast(before && stamps(data) === before
+    ? 'Checked under a minute ago, so that result stands.' : 'DNS and blocklists checked again.', 'success');
+}
+
+function mbxToggle(el, domain) {
+  if (el.open) _mbxOpen.add(domain); else _mbxOpen.delete(domain);
+}
+
+function renderMailboxes(data) {
+  const ids = ['mbx-banner', 'mbx-summary', 'mbx-domains', 'mbx-table', 'mbx-chart', 'mbx-results'];
+  const el = Object.fromEntries(ids.map(id => [id, document.getElementById(id)]));
+  if (!data || data.error) {
+    ids.forEach(id => { el[id].innerHTML = ''; });
+    el['mbx-summary'].innerHTML = !data ? offlineState()
+      : emptyState(icon('alert'), 'Couldn\'t read the mailboxes', escHtml(data.error));
+    return;
+  }
+  _mbx = data;
+  el['mbx-banner'].innerHTML = mbxBannerHtml(data);
+  el['mbx-summary'].innerHTML = mbxSummaryHtml(data);
+  el['mbx-domains'].innerHTML = (data.domains || []).length
+    ? '<div class="mbx-domains">' + data.domains.map(d => mbxDomainCard(d, data)).join('') + '</div>'
+    : '<div class="card">' + emptyState(icon('mailboxes'), 'No sending domain yet',
+        'Set <b>persona.email</b>, or list your mailboxes under <b>channels.email.mailboxes</b>, and they show up here.') + '</div>';
+  el['mbx-table'].innerHTML = mbxTableHtml(data);
+  el['mbx-chart'].innerHTML = mbxChartHtml(data.daily || {});
+  el['mbx-results'].innerHTML = mbxFunnelHtml(data.funnel || {});
+  const note = document.getElementById('mbx-score-note');
+  if (note) note.textContent = data.score_note || '';
+  const when = document.getElementById('mbx-dns-when');
+  if (when) {
+    const checked = (data.domains || []).map(d => d.checked_at).filter(Boolean).sort()[0];
+    when.textContent = _mbxDnsBusy ? 'checking DNS and blocklists…'
+      : checked ? 'DNS checked ' + relTime(checked) + ' · kept for an hour' : '';
+  }
+}
+
+// A share as a percentage ("–" when there is nothing to divide by).
+function mbxPct(rate) {
+  if (rate === null || rate === undefined || isNaN(Number(rate))) return '&ndash;';
+  const p = Number(rate) * 100;
+  return (p > 0 && p < 10 ? p.toFixed(1) : String(Math.round(p))) + '%';
+}
+
+function mbxNum(n) {
+  return escHtml(Number(n || 0).toLocaleString('en-US'));
+}
+
+function mbxStatusBadge(status) {
+  const map = {
+    sending: ['Sending', 'good'], paused: ['Paused', 'bad'], not_connected: ['Not connected', 'bad'],
+    failing: ['Failing', 'bad'], untracked: ['Not tracked', 'idle'], not_configured: ['Not in config', 'idle'],
+  };
+  const m = Object.prototype.hasOwnProperty.call(map, status) ? map[status] : [String(status || 'Unknown'), 'idle'];
+  return '<span class="badge t-' + m[1] + '">' + escHtml(m[0]) + '</span>';
+}
+
+function mbxCheckBadge(status) {
+  const map = {ok: ['Pass', 'good'], warn: ['Warn', 'waiting'], fail: ['Fail', 'bad'], info: ['Unknown', 'idle']};
+  const m = Object.prototype.hasOwnProperty.call(map, status) ? map[status] : ['Unknown', 'idle'];
+  return '<span class="badge t-' + m[1] + '">' + m[0] + '</span>';
+}
+
+// Where a paused mailbox is resumed: the Outbox (resuming resets its bounce count).
+function mbxResumeLink(m) {
+  const cli = m.pause_scope === 'all' ? 'harvey sending resume' : 'harvey sending resume --mailbox ' + m.email;
+  return '<a href="#" class="mbx-resume" onclick="goTab(\'outbox\');return false" title="' +
+    escHtml('Or in your terminal: ' + cli) + '">' +
+    (m.pause_scope === 'all' ? 'Resume sending on the Outbox tab' : 'Resume it on the Outbox tab') + '</a>';
+}
+
+function mbxBannerHtml(data) {
+  const s = data.summary || {};
+  let html = '';
+  if (data.tracks_sends === false) {
+    html += '<div class="banner wait">' + icon('alert') + '<div><b>Instantly sends from its own servers</b>' +
+      '<p>Harvey can\'t count sends or bounces per mailbox with Instantly, so those numbers stay at 0. ' +
+      'The domain checks and the results still apply.</p></div></div>';
+  }
+  if (s.global_pause) {
+    html += '<div class="banner bad">' + icon('alert') + '<div><b>All sending is paused</b>' +
+      '<p>' + escHtml(s.global_pause) + '. Nothing goes out from any mailbox until you resume it on the Outbox tab.</p></div>' +
+      '<button class="btn btn-secondary btn-sm" onclick="goTab(\'outbox\')">Open the Outbox</button></div>';
+  }
+  const own = (data.mailboxes || []).filter(m => m.status === 'paused' && m.pause_scope === 'mailbox');
+  if (own.length) {
+    html += '<div class="banner bad">' + icon('alert') + '<div><b>' +
+      (own.length === 1 ? escHtml(own[0].email) + ' is paused' : own.length + ' mailboxes are paused') + '</b>' +
+      '<p>' + own.map(m => escHtml(m.email) + ': ' + escHtml(m.paused)).join('<br>') +
+      '. The other mailboxes carry on. Resume each one on the Outbox tab.</p></div>' +
+      '<button class="btn btn-secondary btn-sm" onclick="goTab(\'outbox\')">Open the Outbox</button></div>';
+  }
+  return html;
+}
+
+function mbxSummaryHtml(data) {
+  const s = data.summary || {};
+  const card = (label, value, note, extra) =>
+    '<div class="kpi"><div class="kpi-label">' + label + '</div>' +
+    '<div class="kpi-main"><span class="kpi-value' + (value === '0' || value === '&ndash;' ? ' zero' : '') + '">' +
+      value + '</span>' + (extra || '') + '</div>' +
+    '<span class="kpi-note">' + note + '</span></div>';
+  const cap = Number(s.capacity || 0), today = Number(s.sent_today || 0);
+  const pct = cap ? Math.min(100, Math.round(100 * today / cap)) : 0;
+  const capBar = cap ? '<span class="bar mbx-capbar" title="' + pct + '% of today\'s capacity">' +
+    '<span style="width:' + pct + '%;background:var(--accent)"></span></span>' : '';
+  const over = r => r !== null && r !== undefined && Number(r) > 0.03
+    ? ' <span class="mini t-bad">over 3%</span>' : '';
+  const others = [
+    s.paused ? s.paused + ' paused' : '', s.not_connected ? s.not_connected + ' not connected' : '',
+    s.failing ? s.failing + ' failing' : '',
+  ].filter(Boolean).join(' · ');
+  return '<div class="kpis mbx-kpis">' +
+    card('Sent today', mbxNum(today) + '<small> / ' + mbxNum(cap) + '</small>',
+      cap ? pct + '% of the daily capacity of ' + (s.mailboxes || 0) + ' mailbox' + (s.mailboxes === 1 ? '' : 'es')
+          : 'no daily limit set', capBar) +
+    card('Sent, last 7 days', mbxNum(s.sent_7d), '<b>' + mbxNum(s.sent_total) + '</b> all time') +
+    card('Bounce rate, 7 days', mbxPct(s.bounce_rate_7d),
+      '<b>' + mbxNum(s.bounces_7d) + '</b> bounced · ' + mbxPct(s.bounce_rate) + ' all time (' +
+      mbxNum(s.bounces_total) + ')' + over(s.bounce_rate_7d)) +
+    card('Reply rate', mbxPct(s.reply_rate),
+      '<b>' + mbxNum(s.replied) + '</b> of ' + mbxNum(s.contacted) + ' people wrote back · ' +
+      mbxNum(s.positive) + ' positive') +
+    card('Mailboxes sending', mbxNum(s.sending) + '<small> / ' + mbxNum(s.mailboxes) + '</small>',
+      others || 'none paused') +
+    card('Queued', mbxNum(s.queued),
+      '<b>' + mbxNum(s.to_approve) + '</b> to approve · ' + mbxNum(s.approved) + ' approved') +
+  '</div>';
+}
+
+function mbxDomainCard(d, data) {
+  const h = d.health || {items: []};
+  const tone = {good: 'good', watch: 'waiting', risk: 'bad'}[h.grade] || 'idle';
+  const checks = d.checks;
+  const score = checks
+    ? '<span class="mbx-score-n t-' + tone + '">' + escHtml(String(h.score)) + '</span>' +
+      '<span class="badge t-' + tone + '">' + escHtml(h.label || '') + '</span>'
+    : '<span class="mbx-score-n t-idle">&hellip;</span><span class="badge t-idle">' +
+      (d.check_failed ? 'DNS not checked' : 'Checking DNS') + '</span>';
+  const fig = (label, value, sub) => '<div class="mbx-fig"><span class="k">' + label + '</span>' +
+    '<span class="v">' + value + '</span><span class="s">' + sub + '</span></div>';
+  const row = (c, name) => !c ? '' : '<div class="mbx-check"><span class="k">' + escHtml(name || c.name) + '</span>' +
+    mbxCheckBadge(c.status) + '<span class="d">' + escHtml(c.detail) + '</span></div>';
+  const lists = checks ? checks.blocklists || [] : [];
+  const checkRows = checks
+    ? ['spf', 'dkim', 'dmarc', 'mx', 'age'].map(k => row(checks[k])).join('') +
+      (lists.length ? '<div class="mbx-checkgroup">Domain blocklists</div>' : '') +
+      lists.map(c => row(c, String(c.name || '').replace(/^Blocklist /, ''))).join('')
+    : '<p class="muted mbx-pending">' + (d.check_failed
+        ? 'Harvey couldn\'t look this domain up. Try Re-check DNS now.'
+        : 'Looking up SPF, DKIM, DMARC, MX, domain age and blocklists&hellip;') + '</p>';
+  const items = (h.items || []).map(i =>
+    '<div class="mbx-item' + (i.points ? ' off' : '') + '"><span class="k">' + escHtml(i.rule) + '</span>' +
+    '<span class="d">' + escHtml(i.result) + '</span>' +
+    '<span class="p">' + (i.points ? '&minus;' + Math.abs(i.points) : '0') + '</span></div>').join('');
+  const formula = (data && data.score_formula || []).map(f => '<li>' + escHtml(f) + '</li>').join('');
+  const boxes = (d.mailboxes || []).map(e => '<span class="tag">' + escHtml(e) + '</span>').join('');
+  return '<div class="card mbx-domain">' +
+    '<div class="mbx-dhead"><div class="cell-stack"><h3>' + escHtml(d.domain) + '</h3>' +
+      '<span class="cell-sub">' + (d.mailboxes || []).length + ' mailbox' +
+      ((d.mailboxes || []).length === 1 ? '' : 'es') + ' · up to ' + mbxNum(d.capacity) + ' a day</span></div>' +
+      '<div class="mbx-score" title="Health score, 0 to 100">' + score + '</div></div>' +
+    '<div class="mbx-boxes">' + boxes + '</div>' +
+    '<div class="mbx-figs">' +
+      fig('Sent', mbxNum(d.sent_total), mbxNum(d.sent_7d) + ' in 7 days') +
+      fig('Bounced', mbxNum(d.bounces_total), mbxPct(d.bounce_rate) + ' · ' + mbxPct(d.bounce_rate_7d) + ' in 7 days') +
+      fig('Replied', mbxNum(d.replied), mbxPct(d.reply_rate) + ' · ' + mbxNum(d.positive) + ' positive') +
+      fig('Opted out', mbxNum(d.opted_out), (d.contacted ? mbxPct(d.opted_out / d.contacted) : '&ndash;') +
+        ' of ' + mbxNum(d.contacted) + ' people') +
+    '</div>' +
+    '<div class="mbx-checks">' + checkRows + '</div>' +
+    '<div class="mbx-working"><div class="mbx-wtitle">Score: 100' +
+      (h.items || []).filter(i => i.points).map(i => ' &minus; ' + Math.abs(i.points)).join('') +
+      ' = ' + (checks ? escHtml(String(h.score)) : 'pending DNS') + '</div>' + items + '</div>' +
+    '<p class="mbx-note">' + escHtml(data && data.score_note || '') + '</p>' +
+    '<details class="mbx-formula"' + (_mbxOpen.has(d.domain) ? ' open' : '') +
+      ' ontoggle="mbxToggle(this, ' + jsq(d.domain) + ')"><summary>How the score is worked out</summary>' +
+      '<ul>' + formula + '</ul></details>' +
+  '</div>';
+}
+
+function mbxTableHtml(data) {
+  const rows = data.mailboxes || [];
+  if (!rows.length) return '<div class="card">' + emptyState(icon('mailboxes'), 'No mailboxes configured',
+    'Harvey sends from <b>persona.email</b>, or from each mailbox listed under <b>channels.email.mailboxes</b>.') + '</div>';
+  const sub = t => t ? '<div class="cell-sub">' + t + '</div>' : '';
+  const body = rows.map(m => {
+    const limit = Number(m.daily_limit || 0);
+    const pct = limit ? Math.min(100, Math.round(100 * (m.sent_today || 0) / limit)) : 0;
+    const why = [
+      m.reason ? escHtml(m.reason) : '',
+      m.status === 'paused' ? mbxResumeLink(m) : '',
+      m.status === 'not_connected' && m.paused ? 'Also paused: ' + escHtml(m.paused) : '',
+      m.last_inbox_read && m.status !== 'not_connected' ? 'Inbox read ' + relTime(m.last_inbox_read) : '',
+    ].filter(Boolean).map(t => '<div class="cell-sub mbx-why">' + t + '</div>').join('');
+    const todayNote = [
+      data.multi && m.configured ? mbxNum(m.sent_24h) + ' in 24h' : '',
+      m.cold_cap_today !== null && m.cold_cap_today !== undefined && m.cold_cap_today < limit
+        ? 'warmup allows ' + mbxNum(m.cold_cap_today) + ' cold today' : '',
+    ].filter(Boolean).join(' · ');
+    return '<tr' + (m.configured ? '' : ' class="mbx-old"') + '>' +
+      '<td><div class="cell-main">' + escHtml(m.email) +
+        (m.is_primary && data.multi ? ' <span class="tag">primary</span>' : '') + '</div>' +
+        sub(escHtml(m.name)) + '</td>' +
+      '<td>' + mbxStatusBadge(m.status) + why + '</td>' +
+      '<td class="num"><div>' + mbxNum(m.sent_today) + (limit ? '<span class="muted"> / ' + mbxNum(limit) + '</span>' : '') + '</div>' +
+        (limit ? '<span class="bar mbx-rowbar"><span style="width:' + pct + '%;background:var(--accent)"></span></span>' : '') +
+        sub(todayNote) + '</td>' +
+      '<td class="num">' + mbxNum(m.sent_7d) + '</td>' +
+      '<td class="num">' + mbxNum(m.sent_total) + '</td>' +
+      '<td class="num">' + mbxNum(m.bounces_total) + ' <span class="muted">· ' + mbxPct(m.bounce_rate) + '</span>' +
+        sub(m.configured ? mbxNum(m.bounces_since_resume) + ' since resume' : '') + '</td>' +
+      '<td class="num">' + mbxNum(m.replied) + ' <span class="muted">· ' + mbxPct(m.reply_rate) + '</span>' +
+        sub(mbxNum(m.positive) + ' positive') + '</td>' +
+      '<td class="num">' + mbxNum(m.opted_out) + '</td>' +
+      '<td class="num">' + mbxNum(m.queued) + sub(m.to_approve ? mbxNum(m.to_approve) + ' to approve' : '') + '</td>' +
+      '<td>' + (m.last_sent ? '<span title="' + formatDate(m.last_sent) + '">' + relTime(m.last_sent) + '</span>'
+        : '<span class="muted">never</span>') + '</td>' +
+    '</tr>';
+  }).join('');
+  return '<div class="table-card"><table class="mbx-table"><thead><tr>' +
+    '<th>Mailbox</th><th>Status</th><th class="num">Today</th><th class="num">7 days</th>' +
+    '<th class="num">Total sent</th><th class="num">Bounces</th><th class="num">Replies</th>' +
+    '<th class="num">Opt-outs</th><th class="num">Queued</th><th>Last sent</th>' +
+    '</tr></thead><tbody>' + body + '</tbody></table></div>' +
+    '<p class="table-foot">Today is your local day. A mailbox\'s daily limit counts its last 24 hours ' +
+    '(one mailbox: the UTC day), and warmup can hold cold email lower. Replies and opt-outs count the ' +
+    'people each mailbox emailed. Bounces since resume is what the bounce-rate switch reads; ' +
+    'resuming a mailbox sets it back to 0.</p>';
+}
+
+// Small multiples: one row of 14 bars per mailbox (one shared scale), a row
+// for all of them, and one for bounces. No legend colours to decode.
+function mbxChartHtml(daily) {
+  const days = daily.days || [];
+  if (!days.length) return '<p class="muted">Nothing to chart yet.</p>';
+  const short = day => {
+    const dt = new Date(day + 'T12:00:00');
+    return isNaN(dt) ? day : dt.toLocaleDateString('en-US', {month: 'short', day: 'numeric'});
+  };
+  const series = daily.series || [];
+  const boxMax = Math.max(1, ...series.flatMap(s => s.sent || []));
+  const bars = (vals, max, cls, tip) => '<span class="mbx-bars">' + vals.map((v, i) =>
+    '<i class="' + cls + (v ? '' : ' zero') + '" style="height:' + (v ? Math.max(6, Math.round(100 * v / max)) : 0) +
+    '%" title="' + escHtml(short(days[i]) + ': ' + tip(v, i)) + '"></i>').join('') + '</span>';
+  const sum = a => (a || []).reduce((x, y) => x + (Number(y) || 0), 0);
+  const line = (name, vals, max, cls, tip, extra) =>
+    '<div class="mbx-crow' + (extra || '') + '"><span class="mbx-cname" title="' + escHtml(name) + '">' + escHtml(name) +
+    '</span>' + bars(vals, max, cls, tip) + '<span class="mbx-ctotal">' + mbxNum(sum(vals)) + '</span></div>';
+  const all = daily.sent || days.map(() => 0);
+  const bounced = daily.bounces || days.map(() => 0);
+  const plural = (n, one) => n + ' ' + one + (n === 1 ? '' : 's');
+  return '<div class="mbx-chart" role="img" aria-label="Emails sent per day by each mailbox, and bounces, over the last ' +
+      days.length + ' days">' +
+    line('All mailboxes', all, Math.max(1, ...all), 'c-accent', (v, i) => plural(v, 'email') + ' sent, ' +
+      plural(bounced[i] || 0, 'bounce'), ' total') +
+    series.map(s => line(s.email, s.sent || [], boxMax, 'c-accent', (v, i) =>
+      plural(v, 'email') + ' sent, ' + plural((s.bounces || [])[i] || 0, 'bounce'))).join('') +
+    line('Bounces', bounced, Math.max(1, ...bounced), 'c-bad', v => plural(v, 'bounce'), ' bounces') +
+    '<div class="mbx-crow axis"><span class="mbx-cname"></span><span class="mbx-axis"><span>' +
+      escHtml(short(days[0])) + '</span><span>Today</span></span><span class="mbx-ctotal">total</span></div>' +
+  '</div>' +
+  '<p class="table-foot">The mailbox rows share one scale, so their bars compare directly. ' +
+    'Hover a bar for the day\'s numbers.</p>';
+}
+
+function mbxFunnelHtml(f) {
+  const contacted = Number(f.contacted || 0);
+  const stages = [
+    ['Companies found', f.companies],
+    ['Contacts with a sendable email', f.sendable],
+    ['Contacted', f.contacted],
+    ['Replied', f.replied, true],
+    ['Interested', f.positive, true],
+    ['Ready to meet', f.ready_to_meet, true],
+  ];
+  const max = Math.max(1, ...stages.map(s => Number(s[1] || 0)));
+  const rows = stages.map(s => {
+    const n = Number(s[1] || 0);
+    return '<div class="mbx-frow"><span class="k">' + s[0] + '</span>' +
+      '<span class="v">' + mbxNum(n) + '</span>' +
+      '<span class="pct">' + (s[2] && contacted ? mbxPct(n / contacted) : '') + '</span>' +
+      '<span class="bar"><span style="width:' + (n ? Math.max(1, 100 * n / max) : 0) + '%;background:var(--accent)"></span></span>' +
+    '</div>';
+  }).join('');
+  return '<div class="mbx-funnel">' + rows + '</div>' +
+    '<div class="figures mbx-after">' +
+      '<div class="figure"><span class="k">Not interested</span><span class="v' + (f.not_interested ? '' : ' zero') + '">' +
+        mbxNum(f.not_interested) + '</span></div>' +
+      '<div class="figure"><span class="k">Opted out</span><span class="v' + (f.opted_out ? '' : ' zero') + '">' +
+        mbxNum(f.opted_out) + (contacted ? ' <small class="muted">' + mbxPct(f.opt_out_rate) + '</small>' : '') + '</span></div>' +
+    '</div>' +
+    '<p class="figure-note">Percentages are of contacted. Replied counts every answer, a no and an ' +
+      'opt-out included. Interested and Ready to meet follow how Harvey read each reply, as Today\'s ' +
+      'Contacts by stage does; Harvey doesn\'t see your calendar, so a meeting booked elsewhere isn\'t counted.</p>';
+}
+
 // ── Init & live refresh ──
 
 loadToday();
@@ -2655,6 +2997,7 @@ setInterval(() => {
     case 'prospects': loadProspects(); break;
     case 'campaigns': loadCampaigns(); break;
     case 'conversations': loadConversations(); break;
+    case 'mailboxes': loadMailboxes(); break;
     case 'activity': loadActivity(); break;
     case 'usage': loadUsage(); break;
     case 'controls': loadLogs(); break;
