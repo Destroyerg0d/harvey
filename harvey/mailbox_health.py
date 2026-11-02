@@ -80,6 +80,11 @@ def _box(alias: str) -> str:
 # reads a row whose details aren't JSON.
 _BOUNCE_BOX = ("(CASE WHEN json_valid(details_json) THEN COALESCE(NULLIF(lower(trim("
                "json_extract(details_json, '$.mailbox'))), ''), ?) ELSE ? END)")
+# Older Handlers logged a bounce they couldn't match to any email Harvey had
+# sent (a warmup network's notice, say) with total_sent 0. Those weren't
+# Harvey's bounces and no longer count anywhere else, so not here either.
+_MATCHED_BOUNCE = ("NOT (json_valid(details_json) AND COALESCE("
+                   "CAST(json_extract(details_json, '$.total_sent') AS INTEGER), -1) = 0)")
 
 
 # ── The health score ─────────────────────────────────────────────────────
@@ -389,7 +394,8 @@ async def collect(db_path, config, *, tz_minutes: int = 0, now: datetime | None 
             for r in await _rows(db, (
                     f"SELECT {_BOUNCE_BOX} AS box, COUNT(*) AS total, "
                     "SUM(julianday(created_at) >= julianday(?)) AS week "
-                    "FROM actions WHERE action_type = 'bounce' GROUP BY box"),
+                    f"FROM actions WHERE action_type = 'bounce' AND {_MATCHED_BOUNCE} "
+                    "GROUP BY box"),
                     (primary, primary, week_ago)):
                 box = boxes.setdefault(r["box"], _empty_box(r["box"]))
                 box["bounces_total"] = int(r["total"] or 0)
@@ -420,7 +426,8 @@ async def collect(db_path, config, *, tz_minutes: int = 0, now: datetime | None 
                 daily_sent.setdefault(r["box"], {})[r["day"]] = int(r["n"] or 0)
             for r in await _rows(db, (
                     f"SELECT {_BOUNCE_BOX} AS box, date(created_at, ?) AS day, COUNT(*) AS n "
-                    "FROM actions WHERE action_type = 'bounce' AND date(created_at, ?) >= ? "
+                    f"FROM actions WHERE action_type = 'bounce' AND {_MATCHED_BOUNCE} "
+                    "AND date(created_at, ?) >= ? "
                     "GROUP BY box, day"), (primary, primary, shift, shift, labels[0])):
                 daily_bounced.setdefault(r["box"], {})[r["day"]] = int(r["n"] or 0)
 

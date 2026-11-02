@@ -217,6 +217,16 @@ def test_each_mailbox_counts_its_own_sends_bounces_replies_and_queue(seeded, mul
     assert t["approved"] == 1                                # 'sending' is on its way
 
 
+def test_a_bounce_never_matched_to_a_sent_email_is_not_counted(seeded, multi):
+    # Older Handlers logged a warmup network's bounce notice with total_sent 0.
+    bounce(seeded, "phantom", ago(hours=3),
+           raw=json.dumps({"prospect": "unknown", "bounces": 3, "total_sent": 0}))
+    report = run_collect(seeded, multi)
+    p = by_email(report)[PRIMARY]
+    assert (p["bounces_total"], p["bounces_7d"]) == (2, 0)
+    assert report["summary"]["bounces_total"] == 3   # b1, b2, b3; not the phantom
+
+
 def test_status_says_paused_not_connected_or_failing_and_why(seeded, multi):
     boxes = by_email(run_collect(seeded, multi))
     assert boxes[SECOND]["status"] == "paused"
