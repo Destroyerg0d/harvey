@@ -68,7 +68,7 @@ MAX_RESULTS_PER_QUERY = 20
 # Serper free accounts reject num > 10 with HTTP 400
 # "Query pattern not allowed for free accounts" (verified 2026-10-26).
 SERPER_MAX_NUM = 10
-MAX_COMPANIES_PER_CYCLE = 10
+MAX_COMPANIES_PER_CYCLE = 25
 
 # Reading a company's site: the homepage, then up to five pages its own menu
 # links to (team, meet-the-doctors, about, contact...), never more than six
