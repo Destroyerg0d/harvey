@@ -58,8 +58,6 @@ async def segment_for_company(state, company_id: str, prospect=None) -> str:
     site, then the company's or the prospect's industry naming Shopify; else
     "unknown"."""
     # One rule for the Writer's campaigns and these stamps: harvey.segments.
-    from harvey.segments import segment_of
-
     company, platform, score = None, "", None
     if company_id:
         try:
@@ -78,10 +76,20 @@ async def segment_for_company(state, company_id: str, prospect=None) -> str:
     stack = getattr(company, "tech_stack", None) if company is not None else None
     industry = " ".join(i for i in (getattr(company, "industry", "") if company is not None else "",
                                     getattr(prospect, "industry", "") if prospect is not None else "") if i)
+    return segment_from_facts(platform, score, stack, industry)
+
+
+def segment_from_facts(platform: str, score, stack, industry: str) -> str:
+    """segment_for_company's rule on facts already read: the SITE_PLATFORM
+    text, the LEGACY_SITE_SCORE number (or None), the tech stack and the
+    industry label(s)."""
+    from harvey.segments import segment_of
+
+    platform = str(platform or "")
     # "Zen Cart" / "magento 1" -> the profile's ids ("zencart", "magento1");
     # underscores stay ("custom_php").
     platform_id = re.sub(r"[\s\-./]+", "", platform.strip().lower())
-    segment = segment_of(platform_id or None, stack, industry, score)
+    segment = segment_of(platform_id or None, stack, industry or "", score)
     if segment == "other" and not _platform_segment(platform) and not _stack_segment(stack):
         return "unknown"   # nothing read the site yet: not a real "other"
     return segment

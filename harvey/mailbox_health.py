@@ -19,6 +19,12 @@ Where each number comes from:
   anyone who wrote back, a no and an opt-out included.
 - The results funnel: the same prospect statuses and conversation buckets
   the Today tab uses (dashboard._pipeline_bucket).
+- Segments: cold email (sequence rows) by the segment stamped on it when it
+  went out ("unknown" for mail sent before segments were stamped), and each
+  bounce against the segment of the email it names (its outbox_id). A
+  bounce that names none is counted apart. The mix shows each segment's
+  target and today's share (harvey/segment_mix.py: the ramp level is read
+  from its setting, never changed here) next to today's first emails.
 
 The health score is Harvey's own estimate from bounces, DNS and blocklists
 (``health_score``). It is not an inbox-placement score: only a warmup or
@@ -35,6 +41,7 @@ import aiosqlite
 
 from harvey import deliverability as d
 from harvey import mailboxes as mb
+from harvey import segment_mix as sm
 from harvey.state import AUTO_CONVERSATION
 
 # The global bounce counter (agents/handler.BOUNCE_COUNT_KEY): with one
@@ -363,6 +370,9 @@ async def collect(db_path, config, *, tz_minutes: int = 0, now: datetime | None 
     funnel_rows: list[dict] = []
     companies = 0
     settings: dict[str, str] = {}
+    segment_rows: list[dict] = []
+    segment_bounces: list[dict] = []
+    unattributed = 0
 
     path = Path(db_path)
     if path.exists():
@@ -441,7 +451,9 @@ async def collect(db_path, config, *, tz_minutes: int = 0, now: datetime | None 
                 f"{latest} GROUP BY p.status, p.email_status, has_email, l.stage, l.intent, "
                 "l.status"))
 
-            keys = [mb.GLOBAL_PAUSE_KEY, GLOBAL_BOUNCE_KEY]
+            segment_rows, segment_bounces, unattributed = await _segment_counts(db, midnight, week_ago)
+
+            keys = [mb.GLOBAL_PAUSE_KEY, GLOBAL_BOUNCE_KEY, sm.RAMP_KEY]
             for m in configured:
                 keys += [mb.paused_key(m.email), mb.bounce_key(m.email),
                          mb.read_ok_key(m.email), mb.down_since_key(m.email)]
@@ -590,8 +602,67 @@ async def collect(db_path, config, *, tz_minutes: int = 0, now: datetime | None 
         "domains": list(domains.values()),
         "daily": daily,
         "funnel": _funnel(companies, funnel_rows, _pipeline_bucket),
+        "segments": _segments(config, segment_rows, segment_bounces, unattributed,
+                              settings.get(sm.RAMP_KEY, "")),
         "score_formula": SCORE_FORMULA,
         "score_note": SCORE_NOTE,
+    }
+
+
+async def _segment_counts(db, midnight: str, week_ago: str) -> tuple[list[dict], list[dict], int]:
+    """Cold email sent by segment (all time, 7 days, first emails today),
+    bounces by the segment of the email they name, and how many matched
+    bounces name no email of Harvey's."""
+    seg = "COALESCE(NULLIF(trim(o.segment), ''), 'unknown')"
+    sent = await _rows(db, (
+        f"SELECT {seg} AS segment, COUNT(*) AS sent_total, "
+        "SUM(julianday(o.sent_at) >= julianday(?)) AS sent_7d, "
+        "SUM(o.step = 1 AND julianday(o.sent_at) >= julianday(?)) AS first_today "
+        "FROM outbox o WHERE o.status = 'sent' AND o.kind = 'sequence' GROUP BY segment"),
+        (week_ago, midnight))
+    named = sm.bounced_row_sql("a")
+    bounced = await _rows(db, (
+        f"SELECT {seg} AS segment, COUNT(*) AS total, "
+        "SUM(julianday(a.created_at) >= julianday(?)) AS week "
+        f"FROM actions a JOIN outbox o ON o.id = {named} "
+        "WHERE a.action_type = 'bounce' AND o.kind = 'sequence' GROUP BY segment"), (week_ago,))
+    loose = await _rows(db, (
+        "SELECT COUNT(*) AS n FROM actions a WHERE a.action_type = 'bounce' "
+        f"AND {_MATCHED_BOUNCE} AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.id = {named})"))
+    return sent, bounced, int((loose[0]["n"] if loose else 0) or 0)
+
+
+def _segments(config, sent_rows: list[dict], bounce_rows: list[dict], unattributed: int,
+              ramp_raw: str) -> dict:
+    """The Segments section: sends and bounces per segment, and the mix."""
+    by = {r["segment"]: r for r in sent_rows}
+    bounces = {r["segment"]: r for r in bounce_rows}
+    weights = sm.weights_of(config)
+    ramp = sm.read_ramp(ramp_raw)
+    shares = sm.effective_shares(weights, ramp["level"]) if weights else {}
+    names = [s for s in sm.MIX_SEGMENTS if s in by or s in bounces or s in weights]
+    names += sorted(set(by) - set(names))
+    first_total = sum(int(r.get("first_today") or 0) for r in sent_rows)
+    rows = []
+    for name in names:
+        r, b = by.get(name, {}), bounces.get(name, {})
+        sent_total, sent_7d = int(r.get("sent_total") or 0), int(r.get("sent_7d") or 0)
+        bounced, bounced_7d = int(b.get("total") or 0), int(b.get("week") or 0)
+        first_today = int(r.get("first_today") or 0)
+        rows.append({
+            "segment": name, "label": sm.LABELS.get(name, name.title()),
+            "sent_total": sent_total, "sent_7d": sent_7d,
+            "bounces_total": bounced, "bounces_7d": bounced_7d,
+            "bounce_rate": _rate(bounced, sent_total), "bounce_rate_7d": _rate(bounced_7d, sent_7d),
+            "first_today": first_today, "actual_today": _rate(first_today, first_total),
+            "target": weights.get(name), "effective": shares.get(name),
+        })
+    return {
+        "rows": rows,
+        "unattributed_bounces": unattributed,
+        "first_today": first_total,
+        "mix_active": bool(weights),
+        "ramp": sm.ramp_view(weights, ramp),
     }
 
 

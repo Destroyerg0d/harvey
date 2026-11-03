@@ -86,6 +86,11 @@ channels:
     #   end: "17:00"
     #   weekdays_only: true      # Monday to Friday, in every country
     #   recipient_timezone: true  # false: one zone for everyone (quiet_hours.timezone)
+    # Each segment's share of the day's first emails (follow-ups and replies
+    # always go first; a segment with nothing due leaves its share to the
+    # others). Custom (old shop software) ramps up from 15% while its bounces
+    # stay low; see the Mailboxes tab. Blank: first emails in queue order.
+    # segment_weights: {custom: 0.40, wordpress: 0.35, shopify: 0.25}
   linkedin:
     enabled: false             # explicit opt-in; credentials alone do not enable it
     max_daily_connections: 15  # connection invites a day (75 a week: max_weekly_invites)

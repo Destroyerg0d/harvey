@@ -2699,6 +2699,7 @@ function renderMailboxes(data) {
   const el = Object.fromEntries(ids.map(id => [id, document.getElementById(id)]));
   if (!data || data.error) {
     ids.forEach(id => { el[id].innerHTML = ''; });
+    mbxRenderSegments(null);
     el['mbx-summary'].innerHTML = !data ? offlineState()
       : emptyState(icon('alert'), 'Couldn\'t read the mailboxes', escHtml(data.error));
     return;
@@ -2711,6 +2712,7 @@ function renderMailboxes(data) {
     : '<div class="card">' + emptyState(icon('mailboxes'), 'No sending domain yet',
         'Set <b>persona.email</b>, or list your mailboxes under <b>channels.email.mailboxes</b>, and they show up here.') + '</div>';
   el['mbx-table'].innerHTML = mbxTableHtml(data);
+  mbxRenderSegments(data);
   el['mbx-chart'].innerHTML = mbxChartHtml(data.daily || {});
   el['mbx-results'].innerHTML = mbxFunnelHtml(data.funnel || {});
   const note = document.getElementById('mbx-score-note');
@@ -2981,6 +2983,72 @@ function mbxFunnelHtml(f) {
     '<p class="figure-note">Percentages are of contacted. Replied counts every answer, a no and an ' +
       'opt-out included. Interested and Ready to meet follow how Harvey read each reply, as Today\'s ' +
       'Contacts by stage does; Harvey doesn\'t see your calendar, so a meeting booked elsewhere isn\'t counted.</p>';
+}
+
+// ── Mailboxes: segments and the mix (harvey/segment_mix.py) ──
+//
+// Cold email and bounces per segment (each bounce against the segment of
+// the email it names), and the day's mix of first emails: each segment's
+// target, its share today under the custom ramp, and what went out today.
+// Mounted after the mailbox table, so the page markup needs no slot for it.
+
+function mbxRenderSegments(data) {
+  let el = document.getElementById('mbx-segments');
+  if (!el) {
+    const table = document.getElementById('mbx-table');
+    if (!table) return;
+    el = document.createElement('div');
+    el.id = 'mbx-segments';
+    table.after(el);
+  }
+  el.innerHTML = data && !data.error ? mbxSegmentsHtml(data.segments) : '';
+}
+
+function mbxRampHtml(ramp) {
+  if (!ramp) return '';
+  const pct = v => escHtml(Math.round(Number(v || 0) * 100) + '%');
+  const steps = (ramp.levels || []).map((v, i) => i === ramp.level ? '<b>' + pct(v) + '</b>' : pct(v)).join(' &rarr; ');
+  const history = (ramp.history || []).map(h =>
+    '<li><span title="' + escHtml(formatDate(h.at)) + '">' + relTime(h.at) + '</span>: ' +
+    pct(h.from) + ' &rarr; ' + pct(h.to) + ' <span class="muted">(' + escHtml(h.why || '') + ')</span></li>').join('');
+  return '<div class="card mbx-ramp"><div class="cell-main">Custom ramp: ' + pct(ramp.share) +
+      ' of first emails now, target ' + pct(ramp.target) + (ramp.ramping ? '' : ' (reached)') + '</div>' +
+    '<div class="cell-sub">' + steps + (ramp.since ? ' · at this level since ' +
+      '<span title="' + escHtml(formatDate(ramp.since)) + '">' + relTime(ramp.since) + '</span>' : '') + '</div>' +
+    '<p class="table-foot">' + escHtml(ramp.rule || '') + '</p>' +
+    (history ? '<ul class="table-foot">' + history + '</ul>' : '') + '</div>';
+}
+
+function mbxSegmentsHtml(seg) {
+  if (!seg || !(seg.rows || []).length) return '';
+  const mix = !!seg.mix_active;
+  const share = v => v === null || v === undefined ? '<span class="muted">&ndash;</span>' : mbxPct(v);
+  const over = r => r !== null && r !== undefined && Number(r) > 0.03 ? ' <span class="mini t-bad">over 3%</span>' : '';
+  const body = seg.rows.map(r => '<tr><td><div class="cell-main">' + escHtml(r.label) + '</div></td>' +
+    '<td class="num">' + mbxNum(r.sent_total) + '<div class="cell-sub">' + mbxNum(r.sent_7d) + ' in 7 days</div></td>' +
+    '<td class="num">' + mbxNum(r.bounces_total) + ' <span class="muted">· ' + mbxPct(r.bounce_rate) + '</span>' +
+      '<div class="cell-sub">' + mbxNum(r.bounces_7d) + ' · ' + mbxPct(r.bounce_rate_7d) + ' in 7 days' +
+      over(r.bounce_rate_7d) + '</div></td>' +
+    (mix ? '<td class="num">' + share(r.target) + '</td><td class="num">' + share(r.effective) + '</td>' : '') +
+    '<td class="num">' + mbxNum(r.first_today) + ' <span class="muted">· ' + mbxPct(r.actual_today) + '</span></td>' +
+  '</tr>').join('');
+  const foot = [
+    'Cold email only. Not classified is mail sent before segments were stamped, or to a site nobody has read yet.',
+    seg.unattributed_bounces ? mbxNum(seg.unattributed_bounces) + ' older bounce' +
+      (seg.unattributed_bounces === 1 ? '' : 's') + ' name no email, so no segment.' : '',
+    mix ? 'Target is channels.email.segment_weights; today\'s share is the target with the custom ramp applied. ' +
+      'Follow-ups and replies go first, then first emails from the segment furthest below its share; ' +
+      'a segment with nothing due leaves its share to the others.'
+      : 'No mix set: first emails go in queue order. Set channels.email.segment_weights to aim for a share per segment.',
+  ].filter(Boolean).join(' ');
+  return '<div class="subhead">Segments <span class="hint">cold email and bounces by the kind of site, and today\'s mix of ' +
+      mbxNum(seg.first_today) + ' first email' + (seg.first_today === 1 ? '' : 's') + '</span></div>' +
+    (mix ? mbxRampHtml(seg.ramp) : '') +
+    '<div class="table-card"><table class="mbx-table"><thead><tr><th>Segment</th>' +
+      '<th class="num">Cold email sent</th><th class="num">Bounced</th>' +
+      (mix ? '<th class="num">Target</th><th class="num">Today\'s share</th>' : '') +
+      '<th class="num">First emails today</th></tr></thead><tbody>' + body + '</tbody></table></div>' +
+    '<p class="table-foot">' + foot + '</p>';
 }
 
 // ── LinkedIn: invites, messages, follow-ups and replies ──

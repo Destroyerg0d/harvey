@@ -33,6 +33,7 @@ from harvey.mailboxes import (
     down_since_key, is_multi, least_loaded, mailbox_for, normalize, pause_problem,
     primary_mailbox, render_sender, takes_new_prospects,
 )
+from harvey.segment_mix import build_mix, queued_segments, update_ramp, weights_of
 from harvey.segment_stamp import segment_for_company, variant_for
 from harvey.sending_mode import sync_sending_mode
 from harvey.state import (
@@ -64,6 +65,9 @@ MAILBOX_REFUSED_STATUSES = (401, 403, 429)
 MOVE_AFTER_DOWN = timedelta(hours=24)
 # How many due emails quiet hours look through for one that can go now.
 QUIET_HOURS_SCAN = 200
+# With a segment mix (channels.email.segment_weights): how many due emails a
+# drain reads per mailbox, so each segment has first emails to choose from.
+MIX_SCAN = 100
 SEND_JITTER_SECONDS = (4, 15)
 # Optional Precleared check: an email whose address Precleared couldn't
 # check is moved back this far, behind other email, rather than asked about
@@ -1069,15 +1073,16 @@ class Sender:
         return None
 
     async def _due_rows(self, now: str, page: int, cold: bool = True,
-                        mailboxes=None, primary: str = "") -> list[dict]:
+                        mailboxes=None, primary: str = "", mix: bool = False) -> list[dict]:
         """The due, approved rows a drain goes through (only those going out
         from ``mailboxes`` when given), oldest first. ``cold``: False when no
-        cold email can go this cycle, so only the rest is read."""
+        cold email can go this cycle, so only the rest is read. ``mix``: a
+        segment mix reorders them, so more first emails are read (MIX_SCAN)."""
         where = {"mailboxes": mailboxes, "primary": primary} if mailboxes is not None else {}
         # In quiet hours only cold email can go, so only cold email is
         # fetched: replies due ahead of it can't fill the page.
         due = await self.state.get_outbox(
-            status="approved", due_before=now, limit=page,
+            status="approved", due_before=now, limit=max(page, MIX_SCAN) if mix else page,
             skip_unready_follow_ups=True, kind="sequence" if self.cold_only else None, **where,
         ) if cold else []
         # Cold emails held (by an unavailable compliance check, the cold
@@ -1091,10 +1096,11 @@ class Sender:
             exclude_kind="sequence", **where,
         )
         extra = [item for item in unchecked if item["id"] not in seen]
-        if cold and self.precleared is not None:
+        if cold and (self.precleared is not None or mix):
             # First emails waiting on Precleared keep their place and could
             # fill the page too, hiding follow-ups to people already cleared,
-            # which a stored verdict lets go out. Fetched on their own as well.
+            # which a stored verdict lets go out (and with a mix, follow-ups
+            # go before every first email). Fetched on their own as well.
             seen.update(item["id"] for item in extra)
             follow_ups = await self.state.get_outbox(
                 status="approved", due_before=now, limit=page,
@@ -1108,6 +1114,34 @@ class Sender:
             )
         return due
 
+    async def _segment_mix(self):
+        """Today's segment mix (harvey/segment_mix.py), its ramp brought up
+        to date, or None: no segment_weights, or it couldn't be worked out
+        (then the drain goes in queue order, as without one)."""
+        weights = weights_of(self.config)
+        if not weights:
+            return None
+        try:
+            ramp = await update_ramp(self.state, weights)
+            return await build_mix(self.state, weights, ramp["level"], _local_midnight_utc())
+        except Exception as e:
+            logger.warning(f"Sender: couldn't work out the segment mix; sending in queue order: {e}")
+            return None
+
+    async def _mixed(self, mix, queues: list[list[dict]], limits: list[int]) -> list[list[dict]]:
+        """``queues`` reordered by the segment mix (follow-ups and replies
+        first, then first emails by segment), or as they are without one.
+        ``limits``: what each queue's mailbox can send this cycle."""
+        if mix is None:
+            return queues
+        try:
+            mix.segments.update(await queued_segments(
+                self.state.db_path, [row for q in queues for row in q]))
+            return mix.order(queues, limits)
+        except Exception as e:
+            logger.warning(f"Sender: couldn't order by segment; sending in queue order: {e}")
+            return queues
+
     async def _drain_due(self):
         """Send due, approved outbox items through the provider. With
         several mailboxes, each row goes out from its own mailbox, and the
@@ -1119,6 +1153,7 @@ class Sender:
         multi = is_multi(self.config)
         now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
         lanes: dict[str, _Lane] = {}
+        mix = await self._segment_mix()
         if multi:
             lanes, down = await self._mailbox_lanes()
             for address, why in down.items():
@@ -1132,15 +1167,17 @@ class Sender:
             budget = cycle_cap = MULTI_SENDS_PER_CYCLE
             cold_cap = cold_left = MULTI_SENDS_PER_CYCLE
             primary = primary_mailbox(self.config).email
-            queues = []
+            queues, limits = [], []
             for lane in lanes.values():
                 cold = lane.daily_left > 0 and lane.cold_left > 0 and not lane.cold_held
                 queues.append(await self._due_rows(
                     now, MAILBOX_SENDS_PER_CYCLE * 3, cold=cold,
-                    mailboxes=[lane.mailbox.email], primary=primary))
+                    mailboxes=[lane.mailbox.email], primary=primary, mix=mix is not None))
+                limits.append(min(MAILBOX_SENDS_PER_CYCLE, lane.daily_left, lane.cold_left)
+                              if cold else 0)
             # One mailbox's backlog can't fill the page: each has its own,
             # taken in turn.
-            due = _in_turn(queues)
+            due = _in_turn(await self._mixed(mix, queues, limits))
         else:
             if not self.provider.is_configured():
                 logger.warning(
@@ -1165,7 +1202,9 @@ class Sender:
             cold_left = cold_cap - await self.state.count_outbox_sent_today(
                 kind="sequence", since=_local_midnight_utc())
             due = await self._due_rows(
-                now, (budget if budget > 0 else MAX_SENDS_PER_CYCLE) * 3, cold=budget > 0)
+                now, (budget if budget > 0 else MAX_SENDS_PER_CYCLE) * 3, cold=budget > 0,
+                mix=mix is not None)
+            due = (await self._mixed(mix, [due], [max(0, min(budget, cold_left))]))[0]
         if not due:
             return
         # Whether cold email had a chance this cycle (what the compliance
@@ -1217,6 +1256,9 @@ class Sender:
                 continue
             if not multi and is_cold and sent_cold >= cold_left:
                 held_cold += 1
+                continue
+            if mix is not None and not mix.allows(item):
+                mix.held += 1     # its segment is at its ramp's ceiling today
                 continue
             needs_check = self.precleared is not None and is_cold
             mailbox = lane.mailbox if lane is not None else None
@@ -1386,6 +1428,8 @@ class Sender:
             sent += 1
             if is_cold:
                 sent_cold += 1
+            if mix is not None:
+                mix.record(item)
             if lane is not None:
                 lane.sent += 1
                 if is_cold:
@@ -1448,6 +1492,10 @@ class Sender:
             logger.info(
                 f"Sender: {held_unread} cold email(s) wait a cycle: an inbox their reply "
                 "could be in wasn't read completely.")
+        if mix is not None and mix.held:
+            logger.info(
+                f"Sender: {mix.held} custom first email(s) wait: the custom segment is ramping "
+                "and has its share of today's first emails. See the Mailboxes tab.")
         if self.precleared is not None and cold_possible:
             if hold is not None:
                 # The page read above stops at a few times the cycle's

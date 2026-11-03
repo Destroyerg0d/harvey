@@ -131,19 +131,63 @@ def seconds_until_quiet_hours_end(config: HarveyConfig) -> int:
 # is a day, never all time: an all-time count would stop Scout for good.
 PROSPECT_BACKLOG = 20
 
-# Contacts with a deliverable email the Writer hasn't used yet. Below this,
-# Scout also runs in a cycle that writes or sends, as long as known companies
-# are still waiting for a look (that backfill costs no search credits), so
-# the next day's first emails are found before they are needed instead of
-# one cycle in two.
+# Contacts with a deliverable email the Writer hasn't used yet. Below the
+# buffer, Scout also runs in a cycle that writes or sends, as long as known
+# companies are still waiting for a look (that backfill costs no search
+# credits), so the next day's first emails are found before they are needed
+# instead of one cycle in two. The buffer is about two days of first emails
+# (contact_buffer): every mailbox's daily limit, two thirds of it (a first
+# email is one of three in a sequence, times two days), never under
+# CONTACT_BUFFER.
 CONTACT_BUFFER = 60
+# Below this many counted verifier checks left this month (all the counted
+# verifiers with a key together), the buffer stops growing: what is left is
+# kept for the contacts the Writer needs next, not for a stock ahead of them.
+VERIFIER_RESERVE = 50
 
 
-def keep_scouting(summary: dict) -> bool:
-    """Whether Scout should ride along with this cycle's writing or sending."""
+def contact_buffer(config) -> int:
+    """About two days of first emails at full capacity, at least CONTACT_BUFFER."""
+    from harvey.mailboxes import configured_mailboxes
+    try:
+        capacity = sum(max(0, int(m.daily_limit or 0)) for m in configured_mailboxes(config))
+    except Exception:
+        capacity = 0
+    return max(CONTACT_BUFFER, capacity * 2 // 3)
+
+
+async def verifier_budget_low(env, state) -> bool:
+    """True when the counted verifiers that have a key have fewer than
+    VERIFIER_RESERVE checks left between them this month (or today, for one
+    with a daily allowance). False with none of them set up: the others
+    aren't counted, so there is nothing to go on."""
+    from harvey.integrations.email_finder import _counted_channels, verifier_checks_remaining
+    services = [service for service, _, _ in _counted_channels(env)]
+    if not services:
+        return False
+    left = 0
+    for service in services:
+        left += await verifier_checks_remaining(service, state)
+    return left < VERIFIER_RESERVE
+
+
+def keep_scouting(summary: dict, buffer: int = CONTACT_BUFFER) -> bool:
+    """Whether Scout should ride along with this cycle's writing or sending:
+    fewer than ``buffer`` writable contacts and companies waiting for a look."""
     _, writable = _new_counts(summary)
     waiting = summary.get("companies_needing_prospects", 0) or 0
-    return waiting > 0 and writable < CONTACT_BUFFER and not unusable_backlog_notice(summary)
+    return waiting > 0 and writable < buffer and not unusable_backlog_notice(summary)
+
+
+async def scouting_buffer(config, env, state) -> int:
+    """The contact buffer for this cycle: contact_buffer, or 0 (Scout
+    doesn't ride along) while the verifier allowances are nearly used."""
+    try:
+        if await verifier_budget_low(env, state):
+            return 0
+    except Exception as e:
+        logger.debug(f"couldn't read the verifier allowances: {e}")
+    return contact_buffer(config)
 
 
 def _new_counts(summary: dict) -> tuple[int, int]:
@@ -469,9 +513,10 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
                 tasks.append(("analyze", analyst.run()))
             elif action == "write_campaign":
                 tasks.append(("write_campaign", writer.run()))
-                if keep_scouting(summary):
+                if keep_scouting(summary, await scouting_buffer(config, env, state)):
                     tasks.append(("prospect", scout.run()))
-            elif action == "send_campaign" and keep_scouting(summary):
+            elif action == "send_campaign" and keep_scouting(
+                    summary, await scouting_buffer(config, env, state)):
                 tasks.append(("prospect", scout.run()))
             elif action == "idle":
                 tasks.append(("analyze", analyst.run()))

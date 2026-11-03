@@ -298,6 +298,38 @@ class EmailChannelConfig(BaseModel):
     # persona.email alone, as before. When set, persona.email must be one of
     # them: it is the primary, which keeps data/gmail_token.json.
     mailboxes: list[MailboxConfig] = []
+    # Each segment's target share of the day's first emails, e.g.
+    # {custom: 0.40, wordpress: 0.35, shopify: 0.25} (shares are scaled to add
+    # up to 1). Follow-ups and replies always go first; a segment with
+    # nothing due leaves its share to the others. The custom segment ramps up
+    # from 15% (harvey/segment_mix.py). Empty: first emails go in queue
+    # order, as before.
+    segment_weights: dict[str, float] = {}
+
+    @field_validator("segment_weights", mode="before")
+    @classmethod
+    def _valid_segment_weights(cls, v):
+        if v is None:
+            return {}
+        if not isinstance(v, dict):
+            raise ValueError("segment_weights must be a mapping such as {custom: 0.4, shopify: 0.6}")
+        from harvey.segment_mix import MIX_SEGMENTS
+        out = {}
+        for key, value in v.items():
+            name = str(key).strip().lower()
+            if name not in MIX_SEGMENTS:
+                raise ValueError(f"'{key}' in segment_weights is not a segment; use "
+                                 + ", ".join(MIX_SEGMENTS) + ".")
+            if isinstance(value, bool):
+                raise ValueError(f"segment_weights.{name} must be a number, e.g. 0.4")
+            try:
+                weight = float(value)
+            except (TypeError, ValueError):
+                raise ValueError(f"segment_weights.{name} must be a number, e.g. 0.4") from None
+            if weight < 0 or weight != weight:
+                raise ValueError(f"segment_weights.{name} must be 0 or more")
+            out[name] = weight
+        return out
 
     @field_validator("warmup", mode="before")
     @classmethod

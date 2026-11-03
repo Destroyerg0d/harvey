@@ -50,6 +50,10 @@ PERSON_VAR = re.compile(r"\{\{\s*(first_?name|last_?name|title)\s*\}\}", re.IGNO
 # small — the rest of the 'new' pool is picked up on later cycles.
 NATIVE_BATCH_CAP = 8
 LEGACY_BATCH_CAP = 50
+# Several mailboxes: a company of a segment already given to a mailbox this
+# run counts as this much load there, so a segment is spread first and the
+# least busy mailbox only breaks the tie (_assign_mailboxes).
+SEGMENT_SPREAD = 1_000_000
 # Age facts named in one email, at most: the few strongest make the point.
 MAX_AGE_FACTS = 4
 # Said whenever the profile has read the company's site.
@@ -186,10 +190,19 @@ class Writer:
         configured = {m.email for m in configured_mailboxes(self.config)}
         open_mailboxes = None    # the ones that can take new prospects, once asked
         left_out: set[str] = set()
+        # Each segment (the batch a prospect is in) spread across the
+        # mailboxes: a company goes to the mailbox with the fewest companies of
+        # its segment this run, the least busy of those (SEGMENT_SPREAD outweighs
+        # any load), so no mailbox ends up with all the riskier old sites.
+        segment_of_prospect = {p.id: name.split("-", 1)[0] for name, group in batches.items()
+                               for p in group}
+        spread: dict[str, dict[str, int]] = {}
         for people in companies:
             unassigned = [p for p in people if not (p.mailbox or "").strip()]
             if not unassigned:
                 continue
+            segment = segment_of_prospect.get(people[0].id, "")
+            given = spread.setdefault(segment, {})
             stored = await self.state.company_mailbox([p.id for p in people])
             if stored is not None:
                 target = normalize(self.config, stored)
@@ -206,11 +219,13 @@ class Writer:
                             logger.info(f"Writer: {m.email} takes no new prospects now: {why}")
                         else:
                             open_mailboxes.append(m)
-                chosen = await least_loaded(self.state, self.config, open_mailboxes)
+                chosen = await least_loaded(self.state, self.config, open_mailboxes, extra={
+                    address: n * SEGMENT_SPREAD for address, n in given.items()})
                 if chosen is None:
                     left_out.update(p.id for p in unassigned)
                     continue
                 target = chosen.email
+            given[target] = given.get(target, 0) + 1
             for p in unassigned:
                 await self.state.set_prospect_mailbox(p.id, target)
                 p.mailbox = target
