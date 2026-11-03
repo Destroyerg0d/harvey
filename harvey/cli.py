@@ -1250,7 +1250,7 @@ def main():
                      help="Max records per query (default: 100)")
     sub.add_argument("--max-spend", type=float, default=1.0,
                      help="Hard cap in dollars (default: 1.00)")
-    sub.add_argument("--preset", default="", choices=["", "yc", "hiring", "accelerator", "funding"],
+    sub.add_argument("--preset", default="", choices=["", "yc", "hiring", "accelerator", "funding", "legacy_cart"],
                      help="A built-in search instead of your ICP's industries "
                           "(each needs a search provider like tinyfish, serper or dataforseo_serp). "
                           "yc: startups whose own site says they're YC-backed; "
@@ -1258,7 +1258,9 @@ def main():
                           "your hiring_signals roles (else ICP titles); "
                           "accelerator: ones backed by Techstars, Antler, EF, SPC, 500 Global, "
                           "Neo, AI Grant, a16z speedrun or Plug and Play; "
-                          "funding: companies announcing a raise on their own site in the last 18 months")
+                          "funding: companies announcing a raise on their own site in the last 18 months; "
+                          "legacy_cart: old online shops by their software's footer credit "
+                          "(Powered by osCommerce...), per icp.legacy_niches (else industries)")
     sub.add_argument("--no-profile", action="store_true",
                      help="Don't profile what was found (profiling is free)")
     sub.set_defaults(func=cmd_discover)

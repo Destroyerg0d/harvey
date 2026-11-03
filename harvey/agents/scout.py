@@ -36,9 +36,10 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 import httpx
 from bs4 import BeautifulSoup
 
+from harvey import footprints
 from harvey.brain import Brain
 from harvey.collectors import people as people_mod
-from harvey.collectors.discover import site_name_from_html
+from harvey.collectors.discover import is_junk, name_from_domain, site_name_from_html
 from harvey.collectors.profile import _reads_like_title, looks_like_challenge
 from harvey.config import HarveyConfig, EnvConfig
 from harvey.integrations.email_finder import (
@@ -69,6 +70,10 @@ MAX_RESULTS_PER_QUERY = 20
 # "Query pattern not allowed for free accounts" (verified 2026-10-26).
 SERPER_MAX_NUM = 10
 MAX_COMPANIES_PER_CYCLE = 25
+# Footprint searches (harvey/footprints.py) a cycle, out of the
+# MAX_QUERIES_PER_CYCLE all strategies share, and the companies they may add.
+FOOTPRINT_QUERIES_PER_CYCLE = 2
+MAX_FOOTPRINT_COMPANIES = 15
 
 # Reading a company's site: the homepage, then up to five pages its own menu
 # links to (team, meet-the-doctors, about, contact...), never more than six
@@ -189,6 +194,10 @@ class Scout:
         # prospecting is wanted, and doesn't spend the cycle's query budget.
         if self.config.channels.linkedin.enabled and self.env.linkedin_email:
             strategies.append(("profile_search", self._prospect_via_profile_search))
+        # Old shops, by the text their software prints (opt-in: icp.legacy_niches
+        # or icp.footprint_queries). Companies only; the backfill above finds
+        # their people once the profile has read each site.
+        strategies.append(("footprints", self._prospect_via_footprints))
         strategies.append(("company_discovery", self._prospect_via_company_discovery))
 
         for name, strategy in strategies:
@@ -993,6 +1002,75 @@ class Scout:
                     return companies
 
         return companies
+
+    def _footprint_bank(self) -> list:
+        icp = getattr(self.config, "icp", None)
+        if icp is None:
+            return []
+        return footprints.query_bank(
+            getattr(icp, "footprint_queries", None) or [],
+            getattr(icp, "legacy_niches", None) or [],
+            getattr(icp, "geography", None) or [],
+        )
+
+    async def _prospect_via_footprints(self) -> int:
+        """Old shops found by the text their software prints on every page
+        ('"Powered by osCommerce"'), a few searches a cycle from the rotating
+        bank in harvey/footprints.py. Opt-in (icp.legacy_niches or
+        icp.footprint_queries), and only while SITE_PLATFORM is confirmed:
+        the hit is a lead, and the profile reads each site to confirm its
+        platform and age before anyone there is written to.
+
+        Adds companies only (a plain industry label, never the query; source
+        "search:footprint"), so it returns 0 prospects: the known-companies
+        backfill finds their people on a later cycle.
+        """
+        bank = self._footprint_bank()
+        if not bank:
+            return 0
+        try:
+            confirmed = await self.state.confirmed_signal_codes()
+        except Exception as e:
+            logger.debug(f"confirmed_signal_codes failed: {e}")
+            return 0
+        if "SITE_PLATFORM" not in confirmed:
+            logger.info("Scout: footprint searches wait for the SITE_PLATFORM signal to be "
+                        "confirmed (the profile confirms each site's platform before any email).")
+            return 0
+        room = min(FOOTPRINT_QUERIES_PER_CYCLE, MAX_QUERIES_PER_CYCLE - self._queries_this_cycle)
+        if room <= 0:
+            return 0
+
+        added, ran = 0, 0
+        for fq in await footprints.next_queries(self.state, bank, room):
+            if self._queries_this_cycle >= MAX_QUERIES_PER_CYCLE or added >= MAX_FOOTPRINT_COMPANIES:
+                break
+            results = await self._web_search(fq.query)
+            ran += 1
+            for url, _snippet in results:
+                domain = self._extract_domain(url)
+                if (not self._is_candidate_domain(domain) or footprints.is_vendor(domain)
+                        or is_junk(domain)):
+                    continue
+                self._seen_domains.add(domain)
+                if await self.state.company_exists(domain):
+                    continue
+                await self._ensure_company(
+                    name=name_from_domain(domain),      # the profile replaces it with the site's own
+                    domain=domain,
+                    website=f"https://{domain}",
+                    industry=fq.label,
+                    source=footprints.FOOTPRINT_SOURCE,
+                    source_url=url,
+                )
+                added += 1
+                if added >= MAX_FOOTPRINT_COMPANIES:
+                    break
+        await footprints.advance(self.state, bank, ran)
+        if added:
+            logger.info(f"Scout: footprint searches added {added} compan{'y' if added == 1 else 'ies'} "
+                        "for the profile to confirm.")
+        return 0
 
     async def _find_companies_via_directories(self) -> list[dict]:
         """Scrape industry directory sites for company names and domains.

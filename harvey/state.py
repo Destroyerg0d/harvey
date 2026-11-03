@@ -585,7 +585,9 @@ _UNCLASSIFIED = (
 def _writer_holds(p: str) -> str:
     """SQL: a new prospect the Writer leaves for later because of its
     company's site (agents/writer.py does the same in Python): the custom
-    segment is written only to verified addresses."""
+    segment is written only to verified addresses, and a company found by a
+    footprint search waits until the profile has recorded its platform."""
+    from harvey.footprints import FOOTPRINT_LABELS, FOOTPRINT_SOURCE
     from harvey.segments import CUSTOM_PLATFORMS, CUSTOM_WHEN_OLD, OLD_SITE_SCORE
 
     def latest(code: str, column: str) -> str:
@@ -600,8 +602,14 @@ def _writer_holds(p: str) -> str:
     score = f"COALESCE({latest('LEGACY_SITE_SCORE', 'value_num')}, 0)"
     custom = (f"({platform} IN ({listed(CUSTOM_PLATFORMS)}) OR ({platform} IN ({listed(CUSTOM_WHEN_OLD)}) "
               f"AND {score} >= {OLD_SITE_SCORE}))")
+    footprint = (f"EXISTS (SELECT 1 FROM companies fc WHERE fc.id = {p}.company_id AND "
+                 f"(COALESCE(fc.source, '') = '{FOOTPRINT_SOURCE}' "
+                 f"OR COALESCE(fc.industry, '') IN ({listed(FOOTPRINT_LABELS)})) "
+                 f"AND NOT EXISTS (SELECT 1 FROM observations fo WHERE fo.company_id = fc.id "
+                 f"AND fo.signal_code = 'SITE_PLATFORM'))")
     has_company = f"COALESCE({p}.company_id, '') != ''"
-    return f"({has_company} AND COALESCE({p}.email_status, '') != 'verified' AND {custom})"
+    return (f"(({has_company} AND COALESCE({p}.email_status, '') != 'verified' AND {custom}) "
+            f"OR ({has_company} AND {footprint}))")
 
 # Column whitelists for dynamic UPDATEs (prevents SQL injection via kwargs).
 _CAMPAIGN_COLUMNS = frozenset({

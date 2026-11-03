@@ -303,6 +303,17 @@ Harvey never reads ycombinator.com, the accelerators' directories, Crunchbase,
 PitchBook or LinkedIn, whose terms forbid scraping them; everything comes from
 the companies' own sites and your search provider.
 
+**Looking for old online shops?** Set `icp.legacy_niches` ("garden furniture",
+"model railways") and confirm `SITE_PLATFORM`. Scout then runs a few footprint
+searches a cycle (`harvey/footprints.py`: the credit old shop software prints,
+like `"Powered by osCommerce"`, with each niche and country in
+`icp.geography`), within its per-cycle search cap, and `icp.footprint_queries`
+adds searches of your own, run as written. `harvey discover --preset
+legacy_cart --provider serper` (*Look for: Old online shops*) is the same bank
+as one run. Hits are recorded as "Legacy e-commerce", never as the search, and
+nobody there is written to until the profile has read the site and recorded
+its platform.
+
 **Looking for companies hiring a role?** `harvey discover --preset hiring
 --provider serper` (or *Look for: Companies hiring for your roles*) searches
 your industries for companies whose own careers pages list one of your

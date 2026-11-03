@@ -75,6 +75,14 @@ class ICPConfig(BaseModel):
     # Each variant runs in every city alongside the industry itself, so the
     # estimate grows with it. Empty → each industry is its own one search.
     keyword_variants: dict[str, list[str]] = {}
+    # Footprint searches for old shops (harvey/footprints.py), opt-in: Scout
+    # runs them only when one of these is set. `legacy_niches` ("garden
+    # furniture", "model railways") are combined with the built-in footprints
+    # ('"Powered by osCommerce"') and `geography`; `footprint_queries` are
+    # your own searches, run as written. A few per cycle, never more than
+    # Scout's per-cycle query cap.
+    footprint_queries: list[str] = []
+    legacy_niches: list[str] = []
 
 
 class WarmupConfig(BaseModel):

@@ -33,6 +33,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from harvey.footprints import SEGMENT_INDUSTRY, preset_footprints
 from harvey.models import Company
 
 logger = logging.getLogger("harvey.collectors.discover")
@@ -103,6 +104,10 @@ JUNK_DOMAIN_PATTERNS = tuple(re.compile(p, re.I) for p in (
     r"(^|\.)(startupintros|openvc|siliconcanals|startupdaily|e27|similarweb|vcbacked|roundos)\.",
     r"(^|\.)(techfundingnews|startups\.gallery)",
     r"(^|\.)tech\.eu$",
+    # shop software makers, their forums, add-on stores and demos (the
+    # legacy_cart preset's noise: they print their own footprints)
+    r"(^|\.)(oscommerce|zen-cart|cubecart|shopfactory|sellerdeck|actinic|x-cart|opencart|prestashop"
+    r"|virtuemart|woocommerce|magento)\.(com|net|org|co\.uk)$",
     # infrastructure that is never a prospect
     r"(^|\.)(google|bing|yahoo|duckduckgo|amazon|apple|microsoft)\.",
     r"(wordpress|wix|squarespace|shopify|godaddy|weebly|webflow)\.com$",
@@ -1586,6 +1591,19 @@ PRESETS = {
                  "-site:prnewswire.com -site:businesswire.com -site:globenewswire.com"),
         "local": False,
     },
+    # Old online shops, found by the credit their software prints on every
+    # page (harvey/footprints.py, the bank Scout rotates through). Each
+    # footprint runs with each of icp.legacy_niches (else icp.industries).
+    # Companies are recorded as "Legacy e-commerce", never as the query; the
+    # profile reads each site and confirms its platform before any email.
+    "legacy_cart": {
+        "label": "Old online shops",
+        "kinds": ("serp",),
+        "terms": tuple(f"{fp} {{industry}}" for fp in preset_footprints()),
+        "local": False,
+        "niches": True,
+        "industry": SEGMENT_INDUSTRY["custom"],
+    },
 }
 FUNDING_LOOKBACK_DAYS = 548       # ~18 months: older raises aren't news
 
@@ -1643,6 +1661,8 @@ def build_queries(config, cities: list[str] | None = None,
     icp = config.icp
     terms = list(icp.industries) or [config.product.name]
     spec = PRESETS.get(preset) if preset else None
+    if spec and spec.get("niches") and getattr(icp, "legacy_niches", None):
+        terms = list(icp.legacy_niches)
     if spec:
         templates = preset_templates(spec)
         since = (date.today() - timedelta(days=FUNDING_LOOKBACK_DAYS)).isoformat()
@@ -1895,12 +1915,15 @@ async def _upsert(state, biz: Business, query: DiscoveryQuery) -> tuple[str, boo
     if existing:
         return existing.id, False
 
+    # A preset with its own label ("Legacy e-commerce") records that, not
+    # the search it ran.
+    label = (PRESETS.get(query.preset) or {}).get("industry", "") if query.preset else ""
     company = Company(
         name=biz.name,
         domain=biz.domain,
         website=biz.website,
         phone=biz.phone,
-        industry=biz.category or query.term,
+        industry=label or biz.category or query.term,
         location=biz.location or query.location,
         source=f"discover:{biz.provider}",
         source_url=biz.source_url,

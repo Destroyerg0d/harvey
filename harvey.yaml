@@ -43,6 +43,12 @@ icp:
   # "Head of Growth" is shopping for growth tooling). Used for careers-page
   # scanning and job-board discovery. Empty = fall back to titles above.
   hiring_signals: []
+  # Old online shops (harvey/footprints.py), off while both are empty: niches
+  # for Scout to combine with footprint searches like "Powered by osCommerce"
+  # (and each geography entry), and searches of your own, run as written.
+  # Needs the SITE_PLATFORM signal confirmed.
+  legacy_niches: []
+  footprint_queries: []
 
 channels:
   email:

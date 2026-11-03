@@ -9,6 +9,16 @@ minor versions can still change behaviour.
 
 ### Added
 
+- **Footprint searches for old shops** (`harvey/footprints.py`). Set
+  `icp.legacy_niches` (and optionally `icp.footprint_queries`) and Scout runs
+  a few searches a cycle for the credit old shop software prints
+  (`"Powered by osCommerce"`, `"Created with ShopFactory"`...) with each niche
+  and country, rotating through the bank and inside its per-cycle search cap.
+  Hits are recorded as "Legacy e-commerce" or "WordPress store" with source
+  `search:footprint`, software makers' sites are skipped, and nobody there is
+  written to until the profile has recorded the site's platform. The same
+  bank is the discover preset `legacy_cart` (*Old online shops*).
+
 - **Site platform, site age and segments.** Profiling now records
   `SITE_PLATFORM` (Shopify, WordPress, WooCommerce, Magento 1 or 2, osCommerce,
   Zen Cart, OpenCart, PrestaShop, VirtueMart, Joomla, CubeCart, X-Cart, Ecwid,

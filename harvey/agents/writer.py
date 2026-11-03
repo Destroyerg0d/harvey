@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from harvey.brain import Brain
 from harvey.collectors.site_age import PLATFORM_LABELS
 from harvey.config import EmailRulesError, HarveyConfig, compliance_of, load_email_rules
+from harvey.footprints import FOOTPRINT_LABELS, FOOTPRINT_SOURCE
 from harvey.humanize import humanize, humanizer_enabled
 from harvey.integrations.mail_provider import NATIVE_PROVIDERS
 from harvey.mailboxes import (
@@ -256,10 +257,12 @@ class Writer:
             p for p in prospects_with_email
             if not await self.state.colleague_who_replied(p.id)
         ]
-        # What their sites run on decides the campaign, and the custom segment
-        # (legacy shop software, old sites) is written only to verified
-        # addresses. state.count_writable_prospects leaves the same people
-        # out, so the heartbeat doesn't pick writing for them every cycle.
+        # What their sites run on decides the campaign, and two segments wait:
+        # the custom segment (legacy shop software, old sites) is written only
+        # to verified addresses, and a company a footprint search found waits
+        # until the profile has read its site. state.count_writable_prospects
+        # leaves the same people out, so the heartbeat doesn't pick writing
+        # for them every cycle.
         self._site_cache = {}
         segments = {}
         for p in prospects_with_email:
@@ -269,7 +272,7 @@ class Writer:
                 if self._held(p, segments[p.id], self._site_cache.get(p.company_id))]
         if held:
             logger.info(f"Writer: {len(held)} prospect(s) wait: custom-segment sites are written to "
-                        "verified addresses only.")
+                        "verified addresses only, and footprint finds wait for their profile.")
         held_ids = {id(p) for p in held}
         prospects_with_email = [p for p in prospects_with_email if id(p) not in held_ids]
         if not prospects_with_email:
@@ -473,10 +476,16 @@ class Writer:
     @staticmethod
     def _held(prospect, segment: str, site: dict | None) -> bool:
         """Left 'new' for now: the custom segment is written only to verified
-        addresses (state._writer_holds agrees)."""
+        addresses, and a company a footprint search found waits until the
+        profile has recorded its platform (state._writer_holds agrees)."""
         if not prospect.company_id:
             return False
-        return segment == "custom" and (prospect.email_status or "") != "verified"
+        if segment == "custom" and (prospect.email_status or "") != "verified":
+            return True
+        site = site or {}
+        found_by_footprint = (site.get("source") == FOOTPRINT_SOURCE
+                              or site.get("industry") in FOOTPRINT_LABELS)
+        return found_by_footprint and not site.get("classified")
 
     def _segment_playbook(self, segment: str, old_pitch: bool) -> str:
         """skills/segment_<segment>.md ("" if absent). An old-site segment
