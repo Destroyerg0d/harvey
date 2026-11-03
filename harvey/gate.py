@@ -423,17 +423,23 @@ def _words(text: str) -> list[str]:
 
 
 def _instruction_runs(root) -> dict[tuple, str]:
-    """Every LEAK_RUN_WORDS-word run in Harvey's instructions → its file."""
+    """Every LEAK_RUN_WORDS-word run in Harvey's instructions → its file.
+    The owner's approved lessons (harvey/lessons.py) are instructions too."""
+    from harvey.lessons import BLOCK_HEADER, active_texts
     from harvey.untrusted import UNTRUSTED_RULE
+    lessons = active_texts()
     files = sorted(p for folder in ("prompts", "skills") for p in (root / folder).glob("*.md")
                    if p.name not in _SAY_ALOUD_FILES)
-    key = (str(root), tuple((str(p), p.stat().st_mtime_ns) for p in files))
+    key = (str(root), tuple((str(p), p.stat().st_mtime_ns) for p in files), lessons)
     if _leak_cache.get("key") != key:
         runs: dict[tuple, str] = {}
         sources = [(p.name, _QUOTED_RE.sub(" | ", "\n".join(
             line for line in p.read_text(encoding="utf-8", errors="replace").splitlines()
             if not _SCRIPT_LINE_RE.match(line)))) for p in files]
         sources.append(("Harvey's prompt rules", UNTRUSTED_RULE))
+        sources += [("an approved lesson", text) for text in lessons]
+        if lessons:
+            sources.append(("Harvey's prompt rules", BLOCK_HEADER))
         for name, text in sources:
             words = _words(text)
             for i in range(len(words) - LEAK_RUN_WORDS + 1):

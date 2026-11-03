@@ -733,6 +733,9 @@ class LinkedInAgent:
                 text = self.brain.load_skill(skill)
                 if text:
                     prompt += f"\n\n{title}\n{text}"
+        # The owner's approved LinkedIn lessons from results (harvey/lessons.py).
+        from harvey.lessons import lessons_block
+        prompt += await lessons_block(getattr(self, "state", None), "linkedin")
         booking = getattr(getattr(product, "offer", None), "booking_url", "") or ""
         task = {
             "invite": (f"Write the note for a LinkedIn connection request to this person. At most "

@@ -1342,6 +1342,10 @@ def main():
     from harvey.linkedin.cli import add_parser as add_linkedin_parser
     add_linkedin_parser(subparsers)
 
+    # harvey lessons [--approve|--reject|--retire ID] [--run] (harvey/lessons.py)
+    from harvey.lessons import add_cli_parser as add_lessons_parser
+    add_lessons_parser(subparsers)
+
     # harvey usage
     sub = subparsers.add_parser("usage", help="Show brain usage and quota (Claude or Codex)")
     sub.add_argument("--days", type=int, default=30, help="Breakdown window (default: 30)")

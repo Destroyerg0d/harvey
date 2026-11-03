@@ -702,6 +702,9 @@ class StateManager(LinkedInStateMixin):
             await self._add_extra_columns(db)
             # LinkedIn's tables, outside MIGRATIONS like _EXTRA_COLUMNS.
             await db.executescript(LINKEDIN_SCHEMA)
+            # The Learner's lessons (harvey/lessons.py), the same way.
+            from harvey.lessons import LESSONS_SCHEMA
+            await db.executescript(LESSONS_SCHEMA)
             await db.commit()
 
     @staticmethod

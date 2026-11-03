@@ -23,6 +23,7 @@ from harvey.config import (
 from harvey.gate import autopilot_review, do_not_contact_match, pre_send_check
 from harvey.humanize import humanize, humanizer_enabled
 from harvey.integrations.instantly import InstantlyClient
+from harvey.lessons import lessons_block
 from harvey.integrations.mail_provider import (
     NATIVE_PROVIDERS, get_mail_provider, strip_quoted_reply,
 )
@@ -1906,6 +1907,8 @@ Product: {self.config.product.name} — {self.config.product.description}"""
             playbook = self.brain.load_skill("selling_to_startups")
             if playbook:
                 prompt += "\n\nSELLING TO STARTUP FOUNDERS\n" + playbook
+        # The owner's approved lessons from results (harvey/lessons.py).
+        prompt += await lessons_block(getattr(self, "state", None), "handler")
         if sender is not None:
             # After the skills, so nothing in them reads as who is writing.
             prompt += (

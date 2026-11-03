@@ -401,6 +401,9 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
     # inside LinkedIn hours, never two at once, at most one every ~2 hours.
     from harvey.agents.linkedin_agent import LinkedInRunner
     linkedin = LinkedInRunner(brain, state, config)
+    # The learner: once a day, lessons from results for you to approve.
+    from harvey.agents.learner import LearnerRunner
+    learner = LearnerRunner(brain, state, config)
 
     interval = config.usage.heartbeat_interval_minutes * 60
     max_calls = max(int(200 * (config.usage.max_daily_claude_percent / 100)), 1)
@@ -486,6 +489,15 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
                     await linkedin.maybe_start()
                 except Exception as e:
                     logger.warning(f"LinkedIn couldn't start: {e}")
+
+            # 3c. The learner's daily timer (harvey/agents/learner.py): a run
+            # once a day in the background (not in quiet hours), never two at
+            # once. Every cycle it also refreshes the leak guard's view of the
+            # lessons you approved.
+            try:
+                await learner.maybe_start(start=not send_only)
+            except Exception as e:
+                logger.warning(f"The learner couldn't start: {e}")
 
             # 4. Decide what to do (in quiet hours: only read replies and send)
             if send_only:
@@ -602,6 +614,7 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
                 break
 
     await linkedin.shutdown()
+    await learner.shutdown()
     logger.info("Harvey shutting down. Deals don't close themselves, but I need a break.")
 
 

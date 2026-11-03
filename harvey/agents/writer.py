@@ -20,6 +20,7 @@ from harvey.config import EmailRulesError, HarveyConfig, compliance_of, load_ema
 from harvey.footprints import FOOTPRINT_LABELS, FOOTPRINT_SOURCE
 from harvey.humanize import humanize, humanizer_enabled
 from harvey.integrations.mail_provider import NATIVE_PROVIDERS
+from harvey.lessons import lessons_block
 from harvey.mailboxes import (
     SENDER_FIRST_NAME_TAG, MailboxProviders, companies_of, configured_mailboxes, is_multi,
     least_loaded, normalize, takes_new_prospects,
@@ -616,6 +617,7 @@ class Writer:
             prompt += self._startup_playbook()
         prompt += self._segment_playbook(segment, old_pitch)
         prompt += await self._feedback_block([prospect.id])
+        prompt += await lessons_block(getattr(self, "state", None), "writer")
         rules = getattr(self, "email_rules", "")
         prompt += operator_rules_block(rules, multi=self.multi)
         if rules:
@@ -736,6 +738,7 @@ Pricing: {self.config.product.pricing}"""
         # Campaign notes only: this template goes to the whole batch, so a
         # note about one person ("met her at the expo") must never reach it.
         prompt += await self._feedback_block([])
+        prompt += await lessons_block(getattr(self, "state", None), "writer")
         rules = getattr(self, "email_rules", "")
         prompt += operator_rules_block(rules, multi=self.multi)
         if rules:
