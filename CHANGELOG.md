@@ -9,6 +9,36 @@ minor versions can still change behaviour.
 
 ### Added
 
+- **A mix of first emails by segment** (`harvey/segment_mix.py`). Set
+  `channels.email.segment_weights` (e.g. `{custom: 0.40, wordpress: 0.35,
+  shopify: 0.25}`; empty, the default, keeps queue order) and each drain sends
+  follow-ups and replies first, then first emails from the segment furthest
+  below its share of today's first emails. A segment with nothing due leaves
+  its share to the others; every per-mailbox cap, pause, window and check
+  still applies, since rows are only reordered. The custom segment ramps:
+  15% of first emails, then 25%, then its target, each step after 7 days in
+  which custom bounces stayed under 2% with at least 40 sent; over 3% it
+  steps back one level. While ramping its share is a ceiling. The level and
+  its history are kept in the `segment_ramp` setting.
+- **Segments on the Mailboxes tab**: cold email sent and bounced per segment
+  (each bounce against the segment of the email it names), and the mix:
+  target, today's share under the ramp, and today's first emails.
+- **Segments spread across mailboxes.** With several mailboxes the Writer
+  gives each company of a segment to the mailbox with the fewest of that
+  segment this run, the least busy breaking the tie.
+- **The contact buffer follows capacity**: Scout rides along with writing
+  and sending until about two days of first emails are waiting (two thirds
+  of every mailbox's daily limit, at least 60), and stops growing it once the
+  counted verifiers have under 50 checks left this month.
+- **`COUNTRY`** (profile signal, free). Where a company is, only when its own
+  site proves it: a US street address with a state and ZIP, or a +1 phone
+  with a US area code and dollar prices; a .uk domain or a UK postcode; a .ca
+  domain with a Canadian postal code; a .au domain with an Australian
+  address; or import data that names the country in a labelled field. Never
+  a .com domain or dollar prices alone. It fills an empty company location,
+  which is the sure country Precleared's `skip_countries` and the send
+  window read. Companies with no location come back once to be read after
+  the signal is confirmed.
 - **Footprint searches for old shops** (`harvey/footprints.py`). Set
   `icp.legacy_niches` (and optionally `icp.footprint_queries`) and Scout runs
   a few searches a cycle for the credit old shop software prints
