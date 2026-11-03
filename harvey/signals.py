@@ -232,6 +232,50 @@ SIGNAL_CATALOG: list[dict] = [
         "confidence_floor": 0.0,
     },
     {
+        "code": "SITE_PLATFORM",
+        "label": "Site platform (shop software)",
+        "description": (
+            "What the site runs on, read from its home page: Shopify, WordPress, "
+            "WooCommerce, Magento 1 or 2, osCommerce, Zen Cart, OpenCart, PrestaShop, "
+            "VirtueMart, CubeCart, X-Cart, ShopFactory, SellerDeck, Ecwid, BigCommerce, "
+            "Wix, Squarespace, Webflow, a hand-built PHP site, or unknown. It decides "
+            "which segment (Shopify, WordPress, custom, other) a company is written to as."
+        ),
+        "category": "profile",
+        "value_type": "text",
+        "collector": "profile",
+        "cost_note": "free (homepage HTML and headers)",
+        "confidence_floor": 0.0,
+    },
+    {
+        "code": "LEGACY_SITE_SCORE",
+        "label": "How old the site looks (0-100)",
+        "description": (
+            "A 0-100 score for how dated the site is: old shop software, no mobile "
+            "layout, plain http, an old copyright year, jQuery 1.x, an old WordPress, "
+            "table layouts, Flash. 40 or more reads as an old site."
+        ),
+        "category": "profile",
+        "value_type": "num",
+        "collector": "profile",
+        "cost_note": "free (homepage HTML, plus one phone-view fetch when needed)",
+        "confidence_floor": 0.0,
+    },
+    {
+        "code": "SITE_AGE_FACTS",
+        "label": "What is provably old about the site",
+        "description": (
+            "Plain-English facts about the site's age that were proven, not guessed "
+            "(no mobile viewport even on a phone's fetch, https that fails to connect, a "
+            "copyright year four or more years old...). The only age claims an email may make."
+        ),
+        "category": "profile",
+        "value_type": "text",
+        "collector": "profile",
+        "cost_note": "free (homepage HTML, plus one phone-view fetch when needed)",
+        "confidence_floor": 0.0,
+    },
+    {
         "code": "YC_BACKED",
         "label": "Backed by Y Combinator",
         "description": ("The company says on its own site that it's YC-backed (a batch like "

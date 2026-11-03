@@ -253,7 +253,8 @@ def test_inbox_prospects_get_their_own_campaign():
     writer.config = SimpleNamespace(channels=SimpleNamespace(email=SimpleNamespace(provider="gmail")))
     named = Prospect(first_name="Jo", last_name="Li", title="Owner", industry="Roofing", email="jo@a.com")
     batches = writer._group_prospects([named, inbox(industry="Roofing")])
-    assert set(batches) == {"Roofing-outreach", "Roofing-inbox-outreach"}
+    # Grouped by website segment; nothing says what these sites run on.
+    assert set(batches) == {"Other-outreach", "Other-inbox-outreach"}
 
 
 class SequenceBrain:

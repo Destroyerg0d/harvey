@@ -200,11 +200,11 @@ you need the Codex provider.
 
 This is the part that makes Harvey different from a black box, and it is deliberately not skippable.
 
-Harvey knows how to collect **29 signals** about a business. It does not collect any of them until you say so. On first run it *proposes* the catalog; you confirm, skip, or reject each one in the dashboard or from the terminal:
+Harvey knows how to collect **32 signals** about a business. It does not collect any of them until you say so. On first run it *proposes* the catalog; you confirm, skip, or reject each one in the dashboard or from the terminal:
 
 ```bash
 harvey signals                       # review the catalog
-harvey signals --confirm free        # everything that costs nothing (26 of them)
+harvey signals --confirm free        # everything that costs nothing (29 of them)
 harvey signals --confirm SERP_RANK   # a paid one, opted into explicitly
 ```
 
@@ -224,6 +224,7 @@ Every signal shows what it is in plain language, **what it costs**, and how many
 | | `BLOG_STALE` | Content marketing started and abandoned. |
 | | `SITE_PAGE_COUNT`, `TECH_STACK`, `BLOCKS_AI_CRAWLERS` | Size, platform, AI-search visibility. |
 | | `HIRING_ROLE` / `OPEN_ROLES` | What they're hiring for, and how many roles are open. When their site links a Greenhouse, Lever, Ashby or Workable board, Harvey reads that board's public feed (one request): roles matching `icp.hiring_signals` (else `icp.titles`), with department, location, posting date and the posting's URL; when the board lists none, it records "not hiring" so a closed role stops counting. Otherwise it reads the careers page. Set `hiring_signals` to the roles that mean they're buying: the `titles` fallback names who you email, so "CEO" only matches a CEO opening (never "Assistant to the CEO"), which is rarely the signal you want. |
+| | `SITE_PLATFORM`, `LEGACY_SITE_SCORE`, `SITE_AGE_FACTS` | What the site runs on (Shopify, WordPress, WooCommerce, Magento 1 or 2, osCommerce, Zen Cart, OpenCart, CubeCart, X-Cart, ShopFactory, SellerDeck, a hand-built PHP site...), how old it looks (0-100), and what is provably old about it: no mobile viewport even when a phone asks, https that fails to connect, a copyright year four or more years old, jQuery 1.x, WordPress before 5.0, table layouts, Flash, outdated notices. The platform sets the campaign's segment (Shopify, WordPress, Custom, Other); an email names only the facts that were proven, and an old site is pitched as old only while it answers and its domain takes mail. The custom segment is written to verified addresses only. |
 | | `YC_BACKED`, `ACCELERATOR`, `FUNDING_ROUND` | A startup, as its own site says: YC or another accelerator (with the batch or cohort), or a raise it announced (round, amount, date). |
 | **People** | `CONTACT_FOUND`, `DECISION_MAKER_TITLE`, `LIKELY_OWNER`, `REGISTRY_VERIFIED` | Who decides, and whether they own the place. |
 | **Contact** | `EMAIL_PATTERN`, `EMAIL_STATUS`, `CONTACT_FORM_URL` | Whether you can actually reach them. |

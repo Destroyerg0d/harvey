@@ -15,6 +15,7 @@ import re
 from datetime import datetime, timezone
 
 from harvey.brain import Brain
+from harvey.collectors.site_age import PLATFORM_LABELS
 from harvey.config import EmailRulesError, HarveyConfig, compliance_of, load_email_rules
 from harvey.humanize import humanize, humanizer_enabled
 from harvey.integrations.mail_provider import NATIVE_PROVIDERS
@@ -23,6 +24,10 @@ from harvey.mailboxes import (
     least_loaded, normalize, takes_new_prospects,
 )
 from harvey.models.campaign import Campaign, EmailStep
+from harvey.segments import (
+    OLD_SITE_SEGMENTS, PLATFORM_CLAIM_FLOOR, SEGMENT_LABELS, add_mx, company_site_facts,
+    eligible_for_old_site_pitch, segment_of,
+)
 from harvey.state import WRITABLE_EMAIL_STATUSES, StateManager
 from harvey.sending_mode import sync_sending_mode
 from harvey.startups import startup_facts
@@ -43,6 +48,12 @@ PERSON_VAR = re.compile(r"\{\{\s*(first_?name|last_?name|title)\s*\}\}", re.IGNO
 # small — the rest of the 'new' pool is picked up on later cycles.
 NATIVE_BATCH_CAP = 8
 LEGACY_BATCH_CAP = 50
+# Age facts named in one email, at most: the few strongest make the point.
+MAX_AGE_FACTS = 4
+# Said whenever the profile has read the company's site.
+SITE_CLAIMS_RULE = (
+    "\n- Say nothing about their website's age, platform, phone view or security\n"
+    "  unless it is one of the 'Website platform' or 'Seen on their website' FACTS.")
 
 # The built-in "how" lines each prompt ends with: email 1 is an observation
 # and a question, with no pitch. Operator email rules replace exactly these.
@@ -245,14 +256,30 @@ class Writer:
             p for p in prospects_with_email
             if not await self.state.colleague_who_replied(p.id)
         ]
+        # What their sites run on decides the campaign, and the custom segment
+        # (legacy shop software, old sites) is written only to verified
+        # addresses. state.count_writable_prospects leaves the same people
+        # out, so the heartbeat doesn't pick writing for them every cycle.
+        self._site_cache = {}
+        segments = {}
+        for p in prospects_with_email:
+            site = await self._site_for(p.company_id)
+            segments[p.id] = self._segment(p, site)
+        held = [p for p in prospects_with_email
+                if self._held(p, segments[p.id], self._site_cache.get(p.company_id))]
+        if held:
+            logger.info(f"Writer: {len(held)} prospect(s) wait: custom-segment sites are written to "
+                        "verified addresses only.")
+        held_ids = {id(p) for p in held}
+        prospects_with_email = [p for p in prospects_with_email if id(p) not in held_ids]
         if not prospects_with_email:
             logger.info(
                 "Writer: No prospects with deliverable (verified/risky) emails yet."
             )
             return
 
-        # Batch prospects into campaign groups (by industry/title for relevance)
-        batches = self._group_prospects(prospects_with_email)
+        # Batch prospects into campaign groups (by website segment)
+        batches = self._group_prospects(prospects_with_email, segments)
         if self.multi:
             # Who sends to whom, decided before anything is drafted.
             batches = await self._assign_mailboxes(batches)
@@ -415,6 +442,66 @@ class Writer:
         text = self.brain.load_skill("selling_to_startups") if hasattr(self.brain, "load_skill") else ""
         return "\n\nSELLING TO STARTUP FOUNDERS\n" + text if text else ""
 
+    async def _site_for(self, company_id: str, mx: bool = False) -> dict:
+        """What the profile found on the company's site (segments.
+        company_site_facts), read once per run; {} when nothing can be read.
+        ``mx`` adds the MX check an old-site pitch needs, asked only for the
+        companies actually being written to, not every waiting prospect's."""
+        cache = self.__dict__.setdefault("_site_cache", {})
+        if not company_id:
+            return {}
+        if company_id not in cache:
+            try:
+                cache[company_id] = await company_site_facts(self.state, company_id, check_mx=False)
+            except Exception as e:
+                logger.debug(f"Writer: site facts unread for {company_id}: {e}")
+                cache[company_id] = {}
+        if mx and cache[company_id]:
+            try:
+                cache[company_id] = await add_mx(cache[company_id])
+            except Exception as e:
+                logger.debug(f"Writer: MX check failed for {company_id}: {e}")
+        return cache[company_id]
+
+    @staticmethod
+    def _segment(prospect, site: dict | None) -> str:
+        """shopify | wordpress | custom | other, for the campaign and the playbook."""
+        if site and site.get("segment"):
+            return site["segment"]
+        return segment_of(None, [], prospect.industry)
+
+    @staticmethod
+    def _held(prospect, segment: str, site: dict | None) -> bool:
+        """Left 'new' for now: the custom segment is written only to verified
+        addresses (state._writer_holds agrees)."""
+        if not prospect.company_id:
+            return False
+        return segment == "custom" and (prospect.email_status or "") != "verified"
+
+    def _segment_playbook(self, segment: str, old_pitch: bool) -> str:
+        """skills/segment_<segment>.md ("" if absent). An old-site segment
+        whose site can't be pitched as old is written as generic: no playbook."""
+        if segment in OLD_SITE_SEGMENTS and not old_pitch:
+            return ""
+        text = self.brain.load_skill("segment_" + segment) if hasattr(self.brain, "load_skill") else ""
+        return f"\n\nWRITING TO {SEGMENT_LABELS[segment].upper()} SITES\n" + text if text else ""
+
+    @staticmethod
+    def _site_facts_lines(site: dict) -> tuple[list[str], bool]:
+        """FACTS lines from the profile (platform, then the claimable age
+        facts when the site may be pitched as old), and whether it may."""
+        if not site or not site.get("classified"):
+            return [], False
+        lines = []
+        label = PLATFORM_LABELS.get(site.get("platform") or "", "")
+        if label and float(site.get("platform_conf") or 0) >= PLATFORM_CLAIM_FLOOR:
+            lines.append(f"- Website platform (read from their home page): {label}")
+        old_pitch = eligible_for_old_site_pitch(site)
+        if old_pitch:
+            for fact in (site.get("age_facts") or [])[:MAX_AGE_FACTS]:
+                lines.append(f"- Seen on their website: {fact['sentence']}")
+        return lines, old_pitch
+
     async def _feedback_block(self, prospect_ids: list[str]) -> str:
         """The owner's notes from the dashboard's Feedback buttons, as prompt
         text ("" when there are none). Never lets a failed read stop writing."""
@@ -471,6 +558,12 @@ class Writer:
                 facts.append(
                     f"- Signal ({signal.get('type', 'signal')}): {signal.get('detail', '')}"
                 )
+        # What the profile read on their site: the platform, and the age facts
+        # it proved (only when an old site may be pitched; segments.py).
+        site = await self._site_for(prospect.company_id, mx=True)
+        segment = self._segment(prospect, site)
+        site_lines, old_pitch = self._site_facts_lines(site)
+        facts.extend(site_lines)
         if prospect.personalization_notes:
             facts.append(f"- Research notes: {prospect.personalization_notes}")
         startup = await self._startup(prospect.company_id)
@@ -492,6 +585,7 @@ class Writer:
             prompt += "\n\n" + self.skills
         if startup is not None:
             prompt += self._startup_playbook()
+        prompt += self._segment_playbook(segment, old_pitch)
         prompt += await self._feedback_block([prospect.id])
         rules = getattr(self, "email_rules", "")
         prompt += operator_rules_block(rules, multi=self.multi)
@@ -504,6 +598,8 @@ class Writer:
         else:
             shape = PERSONAL_SHAPE
             strict = "- Follow every STRICT EMAIL RULE above."
+        if site.get("classified"):
+            strict += SITE_CLAIMS_RULE
         sign_off = ("\n" + sign_off_rule("the email", " (the one merge variable in it)")
                     if self.multi else "")
 
@@ -593,6 +689,15 @@ Pricing: {self.config.product.pricing}"""
         backed = [await self._startup(p.company_id) for p in prospects]
         if prospects and all(b is not None for b in backed):
             prompt += self._startup_playbook()
+        # The segment's playbook when the whole batch is in one segment, and
+        # for an old-site segment only when every site may be pitched as old.
+        # Age facts stay out of this template: they are each company's own.
+        sites = [await self._site_for(p.company_id, mx=True) for p in prospects]
+        kinds = {self._segment(p, s) for p, s in zip(prospects, sites)}
+        if len(kinds) == 1:
+            segment = kinds.pop()
+            old_pitch = all(eligible_for_old_site_pitch(s) for s in sites)
+            prompt += self._segment_playbook(segment, old_pitch)
         # Campaign notes only: this template goes to the whole batch, so a
         # note about one person ("met her at the expo") must never reach it.
         prompt += await self._feedback_block([])
@@ -705,17 +810,19 @@ Return ONLY a JSON array (no markdown fences, no commentary):
             logger.warning(f"Writer: Expected 3 emails, got {len(steps)}.")
         return steps
 
-    def _group_prospects(self, prospects: list) -> dict[str, list]:
-        """Group prospects into campaign batches by industry/title combo."""
+    def _group_prospects(self, prospects: list, segments: dict | None = None) -> dict[str, list]:
+        """Group prospects into campaign batches by website segment
+        ("Shopify-outreach", "Custom-inbox-outreach"). ``segments`` maps a
+        prospect id to its segment (from SITE_PLATFORM); without one, the
+        prospect's industry label is the fallback (segments.segment_of)."""
         batches: dict[str, list] = {}
 
         for prospect in prospects:
-            # Group by industry + rough title category
-            industry = prospect.industry or "general"
+            segment = (segments or {}).get(prospect.id) or segment_of(None, [], prospect.industry)
             # Inbox prospects get their own campaign: their templates can't
             # greet anyone by name.
             kind = "inbox-outreach" if prospect.is_company_inbox else "outreach"
-            key = f"{industry}-{kind}"
+            key = f"{SEGMENT_LABELS.get(segment, 'Other')}-{kind}"
 
             if key not in batches:
                 batches[key] = []

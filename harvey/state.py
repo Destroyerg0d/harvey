@@ -567,6 +567,41 @@ _LAST_PROFILED = (
     "(CASE WHEN p.last_seen IS NULL OR c.profile_checked_at > p.last_seen"
     " THEN c.profile_checked_at ELSE p.last_seen END)"
 )
+# A company profiled before SITE_PLATFORM was collected comes back once to be
+# classified, however recent its profile: once SITE_PLATFORM is confirmed, a
+# company with profile rows but none for SITE_PLATFORM, whose last check
+# wrote rows (the check stamp is set before they are). A site that stopped
+# answering writes nothing, so it waits for the usual stale_days.
+_UNCLASSIFIED = (
+    "(EXISTS (SELECT 1 FROM signal_codes sc WHERE sc.code = 'SITE_PLATFORM'"
+    " AND sc.status = 'confirmed')"
+    " AND p.last_seen IS NOT NULL"
+    " AND (c.profile_checked_at IS NULL OR c.profile_checked_at <= p.last_seen)"
+    " AND NOT EXISTS (SELECT 1 FROM observations so WHERE so.company_id = c.id"
+    " AND so.signal_code = 'SITE_PLATFORM'))"
+)
+
+
+def _writer_holds(p: str) -> str:
+    """SQL: a new prospect the Writer leaves for later because of its
+    company's site (agents/writer.py does the same in Python): the custom
+    segment is written only to verified addresses."""
+    from harvey.segments import CUSTOM_PLATFORMS, CUSTOM_WHEN_OLD, OLD_SITE_SCORE
+
+    def latest(code: str, column: str) -> str:
+        return (f"(SELECT o.{column} FROM observations o WHERE o.company_id = {p}.company_id "
+                f"AND o.signal_code = '{code}' ORDER BY o.observed_at DESC, o.rowid DESC LIMIT 1)")
+
+    def listed(values) -> str:
+        return ", ".join(f"'{v}'" for v in sorted(values))
+
+    # Never NULL: under NOT, a NULL would drop every prospect with no rows.
+    platform = f"LOWER(COALESCE({latest('SITE_PLATFORM', 'value_text')}, ''))"
+    score = f"COALESCE({latest('LEGACY_SITE_SCORE', 'value_num')}, 0)"
+    custom = (f"({platform} IN ({listed(CUSTOM_PLATFORMS)}) OR ({platform} IN ({listed(CUSTOM_WHEN_OLD)}) "
+              f"AND {score} >= {OLD_SITE_SCORE}))")
+    has_company = f"COALESCE({p}.company_id, '') != ''"
+    return f"({has_company} AND COALESCE({p}.email_status, '') != 'verified' AND {custom})"
 
 # Column whitelists for dynamic UPDATEs (prevents SQL injection via kwargs).
 _CAMPAIGN_COLUMNS = frozenset({
@@ -2193,7 +2228,8 @@ class StateManager(LinkedInStateMixin):
                    {_LAST_PROFILED_JOIN}
                    WHERE c.domain != ''
                      AND ({_LAST_PROFILED} IS NULL
-                          OR {_LAST_PROFILED} < datetime('now', ?))
+                          OR {_LAST_PROFILED} < datetime('now', ?)
+                          OR {_UNCLASSIFIED})
                    ORDER BY {_LAST_PROFILED} IS NOT NULL, {_LAST_PROFILED}
                    LIMIT ?""",
                 (f"-{int(stale_days)} days", int(limit)),
@@ -2207,7 +2243,8 @@ class StateManager(LinkedInStateMixin):
                    {_LAST_PROFILED_JOIN}
                    WHERE c.domain != ''
                      AND ({_LAST_PROFILED} IS NULL
-                          OR {_LAST_PROFILED} < datetime('now', ?))""",
+                          OR {_LAST_PROFILED} < datetime('now', ?)
+                          OR {_UNCLASSIFIED})""",
                 (f"-{int(stale_days)} days",),
             ) as cursor:
                 row = await cursor.fetchone()
@@ -2436,13 +2473,15 @@ class StateManager(LinkedInStateMixin):
         return False
 
     async def count_writable_prospects(self) -> int:
-        """New prospects the Writer can draft for (a deliverable email)."""
+        """New prospects the Writer can draft for (a deliverable email, and
+        nothing about their company's site holding them back)."""
         marks = ",".join("?" for _ in WRITABLE_EMAIL_STATUSES)
         async with self._connect() as db:
             async with db.execute(
                 f"""SELECT COUNT(*) FROM prospects p
                     WHERE status = 'new' AND email != ''
-                      AND email_status IN ({marks}) AND NOT {_company_answered('p')}""",
+                      AND email_status IN ({marks}) AND NOT {_company_answered('p')}
+                      AND NOT {_writer_holds('p')}""",
                 WRITABLE_EMAIL_STATUSES,
             ) as cursor:
                 return (await cursor.fetchone())[0]

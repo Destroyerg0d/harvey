@@ -9,6 +9,23 @@ minor versions can still change behaviour.
 
 ### Added
 
+- **Site platform, site age and segments.** Profiling now records
+  `SITE_PLATFORM` (Shopify, WordPress, WooCommerce, Magento 1 or 2, osCommerce,
+  Zen Cart, OpenCart, PrestaShop, VirtueMart, Joomla, CubeCart, X-Cart, Ecwid,
+  BigCommerce, ShopFactory, SellerDeck, Wix, Squarespace, Webflow, a hand-built
+  PHP site, or unknown), `LEGACY_SITE_SCORE` (0-100) and `SITE_AGE_FACTS`: the
+  age facts it could prove, each a plain sentence an email may use (no mobile
+  viewport even on a phone's fetch, https that fails to connect while http
+  answers without redirecting, a copyright year four or more years old,
+  jQuery 1.x, WordPress before 5.0, Magento 1, table layouts, Flash, an old
+  doctype, outdated notices). Rules in `harvey/collectors/site_age.py`.
+  Companies profiled before this come back once to be classified. The Writer
+  groups campaigns by segment (`harvey/segments.py`: Shopify, WordPress,
+  Custom, Other), puts the platform and the proven facts in email 1's FACTS,
+  loads `skills/segment_<segment>.md` when present, pitches a site as old only
+  while it answers, its domain has an MX record and it isn't marked
+  dissolved, and writes the custom segment to verified addresses only.
+
 - **Mailboxes tab on the dashboard.** Sending health and results for every
   configured mailbox and sending domain, read-only. A summary (sent today
   against the sum of the mailboxes' daily limits, 7-day sends, bounce rate

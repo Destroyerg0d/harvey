@@ -10,6 +10,7 @@ whether they're spending on ads today, what's missing from their site.
 """
 
 import asyncio
+import json
 import logging
 from html import unescape as html_unescape
 import random
@@ -27,6 +28,9 @@ from harvey.collectors.ats import detect_board, matching_roles, read_board, role
 from harvey.collectors.discover import (
     name_from_domain, name_matches_domain, site_name_from_html,
 )
+from harvey.collectors.site_age import (
+    age_facts, detect_platform, has_viewport, legacy_score,
+)
 
 logger = logging.getLogger("harvey.collectors.profile")
 
@@ -37,6 +41,45 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
 ]
+# A phone, for the one extra fetch that checks whether a home page with no
+# viewport tag serves phones something else (a mobile page or an m. site).
+MOBILE_USER_AGENT = (
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1")
+# The site signals one profile pass reads together (harvey/collectors/site_age.py).
+SITE_AGE_CODES = ("SITE_PLATFORM", "LEGACY_SITE_SCORE", "SITE_AGE_FACTS")
+
+
+def _fetch_error(e: Exception) -> str:
+    """What kind of failure a fetch was: "connect" (refused, or the TLS
+    handshake failed), "timeout", "dns", or "other". Only "connect" on
+    https is proof a site has no working https (site_age.HTTPS_PROOF)."""
+    if isinstance(e, httpx.TimeoutException):
+        return "timeout"
+    if isinstance(e, httpx.ConnectError):
+        text = str(e).lower()
+        if "dns" in text or "getaddrinfo" in text or "name or service not known" in text:
+            return "dns"
+        return "connect"
+    return "other"
+
+
+def _site_fetch(base: str, attempts: dict) -> dict:
+    """How the home page was reached, for site_age.age_facts: where it ended
+    up, its headers, whether any https attempt got an answer, and how the
+    https attempt on the host that answered failed ("" if it didn't)."""
+    rec = attempts.get(base) or {}
+    host = urlparse(base).hostname or ""
+    https_tries = {url: r for url, r in attempts.items() if url.startswith("https://")}
+    same_host = https_tries.get(f"https://{host}") or {}
+    return {
+        "url": base,
+        "final_url": rec.get("final_url") or base,
+        "headers": rec.get("headers") or {},
+        "https_answered": any(r and r.get("status") for r in https_tries.values()),
+        "https_error": ("" if base.startswith("https://")
+                        else (same_host.get("error") or ("status" if same_host.get("status") else ""))),
+    }
 
 # ── Agency detection ──────────────────────────────────────────────────
 # Links that appear in footers but are never the site's agency. Matched as
@@ -832,40 +875,91 @@ class ProfileCollector:
         if self._client:
             await self._client.aclose()
 
-    async def _get(self, url: str) -> str:
+    async def _fetch(self, url: str, headers: dict | None = None) -> dict:
+        """One GET, never raising: {"status", "final_url", "headers", "text",
+        "error"} where ``error`` is _fetch_error's kind ("" when it answered)."""
+        rec = {"status": 0, "final_url": "", "headers": {}, "text": "", "error": ""}
         try:
-            resp = await self._client.get(url)
+            resp = await (self._client.get(url, headers=headers) if headers else self._client.get(url))
         except (httpx.HTTPError, ValueError) as e:
             logger.debug(f"fetch failed {url}: {e}")
+            rec["error"] = _fetch_error(e)
+            return rec
+        head = {}
+        for name, value in resp.headers.items():
+            name = name.lower()
+            head[name] = f"{head[name]}\n{value}" if name in head else value
+        rec.update(status=resp.status_code, final_url=str(getattr(resp, "url", "") or url),
+                   headers=head, text=resp.text or "")
+        return rec
+
+    async def _get(self, url: str) -> str:
+        rec = await self._fetch(url)
+        # How it went, without the body: _resolve_site reads it back.
+        self.__dict__.setdefault("_fetches", {})[url] = {k: v for k, v in rec.items() if k != "text"}
+        if rec["error"]:
             return ""
-        if resp.status_code in (200, 202, 403, 429, 503) and looks_like_challenge(
-                resp.text or "", resp.status_code):
+        status, text = rec["status"], rec["text"]
+        if status in (200, 202, 403, 429, 503) and looks_like_challenge(text, status):
             self.challenged.add(urlparse(url).netloc.lower().removeprefix("www."))
             return ""
-        if resp.status_code != 200:
+        if status != 200:
             return ""
-        ctype = resp.headers.get("content-type", "")
+        ctype = rec["headers"].get("content-type", "")
         if "html" not in ctype and "xml" not in ctype and "text" not in ctype:
             return ""
-        return resp.text
+        return text
 
     async def _resolve_site(self, domain: str) -> tuple[str, str]:
         """Return (working base url, homepage html), or ("", "") if none work.
 
         Tries https/http and bare/www variants — a plain https guess marks
         plenty of live, real small-business sites "unreachable" simply
-        because they never got a TLS cert, or only answer on www.
+        because they never got a TLS cert, or only answer on www. How each
+        attempt went is kept in ``site_fetch[domain]`` (where the page ended
+        up, how https failed): the proof the site-age facts need.
         """
+        attempts: dict[str, dict | None] = {}
         for base in (
             f"https://{domain}", f"https://www.{domain}",
             f"http://{domain}", f"http://www.{domain}",
         ):
             html = await self._get(base)
+            attempts[base] = getattr(self, "_fetches", {}).get(base)
             if html:
+                self.__dict__.setdefault("site_fetch", {})[domain] = _site_fetch(base, attempts)
                 return base, html
             if domain.lower().removeprefix("www.") in self.challenged:
                 break       # every variant lands on the same challenge
         return "", ""
+
+    async def _get_mobile(self, url: str) -> dict:
+        """The page a phone is served: {"mobile_checked", "mobile_html",
+        "mobile_final_url"}. Not checked when the fetch can't be made."""
+        try:
+            rec = await self._fetch(url, headers={"User-Agent": MOBILE_USER_AGENT})
+        except Exception as e:      # a collector without a client, a broken stub
+            logger.debug(f"mobile fetch failed {url}: {e}")
+            return {"mobile_checked": False}
+        if rec["error"] or rec["status"] != 200 or looks_like_challenge(rec["text"], rec["status"]):
+            return {"mobile_checked": False}
+        return {"mobile_checked": True, "mobile_html": rec["text"],
+                "mobile_final_url": rec["final_url"] or url}
+
+    async def _site_age(self, domain: str, site: str, home: str, add) -> None:
+        """SITE_PLATFORM, LEGACY_SITE_SCORE and SITE_AGE_FACTS (claimable only)."""
+        fetch = dict(getattr(self, "site_fetch", {}).get(domain) or {"final_url": site})
+        final = fetch.get("final_url") or site
+        platform, conf, evidence = detect_platform(home, fetch.get("headers"), final)
+        if not has_viewport(home) and (self.wants("SITE_AGE_FACTS") or self.wants("LEGACY_SITE_SCORE")):
+            fetch.update(await self._get_mobile(final))
+        facts = age_facts(home, fetch, platform=platform)
+        add("SITE_PLATFORM", text=platform, conf=conf, url=final)
+        add("LEGACY_SITE_SCORE", num=legacy_score(platform, facts), url=final)
+        claimable = [f.as_dict() for f in facts if f.claimable]
+        add("SITE_AGE_FACTS", num=len(claimable), text=json.dumps(claimable), url=final)
+        logger.debug(f"profile: {domain} platform {platform} ({evidence or 'no marker'}), "
+                     f"{len(claimable)} claimable age fact(s) of {len(facts)}")
 
     async def _first_present(self, site: str, paths) -> tuple[str, str]:
         """Return (url, html) for the first path that returns content."""
@@ -1102,6 +1196,8 @@ class ProfileCollector:
                 "evidence_url": url or site,
             })
 
+        self.__dict__["_fetches"] = {}      # one company's fetch records at a time
+        self.__dict__.setdefault("site_fetch", {}).pop(domain, None)
         site, home = await self._resolve_site(domain)
         if not home:
             # A failure IS an observation — silent failures look like clean results.
@@ -1120,6 +1216,18 @@ class ProfileCollector:
         tech = self.detect_tech(home)
         if tech:
             add("TECH_STACK", text=", ".join(tech))
+
+        # Shop software and how old the site is: which segment it's written
+        # to as, and the only age claims an email may make.
+        if any(self.wants(code) for code in SITE_AGE_CODES):
+            try:
+                await self._site_age(domain, site, home, add)
+            except Exception as e:
+                logger.info(f"profile: {domain} site age unread: {type(e).__name__}: {e}")
+                # Recorded anyway, or the company is queued to be classified
+                # again every cycle (state._UNCLASSIFIED).
+                obs[:] = [o for o in obs if o["signal_code"] not in SITE_AGE_CODES]
+                add("SITE_PLATFORM", text="unknown", conf=0.0)
 
         # Structured data gap
         has_schema = bool(re.search(r'application/ld\+json', home, re.I)
