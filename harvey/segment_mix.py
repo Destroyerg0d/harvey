@@ -45,6 +45,9 @@ LABELS = {"shopify": "Shopify", "wordpress": "WordPress", "custom": "Custom",
           "other": "Other", "unknown": "Not classified"}
 
 RAMP_KEY = "segment_ramp"
+# Written when you approve a segment-mix lesson (harvey/lessons.py), deleted
+# when it is retired: JSON {segment: share}. While set, it is the mix.
+LEARNED_KEY = "segment_weights"
 RAMP_SEGMENT = "custom"
 RAMP_STEPS = (0.15, 0.25)
 RAMP_WINDOW = timedelta(days=7)
@@ -84,7 +87,17 @@ def clean_weights(raw) -> dict[str, float]:
     return {k: v / total for k, v in out.items()} if total > 0 else {}
 
 
-def weights_of(config) -> dict[str, float]:
+def weights_of(config, learned_raw: str = "") -> dict[str, float]:
+    """The mix in force: an approved segment-mix lesson's (``learned_raw``,
+    the LEARNED_KEY setting's JSON) when there is one, else
+    channels.email.segment_weights."""
+    if learned_raw:
+        try:
+            learned = clean_weights(json.loads(learned_raw))
+        except (TypeError, ValueError):
+            learned = {}
+        if learned:
+            return learned
     email = getattr(getattr(config, "channels", None), "email", None)
     return clean_weights(getattr(email, "segment_weights", None) or {})
 

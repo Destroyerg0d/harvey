@@ -453,7 +453,7 @@ async def collect(db_path, config, *, tz_minutes: int = 0, now: datetime | None 
 
             segment_rows, segment_bounces, unattributed = await _segment_counts(db, midnight, week_ago)
 
-            keys = [mb.GLOBAL_PAUSE_KEY, GLOBAL_BOUNCE_KEY, sm.RAMP_KEY]
+            keys = [mb.GLOBAL_PAUSE_KEY, GLOBAL_BOUNCE_KEY, sm.RAMP_KEY, sm.LEARNED_KEY]
             for m in configured:
                 keys += [mb.paused_key(m.email), mb.bounce_key(m.email),
                          mb.read_ok_key(m.email), mb.down_since_key(m.email)]
@@ -603,7 +603,7 @@ async def collect(db_path, config, *, tz_minutes: int = 0, now: datetime | None 
         "daily": daily,
         "funnel": _funnel(companies, funnel_rows, _pipeline_bucket),
         "segments": _segments(config, segment_rows, segment_bounces, unattributed,
-                              settings.get(sm.RAMP_KEY, "")),
+                              settings.get(sm.RAMP_KEY, ""), settings.get(sm.LEARNED_KEY, "")),
         "score_formula": SCORE_FORMULA,
         "score_note": SCORE_NOTE,
     }
@@ -633,11 +633,12 @@ async def _segment_counts(db, midnight: str, week_ago: str) -> tuple[list[dict],
 
 
 def _segments(config, sent_rows: list[dict], bounce_rows: list[dict], unattributed: int,
-              ramp_raw: str) -> dict:
-    """The Segments section: sends and bounces per segment, and the mix."""
+              ramp_raw: str, learned_raw: str = "") -> dict:
+    """The Segments section: sends and bounces per segment, and the mix
+    (an approved segment-mix lesson's, when there is one)."""
     by = {r["segment"]: r for r in sent_rows}
     bounces = {r["segment"]: r for r in bounce_rows}
-    weights = sm.weights_of(config)
+    weights = sm.weights_of(config, learned_raw)
     ramp = sm.read_ramp(ramp_raw)
     shares = sm.effective_shares(weights, ramp["level"]) if weights else {}
     names = [s for s in sm.MIX_SEGMENTS if s in by or s in bounces or s in weights]

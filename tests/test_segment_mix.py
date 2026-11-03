@@ -73,6 +73,30 @@ def test_no_weights_in_the_config_means_no_mix():
     assert sm.weights_of(Cfg) == {}
 
 
+def test_an_approved_mix_lesson_wins_over_the_config(monkeypatch):
+    from harvey import lessons
+    assert sm.LEARNED_KEY == lessons.SEGMENT_WEIGHTS_KEY
+    weights(monkeypatch, {"shopify": 1.0})
+    learned = json.dumps({"custom": 0.5, "wordpress": 0.5})
+    assert sm.weights_of(Cfg, learned) == {"custom": 0.5, "wordpress": 0.5}
+    # Nothing learned, or nothing usable: the config's mix.
+    assert sm.weights_of(Cfg) == {"shopify": 1.0}
+    assert sm.weights_of(Cfg, "not json") == {"shopify": 1.0}
+    assert sm.weights_of(Cfg, json.dumps({"nonsense": 1})) == {"shopify": 1.0}
+
+
+@pytest.mark.asyncio
+async def test_the_sender_mixes_by_an_approved_lesson(state, monkeypatch):
+    weights(monkeypatch, {"shopify": 1.0})
+    sender = single_sender(state, FakeProvider(), require_approval=False)
+    assert (await sender._segment_mix()).shares == {"shopify": 1.0}
+    await state.set_setting(sm.LEARNED_KEY, json.dumps({"shopify": 0.5, "wordpress": 0.5}))
+    assert (await sender._segment_mix()).shares == pytest.approx({"shopify": 0.5, "wordpress": 0.5})
+    # Retiring the lesson deletes the setting: the config's mix again.
+    await state.delete_setting(sm.LEARNED_KEY)
+    assert (await sender._segment_mix()).shares == {"shopify": 1.0}
+
+
 def test_the_config_rejects_a_segment_it_doesnt_know():
     from pydantic import ValidationError
     from tests.test_mailboxes import make_config

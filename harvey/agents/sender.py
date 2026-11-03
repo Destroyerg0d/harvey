@@ -33,7 +33,7 @@ from harvey.mailboxes import (
     down_since_key, is_multi, least_loaded, mailbox_for, normalize, pause_problem,
     primary_mailbox, render_sender, takes_new_prospects,
 )
-from harvey.segment_mix import build_mix, queued_segments, update_ramp, weights_of
+from harvey.segment_mix import LEARNED_KEY, build_mix, queued_segments, update_ramp, weights_of
 from harvey.segment_stamp import segment_for_company, variant_for
 from harvey.segments import SEGMENT_LABELS
 from harvey.sending_mode import sync_sending_mode
@@ -1159,7 +1159,7 @@ class Sender:
         """Today's segment mix (harvey/segment_mix.py), its ramp brought up
         to date, or None: no segment_weights, or it couldn't be worked out
         (then the drain goes in queue order, as without one)."""
-        weights = weights_of(self.config)
+        weights = weights_of(self.config, await self.state.get_setting(LEARNED_KEY))
         if not weights:
             return None
         try:
