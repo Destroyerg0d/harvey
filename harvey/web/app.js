@@ -99,6 +99,9 @@ const STATUS = {
   objection:      ['Objection', 'waiting'],
   question:       ['Question', 'active'],
   ooo:            ['Out of office', 'idle'],
+  auto:           ['Automatic reply', 'idle'],
+  auto_ack:       ['Auto-acknowledgement', 'idle'],
+  left_company:   ['Left the company', 'bad'],
   wrong_person:   ['Wrong person', 'waiting'],
   unsubscribe:    ['Unsubscribed', 'bad'],
   escalate:       ['Needs a human', 'bad'],
@@ -2496,7 +2499,7 @@ const STAGE_LABELS = {
 };
 const CONVO_FILTERS = [
   ['needs', 'Needs you', c => !!c.draft || c.status === 'needs_human'],
-  ['open', 'Open', c => c.status !== 'closed' && c.status !== 'awaiting_reply'],
+  ['open', 'Open', c => c.status !== 'closed' && c.status !== 'awaiting_reply' && c.status !== 'auto'],
   ['awaiting', 'Awaiting reply', c => c.status === 'awaiting_reply'],
   ['closed', 'Closed', c => c.status === 'closed'],
   ['all', 'All', () => true],
@@ -2554,8 +2557,11 @@ function convoCard(c) {
         '<div class="te-body">' + escHtml(it.email.body) + '</div></div>';
     }
     const m = it.msg, sent = m.sender === 'harvey';
+    // An auto-reply, or a reply from an address other than the one emailed.
+    const who = sent ? 'Harvey' : m.sender === 'auto' ? 'Automatic reply' : escHtml(first);
+    const from = !sent && m.from_email && m.from_email !== c.prospect_email ? ' (' + escHtml(m.from_email) + ')' : '';
     return '<div class="thread-msg ' + (sent ? 'sent' : 'received') + '"><div class="sender">' +
-      (sent ? 'Harvey' : escHtml(first)) + ' &middot; ' + relTime(m.timestamp) + '</div>' +
+      who + from + ' &middot; ' + relTime(m.timestamp) + '</div>' +
       escHtml(m.content) + '</div>';
   }).join('');
   const draft = c.draft

@@ -227,6 +227,18 @@ def test_a_bounce_never_matched_to_a_sent_email_is_not_counted(seeded, multi):
     assert report["summary"]["bounces_total"] == 3   # b1, b2, b3; not the phantom
 
 
+def test_an_auto_reply_is_not_counted_as_a_reply(seeded, multi):
+    # p4 is 'lost' because its company's auto-reply said it takes no sales
+    # email: nobody wrote back.
+    before = run_collect(seeded, multi)
+    sql(seeded, "INSERT INTO conversations (id, prospect_id, intent, stage, status) "
+                "VALUES ('c9', 'p4', 'not_interested', 'closed_lost', 'auto')")
+    after = run_collect(seeded, multi)
+    assert by_email(after)[SECOND]["replied"] == by_email(before)[SECOND]["replied"] - 1
+    assert after["funnel"]["replied"] == before["funnel"]["replied"] - 1
+    assert after["funnel"]["not_interested"] == before["funnel"]["not_interested"]
+
+
 def test_status_says_paused_not_connected_or_failing_and_why(seeded, multi):
     boxes = by_email(run_collect(seeded, multi))
     assert boxes[SECOND]["status"] == "paused"

@@ -1107,6 +1107,32 @@ def _sending_one_mailbox(args, wanted: str):
     asyncio.run(_run())
 
 
+def cmd_replies(args):
+    """Reply housekeeping. requeue-auto-acks: put back the follow-ups that
+    auto-replies (helpdesk acknowledgements, out-of-office) cancelled before
+    Harvey could tell them from a person."""
+    from harvey.agents.handler import requeue_auto_acks
+    from harvey.state import StateManager
+
+    async def _run():
+        state = StateManager()
+        await state.init_db()
+        counts = await requeue_auto_acks(state, dry_run=args.dry_run)
+        verb = "Would" if args.dry_run else "Did"
+        print(f"\n  Prospects whose replies were all automatic: {counts['found']}")
+        print(f"  {verb} set back to contacted:        {counts['reset_to_contacted']}")
+        print(f"  {verb} re-queue follow-ups:          {counts['follow_ups_requeued']}"
+              " (approved, from tomorrow)")
+        print(f"  {verb} mark conversations automatic: {counts['conversations_marked_auto']}")
+        for why, n in sorted(counts["skipped"].items()):
+            print(f"  Left alone ({why}): {n}")
+        if args.dry_run:
+            print("\n  Dry run: nothing changed. Run without --dry-run to apply.")
+        print()
+
+    asyncio.run(_run())
+
+
 def cmd_sending(args):
     """Pause/resume the sending kill switch."""
     from harvey.state import StateManager
@@ -1284,6 +1310,12 @@ def main():
     sub = subparsers.add_parser(
         "retry-writes", help="Retry prospects the Writer couldn't write an email for")
     sub.set_defaults(func=cmd_retry_writes)
+
+    sub = subparsers.add_parser("replies", help="Reply housekeeping (requeue-auto-acks)")
+    sub.add_argument("replies_action", choices=["requeue-auto-acks"],
+                     help="requeue-auto-acks: put back follow-ups that auto-replies cancelled")
+    sub.add_argument("--dry-run", action="store_true", help="Only count; change nothing")
+    sub.set_defaults(func=cmd_replies)
 
     sub = subparsers.add_parser("sending", help="Kill switch: pause/resume sending")
     sub.add_argument("sending_action", nargs="?", default="status",

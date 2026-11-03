@@ -59,6 +59,19 @@ COLLEAGUE_REPLIED = "a colleague replied"
 # Setting set (to their name) when someone's reply stops their company.
 # An out-of-office or a "wrong person" doesn't set it.
 COMPANY_STOP_KEY = "company_stop:"
+# Conversation status of a thread only machines have written in (a helpdesk
+# acknowledgement, an out-of-office): never a reply in the counts, never
+# answered, and the prospect's sequence carries on. A person writing in it
+# makes it an ordinary conversation again.
+AUTO_CONVERSATION = "auto"
+# Intents of a message a machine wrote, not a person.
+AUTOMATIC_INTENTS = frozenset({"ooo", "auto_ack", "left_company"})
+# Outbox error on what a reply cancelled (stop-on-reply), and on what an
+# auto-reply cancelled: a company that takes no sales email, an address
+# whose owner has left.
+STOP_ON_REPLY = "stop_on_reply"
+POLICY_AUTO_REPLY = "their auto-reply says they take no sales email"
+LEFT_THE_COMPANY = "their auto-reply says they have left"
 # Shared mailbox providers: two people on one aren't colleagues.
 FREE_MAIL_DOMAINS = frozenset({
     "gmail.com", "googlemail.com", "yahoo.com", "ymail.com", "hotmail.com",
@@ -1575,6 +1588,123 @@ class StateManager(LinkedInStateMixin):
                 row = await cursor.fetchone()
         return row[0] if row else None
 
+    # ── Automatic replies (helpdesk acknowledgements, out-of-office) ──
+
+    async def emailed_prospect_at_domain(self, domain: str) -> Prospect | None:
+        """The prospect Harvey last sent a cold email to at exactly ``domain``
+        (their address's domain, or their company's), for a reply from an
+        address Harvey doesn't know. Never a free-mail domain: two people on
+        one aren't colleagues."""
+        domain = _norm(domain)
+        if not domain or domain in FREE_MAIL_DOMAINS:
+            return None
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT p.* FROM prospects p JOIN outbox o ON o.prospect_id = p.id "
+                "WHERE o.kind = 'sequence' AND o.status = 'sent' AND "
+                f"({_email_domain('p')} = ? OR p.company_id IN "
+                "(SELECT id FROM companies WHERE lower(domain) IN (?, ?))) "
+                "ORDER BY o.sent_at DESC LIMIT 1",
+                (domain, domain, "www." + domain),
+            ) as cursor:
+                row = await cursor.fetchone()
+        return self._prospect_from_row(row) if row else None
+
+    async def defer_next_sequence_step(self, prospect_id: str, day: date,
+                                       latest: datetime) -> str | None:
+        """An out-of-office said when they're back: move their next queued
+        sequence email to ``day`` (its own time of day), never past
+        ``latest``, when it was due sooner. Returns the new send time, or
+        None when nothing moved."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT id, send_at FROM outbox WHERE prospect_id = ? AND kind = 'sequence' "
+                "AND status IN ('pending_review', 'approved') ORDER BY step, send_at LIMIT 1",
+                (prospect_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+            if row is None:
+                return None
+            try:
+                current = datetime.fromisoformat(str(row["send_at"]))
+            except (TypeError, ValueError):
+                current = None
+            at = datetime.combine(day, current.time() if current else datetime.min.time())
+            at = min(at, latest)
+            if current is not None and current >= at:
+                return None
+            await db.execute(
+                "UPDATE outbox SET send_at = ?, updated_at = ? WHERE id = ? "
+                "AND status IN ('pending_review', 'approved')",
+                (at.isoformat(), _utcnow().isoformat(), row["id"]),
+            )
+            await db.commit()
+            return at.isoformat()
+
+    async def auto_reply_backfill(self) -> list[dict]:
+        """Everyone with a conversation classed as an automatic reply (intent
+        ooo or auto_ack), for `harvey replies requeue-auto-acks`: one dict
+        each, {"prospect", "conversations" (all of theirs), "answers" (replies
+        Harvey queued for them, so a person wrote), "stopped" (sequence
+        emails a reply cancelled)}."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM conversations WHERE prospect_id IN (SELECT prospect_id "
+                "FROM conversations WHERE intent IN ('ooo', 'auto_ack')) ORDER BY created_at"
+            ) as cursor:
+                rows = [dict(r) for r in await cursor.fetchall()]
+            found: dict[str, dict] = {}
+            for d in rows:
+                d["thread"] = Conversation.thread_from_json(d.pop("thread_json"))
+                d["mailbox"] = d.get("mailbox") or ""
+                found.setdefault(d["prospect_id"], {"conversations": []})["conversations"].append(
+                    Conversation(**d))
+            for pid, entry in found.items():
+                async with db.execute(
+                    "SELECT SUM(kind = 'reply'), SUM(kind = 'sequence' AND status = 'cancelled' "
+                    "AND error = ?) FROM outbox WHERE prospect_id = ?", (STOP_ON_REPLY, pid),
+                ) as cursor:
+                    answers, stopped = await cursor.fetchone()
+                entry.update(answers=answers or 0, stopped=stopped or 0)
+        out = []
+        for pid, entry in found.items():
+            prospect = await self.get_prospect(pid)
+            if prospect is not None:
+                out.append({"prospect": prospect, **entry})
+        return out
+
+    async def requeue_stopped_follow_ups(self, prospect_id: str, start: datetime) -> int:
+        """Put back the sequence emails a reply cancelled (stop_on_reply), as
+        approved: the first in step order at ``start``, each later one after
+        the one before it with its original gap. Returns how many."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT id, send_at FROM outbox WHERE prospect_id = ? AND kind = 'sequence' "
+                "AND status = 'cancelled' AND error = ? ORDER BY step, send_at",
+                (prospect_id, STOP_ON_REPLY),
+            ) as cursor:
+                rows = [dict(r) for r in await cursor.fetchall()]
+            at, previous = start, None
+            for r in rows:
+                try:
+                    planned = datetime.fromisoformat(str(r["send_at"]))
+                except (TypeError, ValueError):
+                    planned = None
+                if previous is not None and planned is not None:
+                    at = at + max(timedelta(0), planned - previous)
+                previous = planned or previous
+                await db.execute(
+                    "UPDATE outbox SET status = 'approved', error = '', send_at = ?, "
+                    "updated_at = ? WHERE id = ?",
+                    (at.isoformat(), _utcnow().isoformat(), r["id"]),
+                )
+            await db.commit()
+            return len(rows)
+
     async def count_outbox_sent(self) -> int:
         async with self._connect() as db:
             async with db.execute(
@@ -2788,6 +2918,7 @@ class StateManager(LinkedInStateMixin):
                           SUM(CASE WHEN v.intent = 'not_interested' THEN 1 ELSE 0 END) as not_interested_count
                    FROM campaigns c
                    LEFT JOIN conversations v ON v.campaign_id = c.id
+                        AND COALESCE(v.status, '') != 'auto'
                    WHERE c.status IN ('active', 'completed')
                    GROUP BY c.id
                    ORDER BY c.created_at DESC"""
@@ -2808,10 +2939,12 @@ class StateManager(LinkedInStateMixin):
                 return stats
 
     async def get_intent_distribution(self) -> dict[str, int]:
-        """Count conversations by intent."""
+        """Count conversations by intent: replies people wrote, so not the
+        threads only an auto-reply is in (status auto)."""
         async with self._connect() as db:
             async with db.execute(
-                "SELECT intent, COUNT(*) FROM conversations WHERE intent != '' GROUP BY intent"
+                "SELECT intent, COUNT(*) FROM conversations WHERE intent != '' "
+                "AND COALESCE(status, '') != ? GROUP BY intent", (AUTO_CONVERSATION,)
             ) as cursor:
                 rows = await cursor.fetchall()
                 return {row[0]: row[1] for row in rows}
@@ -3000,6 +3133,12 @@ class StateManager(LinkedInStateMixin):
                 "SELECT COUNT(*) FROM conversations WHERE status = 'needs_human' AND intent = 'ooo'"
             ) as cursor:
                 auto_reply_handoffs = (await cursor.fetchone())[0]
+            # Threads only an auto-reply is in: no conversation to count, but
+            # the person may still write, so replies keep being read.
+            async with db.execute(
+                "SELECT COUNT(*) FROM conversations WHERE status = ?", (AUTO_CONVERSATION,)
+            ) as cursor:
+                auto_conversations = (await cursor.fetchone())[0]
             async with db.execute(
                 "SELECT claude_calls, codex_calls FROM usage_log WHERE date = ?", (today,)
             ) as cursor:
@@ -3024,6 +3163,7 @@ class StateManager(LinkedInStateMixin):
             "sending_paused": bool(await self.get_setting("sending_paused")),
             "open_conversations": open_conversations,
             "auto_reply_handoffs": auto_reply_handoffs,
+            "auto_conversations": auto_conversations,
             "usage_today": usage_today,  # Claude calls (kept for compatibility)
             "usage_today_by_provider": {"claude": usage_today, "codex": codex_today},
             # Companies discovered but not yet read. The heartbeat profiles

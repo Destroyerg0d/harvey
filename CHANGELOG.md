@@ -269,6 +269,33 @@ minor versions can still change behaviour.
 
 ### Changed
 
+- **Automatic replies no longer stop a sequence, and replies from addresses
+  Harvey doesn't know are no longer lost.** Most "replies" to cold email are
+  helpdesk acknowledgements and out-of-offices; each one marked the prospect
+  replied and cancelled their follow-ups before its intent was even known.
+  The Handler now classifies first and cancels only for a person. After the
+  opt-out and escalation checks, a strict test reads a message as automatic
+  only from its headers (`Auto-Submitted` other than `no`, `X-Autoreply`,
+  `X-Autorespond`, `Precedence: auto_reply`) or from text no person writes
+  ("ticket #4521 has been created", "we have received your request" with a
+  reference number, "this is an automated response"); a helpdesk's footprint
+  alone goes to the model, since human agents answer from the same tools. An
+  acknowledgement keeps the prospect contacted and the sequence going, drafts
+  nothing and doesn't stop colleagues; surveys and "ticket solved" notices are
+  never answered; a "we don't accept sales email" auto-reply stops the company
+  like a no. An out-of-office keeps the sequence going and, when it says when
+  they're back, moves their next email to the day after (at most 21 days
+  ahead); "no longer with the company" stops that address only. These threads
+  are stored with status `auto` (messages from `auto`), left out of Today's
+  replies, `open_conversations`, the Analyst's intents and the Mailboxes tab's
+  replies, and never answered; a person writing in one is handled as usual.
+  A reply from an unknown address is matched by In-Reply-To/References to the
+  email it answers, else to the prospect last emailed at the same company
+  domain (never a free-mail one), and handled as theirs (opt-outs included),
+  with the real sender kept on the thread; Harvey hands those to you rather
+  than answer an address it didn't email. `harvey replies requeue-auto-acks
+  [--dry-run]` puts back the follow-ups older auto-replies cancelled.
+
 - **Precleared is told the company's and person's names Harvey already has.**
   For a UK address, cold email may go to a limited company's staff without
   consent but not to a sole trader, so Precleared has to find the company

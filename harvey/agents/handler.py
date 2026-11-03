@@ -12,7 +12,7 @@ import html
 import logging
 import math
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 
 from harvey.brain import Brain, BrainUnavailable
@@ -31,7 +31,10 @@ from harvey.mailboxes import (
     is_multi, mailbox_for, normalize, paused_key, primary_mailbox, read_ok_key,
 )
 from harvey.models.conversation import Conversation, Message
-from harvey.state import COLLEAGUE_REPLIED, REVIEW_NEXT_REPLY_KEY, StateManager
+from harvey.state import (
+    AUTO_CONVERSATION, AUTOMATIC_INTENTS, COLLEAGUE_REPLIED, FREE_MAIL_DOMAINS, LEFT_THE_COMPANY,
+    POLICY_AUTO_REPLY, REVIEW_NEXT_REPLY_KEY, STOP_ON_REPLY, StateManager,
+)
 from harvey.sending_mode import sync_sending_mode
 from harvey.startups import startup_facts
 from harvey.untrusted import UNTRUSTED_RULE, fence
@@ -71,7 +74,14 @@ INTENT_LABELS = {
 # deferred, or escalated to a human.
 AUTO_REPLY_INTENTS = {"interested", "objection", "question", "wrong_person"}
 # Replies that don't stop the cold email to the rest of their company.
-NO_COMPANY_STOP_INTENTS = {"ooo", "wrong_person"}
+NO_COMPANY_STOP_INTENTS = {"ooo", "wrong_person", *AUTOMATIC_INTENTS}
+# Automatic replies, told apart without the model (see automatic_reply).
+AUTO_ACK = "auto_ack"
+LEFT_COMPANY = "left_company"
+# The intent each kind of automatic reply is recorded as. A company's "we take
+# no sales email" is a no, from a machine.
+MACHINE_INTENTS = {"policy": "not_interested", "left": LEFT_COMPANY, "closed": AUTO_ACK,
+                   "ack": AUTO_ACK, "ooo": "ooo"}
 
 # Hard opt-out phrases. If any of these appear, we ALWAYS honor the
 # opt-out regardless of what the LLM classifier says.
@@ -305,6 +315,240 @@ ESCALATION_PATTERNS = (
 )
 
 
+# ── Automatic replies ──
+# Most "replies" to cold email are machines: helpdesk acknowledgements and
+# out-of-offices. Each one used to mark the prospect replied and cancel their
+# follow-ups. These rules tell a machine's message from a person's without the
+# model, and strictly: headers that say so (Auto-Submitted other than "no",
+# X-Autoreply, X-Autorespond, Precedence: auto_reply), or text no person
+# writes ("ticket #4521 has been created"). A helpdesk's footprint alone (a
+# ticket id, "type your reply above this line") is not enough: human agents
+# answer from the same tools, so those go to the model. Every text rule works
+# without headers (SMTP and IMAP give none). They run after the opt-out and
+# escalation checks, which always win.
+
+_TICKET = r"(?:ticket|case|request|support\s+request|enquiry|inquiry|query)"
+_TICKET_NUMBER = (r"[\(\[]?\s*(?:#|no\.?|number|id|ref(?:erence)?)?\s*[:#]?\s*"
+                  r"[a-z]{0,6}-?\d[\w-]*\s*[\)\]]?")
+_ACK_TEXT_RE = re.compile(
+    rf"\b{_TICKET}\s*{_TICKET_NUMBER}\s+(?:has\s+been|was|is)\s+"
+    r"(?:created|opened|logged|raised|received|submitted)\b"
+    rf"|\b{_TICKET}\s+(?:has\s+been|was)\s+(?:created|opened|logged|raised)\b[^.]{{0,60}}?"
+    r"(?:#\s*\d|(?:number|no\.?|id|ref(?:erence)?)\s*[:#]?\s*[a-z]{0,6}-?\d)"
+    r"|\bthis\s+is\s+an?\s+(?:automated|automatic|auto-?generated)\s+"
+    r"(?:response|reply|message|e-?mail|acknowledge?ment|notification)\b"
+    r"|\bthis\s+(?:message|e-?mail|response|reply)\s+(?:is|was|has\s+been)\s+"
+    r"(?:sent|generated)\s+automatically\b")
+# "We have received your request" counts only with a reference number.
+_RECEIVED_RE = re.compile(
+    r"\bwe(?:'ve|\s+have)\s+(?:received|got)\s+your\s+"
+    r"(?:request|e-?mail|message|enquiry|inquiry|ticket|query)\b")
+_REFERENCE_RE = re.compile(
+    r"\b(?:ticket|case|request|reference|ref)\s*(?:#|no\.?|number|id)?\s*(?:is\s+)?[:#]?\s*"
+    r"[a-z]{0,6}-?\d{3,}|#\s*\d{3,}")
+# A satisfaction survey or a "ticket solved" notice: never answered.
+_CLOSED_TEXT_RE = re.compile(
+    rf"\b{_TICKET}\s*(?:{_TICKET_NUMBER}\s+)?(?:has\s+been|was|is\s+now|is)\s+"
+    r"(?:marked\s+as\s+)?(?:solved|closed|resolved)\b"
+    r"|\bhow\s+would\s+you\s+rate\s+(?:the|our|your)\s+"
+    r"(?:support|service|experience|reply|response|help)\b"
+    r"|\brate\s+(?:our|the|your)\s+(?:support|service|response|reply)\b"
+    r"|\b(?:customer\s+)?satisfaction\s+survey\b|\bhow\s+did\s+we\s+do\b")
+# The company takes no sales email: a stop for the whole company, like a no.
+# "Please remove ..." counts only in a machine's message (a person saying it
+# goes to the model, which reads it as the opt-out it is).
+_POLICY_RE = re.compile(
+    r"\b(?:we|i|this\s+(?:office|company|business|address|mailbox|inbox)"
+    r"|our\s+(?:company|business|office|team))\s+"
+    r"(?:do(?:es)?\s+not|don't|dont|will\s+not|won't|cannot|can't|never)\s+"
+    r"(?:accept|respond\s+to|reply\s+to|answer|entertain|consider|engage\s+with|read)\s+"
+    r"(?:any\s+)?(?:unsolicited|sales|marketing|cold|vendor|commercial|promotional|solicitation)"
+    r"|\bno\s+(?:solicitation|soliciting|solicitations)\b"
+    r"|\b(?:unsolicited|sales|marketing|vendor|promotional)\s+(?:e-?mails?|messages?|pitches"
+    r"|offers|enquiries|inquiries|solicitations?|approaches)\s+(?:are|will)\s+"
+    r"(?:not\s+(?:be\s+)?(?:accepted|answered|read|responded\s+to|replied\s+to)"
+    r"|(?:be\s+)?(?:deleted|ignored|discarded))"
+    r"|\b(?:we\s+are|we're)\s+not\s+accepting\s+(?:any\s+)?"
+    r"(?:unsolicited|sales|marketing|vendor|new\s+vendor|new\s+supplier)")
+_PLEASE_REMOVE_RE = re.compile(r"\bplease\s+remove\b")
+# Gone, said by them or about the address itself.
+_GONE_RE = re.compile(
+    r"\b(?:this|the|my)\s+(?:e-?mail\s+)?(?:address|mailbox|inbox|account|e-?mail)\s+"
+    r"(?:is\s+)?(?:no\s+longer|not)\s+(?:in\s+use|active|monitored|being\s+monitored"
+    r"|checked|valid|in\s+service)\b"
+    r"|\b(?:i\s+am|i'm)\s+no\s+longer\s+(?:with|at|working|employed|part\s+of)\b"
+    r"|\bi\s+no\s+longer\s+work\b"
+    r"|\bi(?:\s+have|'ve)\s+(?:now\s+)?left\s+(?:the|this|our)\s+"
+    r"(?:company|business|organi[sz]ation|firm|practice|team|shop|store)\b")
+# Gone, said about someone: only from an auto-reply (a colleague telling you
+# goes to the model, as a wrong person).
+_LEFT_RE = re.compile(
+    r"\b(?:is|are)\s+no\s+longer\s+(?:with|at|working\s+(?:at|for|with)|employed\s+(?:at|by)"
+    r"|part\s+of)\b"
+    r"|\bno\s+longer\s+works?\s+(?:here|at|for|with)\b"
+    r"|\b(?:has|have)\s+(?:now\s+)?left\s+(?:the|this|our)\s+"
+    r"(?:company|business|organi[sz]ation|firm|practice|team|shop|store)\b")
+_AUTO_SUBJECT_RE = re.compile(
+    r"^\s*(?:automatic\s+reply|auto(?:matic)?[-\s]?(?:reply|response)|autoreply"
+    r"|r[ée]ponse\s+automatique|respuesta\s+autom[áa]tica|risposta\s+automatica"
+    r"|automatische\s+antwort)\b")
+_OOO_SUBJECT_RE = re.compile(
+    r"^\s*(?:out\s+of\s+(?:the\s+)?office|ooo\b|abwesenheit|afwezig|absence\b|absent\b)")
+_OOO_TEXT_RE = re.compile(
+    r"\b(?:i\s+am|i'm|i\s+will\s+be|i'll\s+be|we\s+are|we're|we\s+will\s+be"
+    r"|(?:our|the)\s+office\s+(?:is|will\s+be))\s+(?:currently\s+|now\s+)?"
+    r"(?:out\s+of\s+(?:the\s+)?office|away\s+from\s+(?:the\s+|my\s+)?(?:office|desk|e-?mail|work)"
+    r"|away|off\s+work|on\s+(?:annual\s+|parental\s+|maternity\s+|paternity\s+|sick\s+|study\s+"
+    r"|medical\s+)?leave|on\s+(?:vacation|holiday|holidays|pto|a\s+break)|travel+ing|closed)\b"
+    r"|\bout\s+of\s+(?:the\s+)?office\b[^.]{0,80}?\b(?:until|till|returning|return|back)\b")
+# What an out-of-office says and a person writing back doesn't. Without
+# headers, an out-of-office is read from the text only with one of these.
+_OOO_BOILERPLATE_RE = re.compile(
+    r"\bthank\s+you\s+for\s+your\s+(?:e-?mail|message|note)\b"
+    r"|\b(?:will|shall)\s+(?:respond|reply|get\s+back\s+to\s+you|answer)[^.]{0,60}?"
+    r"\b(?:return|back|as\s+soon\s+as\s+(?:possible|i\s+can)|asap)\b"
+    r"|\b(?:upon|on)\s+my\s+return\b|\bwhen\s+i\s+return\b|\bin\s+my\s+absence\b"
+    r"|\bfor\s+(?:anything\s+)?urgent\b|\bif\s+(?:your\s+matter|it|this)\s+is\s+urgent\b"
+    r"|\b(?:limited|no)\s+access\s+to\s+(?:my\s+)?e-?mail\b")
+
+
+def _auto_submitted(headers) -> bool:
+    """The headers say a machine sent it: Auto-Submitted other than "no",
+    X-Autoreply or X-Autorespond, or Precedence: auto_reply."""
+    if not isinstance(headers, dict):
+        return False
+    h = {str(k).strip().lower(): str(v or "").strip().lower() for k, v in headers.items()}
+    if "auto-submitted" in h and h["auto-submitted"].split(";")[0].strip() != "no":
+        return True
+    if any(name in h and h[name] != "no" for name in ("x-autoreply", "x-autorespond")):
+        return True
+    return h.get("precedence", "").split(";")[0].strip() == "auto_reply"
+
+
+def automatic_reply(headers, subject: str, text: str, own_words: str = "",
+                    own_address: bool = True) -> str:
+    """What kind of machine wrote this message, or "" when a person may have
+    (the model reads it then). ``text``: everything they wrote, our text
+    removed; ``own_words``: their reply without the quote. ``own_address``:
+    it came from the address Harvey emailed (from another, "this address is
+    no longer monitored" is about that one, not the prospect's).
+
+    "policy": the company takes no sales email (a stop, like a no).
+    "left": the person or the address is gone (stops that address only).
+    "closed": a satisfaction survey or a ticket closed. "ooo": out of office.
+    "ack": any other automatic reply (a ticket acknowledgement)."""
+    flat = _flat(text)
+    subject = _flat(subject)
+    machine = (_auto_submitted(headers) or bool(_AUTO_SUBJECT_RE.search(subject))
+               or bool(_ACK_TEXT_RE.search(flat))
+               or bool(_RECEIVED_RE.search(flat) and _REFERENCE_RE.search(flat)))
+    closed = bool(_CLOSED_TEXT_RE.search(flat))
+    if _POLICY_RE.search(flat) or ((machine or closed) and _PLEASE_REMOVE_RE.search(flat)):
+        return "policy"
+    if own_address and (_GONE_RE.search(flat) or (machine and _LEFT_RE.search(flat))):
+        return "left"
+    if closed:
+        return "closed"
+    if _OOO_SUBJECT_RE.search(subject):
+        return "ooo"
+    if _OOO_TEXT_RE.search(flat) and (machine or (
+            _OOO_BOILERPLATE_RE.search(flat) and "?" not in (own_words or text))):
+        return "ooo"
+    return "ack" if machine else ""
+
+
+def left_in_auto_reply(text: str) -> bool:
+    """An auto-reply (the model's "ooo") saying the person has left."""
+    flat = _flat(text)
+    return bool(_GONE_RE.search(flat) or _LEFT_RE.search(flat))
+
+
+# An out-of-office's return date: a date shortly after one of these words.
+_MONTHS = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+           "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12}
+_MONTH = (r"(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?"
+          r"|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?")
+_DAY = r"(\d{1,2})(?:st|nd|rd|th)?"
+_RETURN_CUE_RE = re.compile(
+    r"\b(?:until|till|til|thru|through|to|back|return|returning|returns|resume|resuming"
+    r"|after|reopen|reopening|reopens)\b")
+_DATE_RES = (
+    ("ymd", re.compile(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b")),
+    ("dmy", re.compile(rf"\b{_DAY}(?:\s+of)?\s+{_MONTH}(?:,?\s+(\d{{4}}))?\b")),
+    ("mdy", re.compile(rf"\b{_MONTH}\s+{_DAY}(?:,?\s+(\d{{4}}))?\b")),
+    ("numeric", re.compile(r"\b(\d{1,2})[/.](\d{1,2})(?:[/.](\d{2,4}))?\b")),
+)
+_WEEKDAY_RE = re.compile(r"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b")
+_WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+CUE_WINDOW_CHARS = 40
+MAX_RETURN_DAYS = 366
+# How far an out-of-office can move someone's next email.
+OOO_DEFER_MAX_DAYS = 21
+
+
+def _on(year, month: int, day: int, today: date) -> date | None:
+    """The date, with no year meaning the next one (within a week back)."""
+    try:
+        if year:
+            y = int(year)
+            return date(y + 2000 if y < 100 else y, month, day)
+        when = date(today.year, month, day)
+        return date(today.year + 1, month, day) if when < today - timedelta(days=7) else when
+    except ValueError:
+        return None
+
+
+def return_date(text: str, today: date) -> date | None:
+    """When an out-of-office says they're back: the latest date (in the
+    coming year) that follows "until", "back", "returning" and the like,
+    else such a weekday's next occurrence. None when it names none."""
+    flat = _flat(text)
+
+    def cued(m) -> bool:
+        return bool(_RETURN_CUE_RE.search(flat[max(0, m.start() - CUE_WINDOW_CHARS):m.start()]))
+
+    found = []
+    for kind, rx in _DATE_RES:
+        for m in rx.finditer(flat):
+            if not cued(m):
+                continue
+            if kind == "ymd":
+                found.append(_on(m.group(1), int(m.group(2)), int(m.group(3)), today))
+            elif kind == "dmy":
+                found.append(_on(m.group(3), _MONTHS[m.group(2)[:3]], int(m.group(1)), today))
+            elif kind == "mdy":
+                found.append(_on(m.group(3), _MONTHS[m.group(1)[:3]], int(m.group(2)), today))
+            else:
+                # 10/11 is 10 November or October 11: the sooner one ahead.
+                a, b = int(m.group(1)), int(m.group(2))
+                options = [d for d in (_on(m.group(3), b, a, today), _on(m.group(3), a, b, today))
+                           if d is not None and d >= today]
+                found.append(min(options) if options else None)
+    if not any(found):
+        for m in _WEEKDAY_RE.finditer(flat):
+            if cued(m):
+                ahead = (_WEEKDAYS.index(m.group(1)) - today.weekday()) % 7 or 7
+                found.append(today + timedelta(days=ahead))
+    ahead = [d for d in found if d is not None
+             and today <= d <= today + timedelta(days=MAX_RETURN_DAYS)]
+    return max(ahead) if ahead else None
+
+
+_MESSAGE_ID_RE = re.compile(r"<[^<>\s]+>")
+
+
+def referenced_ids(in_reply_to: str, references: str = "") -> list[str]:
+    """The Message-IDs a message says it answers, nearest first (In-Reply-To,
+    then References from the newest), each with and without its <>."""
+    ids = []
+    for raw in [in_reply_to, *reversed(_MESSAGE_ID_RE.findall(references or ""))]:
+        raw = (raw or "").strip()
+        bare = raw.strip("<>").strip()
+        if bare:
+            ids += [raw, f"<{bare}>", bare]
+    return list(dict.fromkeys(ids))
+
+
 # The conversation a reply is written from. Cold-email threads are short, so
 # the whole thread normally fits; the budget only bites on a very long one.
 HISTORY_BUDGET_CHARS = 24_000
@@ -335,7 +579,8 @@ def conversation_history(thread, prospect_name: str) -> str:
         content = (m.content or "").strip()
         if len(content) > cap:
             content = content[:cap].rstrip() + " [...cut]"
-        who = "Harvey" if m.sender == "harvey" else prospect_name
+        who = ("Harvey" if m.sender == "harvey" else f"{prospect_name} (an automatic reply)"
+               if m.sender == "auto" else prospect_name)
         quoted = "\n".join("> " + line for line in (content.splitlines() or [""]))
         return f"[Message {i + 1} of {total}, from {who}]\n{quoted}"
 
@@ -513,9 +758,122 @@ class Handler:
                 f"{prospect.email} ({COLLEAGUE_REPLIED})."
             )
 
+    async def _stop_on_reply(self, prospect):
+        """A person answered: they're 'replied' (first, so a send already
+        past its checks sees it) and everything queued for them is cancelled.
+        Idempotent."""
+        await self.state.update_prospect_status(prospect.id, "replied")
+        try:
+            cancelled = await self.state.cancel_pending_outbox_for_prospect(
+                prospect.id, reason=STOP_ON_REPLY)
+            if cancelled:
+                logger.info(
+                    f"Handler: cancelled {cancelled} queued email(s) for "
+                    f"{prospect.email} (they replied)."
+                )
+        except Exception as e:
+            logger.debug(f"Handler: outbox cancel failed: {e}")
+
+    async def _stored_conversation(self, prospect_id: str) -> Conversation | None:
+        """The conversation a new message from them joins: one handed to you
+        first, then an open one, then one only auto-replies are in."""
+        for status in ("needs_human", "open", AUTO_CONVERSATION):
+            for convo in await self.state.get_conversations_by_status(status):
+                if convo.prospect_id == prospect_id:
+                    return convo
+        return None
+
+    async def _after_automatic_reply(self, machine: str, prospect, convo, text: str,
+                                     human_thread: bool, sender: str):
+        """What an automatic reply changes. Nothing is ever answered, the
+        prospect keeps their status, and their sequence carries on, except:
+        a company that takes no sales email is stopped like a no; an address
+        whose owner has left is stopped (their colleagues aren't); an
+        out-of-office that says when they're back moves their next email to
+        the day after (at most OOO_DEFER_MAX_DAYS ahead)."""
+        details = {"prospect_email": prospect.email, "from": sender, "kind": machine,
+                   "conversation_id": convo.id, "message": text[:300]}
+        if machine == "policy":
+            if human_thread:
+                logger.info(f"Handler: a no-sales-email auto-reply joined the conversation "
+                            f"with {prospect.email}; it stays with them.")
+            else:
+                await self.state.update_prospect_status(prospect.id, "lost")
+                await self.state.cancel_pending_outbox_for_prospect(
+                    prospect.id, reason=POLICY_AUTO_REPLY)
+                logger.info(f"Handler: {prospect.email}'s company takes no sales email "
+                            "(auto-reply). Stopped the company; no reply sent.")
+        elif machine == "left":
+            cancelled = await self.state.cancel_pending_outbox_for_prospect(
+                prospect.id, reason=LEFT_THE_COMPANY)
+            await self.state.update_prospect_email(prospect.id, prospect.email, "invalid")
+            details["cancelled"] = cancelled
+            logger.info(f"Handler: {prospect.email} has left (auto-reply). Stopped that "
+                        f"address ({cancelled} queued email(s)); colleagues carry on.")
+        elif machine == "ooo":
+            today = datetime.now(timezone.utc).replace(tzinfo=None)
+            back = return_date(text, today.date())
+            moved = None
+            if back is not None:
+                moved = await self.state.defer_next_sequence_step(
+                    prospect.id, back + timedelta(days=1),
+                    latest=today + timedelta(days=OOO_DEFER_MAX_DAYS))
+                details["return_date"] = back.isoformat()
+            if moved:
+                details["next_email_at"] = moved
+            logger.info(f"Handler: {prospect.email} is out of office"
+                        + (f" until {back.isoformat()}" if back else "")
+                        + (f"; next email moved to {moved[:16]}" if moved else "")
+                        + ". Sequence carries on; no reply sent.")
+        else:
+            logger.info(f"Handler: automatic reply ({machine}) for {prospect.email}. "
+                        "Sequence carries on; no reply sent.")
+        await self.state.log_action(action_type="auto_reply", agent="handler", details=details)
+
+    def _own_addresses(self) -> tuple[set[str], set[str]]:
+        """Harvey's own addresses and their domains: never a prospect."""
+        addresses = set()
+        try:
+            addresses = {m.email for m in configured_mailboxes(self.config) if m.email}
+        except Exception:
+            pass
+        persona = (getattr(getattr(self.config, "persona", None), "email", "") or "").strip().lower()
+        if persona:
+            addresses.add(persona)
+        return addresses, {a.rsplit("@", 1)[-1] for a in addresses if "@" in a}
+
+    async def _match_sender(self, msg):
+        """Who a message is from: the prospect at its address; else the one
+        sent the email it answers (In-Reply-To, then References); else the
+        one Harvey last emailed at exactly the sender's domain, never a
+        free-mail one. (prospect or None, the Message-ID it answers or "")."""
+        prospect = await self.state.get_prospect_by_email(msg.from_email)
+        if prospect is not None:
+            return prospect, msg.in_reply_to or ""
+        sender = (msg.from_email or "").strip().lower()
+        mine, my_domains = self._own_addresses()
+        if not sender or sender in mine:
+            return None, ""
+        references = (getattr(msg, "headers", None) or {}).get("references", "")
+        for message_id in referenced_ids(msg.in_reply_to, references):
+            row = await self.state.find_outbox_by_message_id(message_id)
+            if row and row.get("prospect_id") and row.get("status") == "sent":
+                found = await self.state.get_prospect(row["prospect_id"])
+                if found is not None:
+                    logger.info(f"Handler: {sender} answered the email to {found.email} "
+                                "(matched by the thread).")
+                    return found, message_id
+        domain = sender.rsplit("@", 1)[-1] if "@" in sender else ""
+        if domain and domain not in FREE_MAIL_DOMAINS and domain not in my_domains:
+            found = await self.state.emailed_prospect_at_domain(domain)
+            if found is not None:
+                logger.info(f"Handler: {sender} wrote from {found.email}'s company domain.")
+                return found, msg.in_reply_to or ""
+        return None, ""
+
     async def _record_after_opt_out(
         self, prospect, reply_text: str, campaign_id: str = "", escalate: bool = False,
-        mailbox: str = "",
+        mailbox: str = "", message: Message | None = None,
     ):
         """Keep a message from someone who opted out, and do nothing else.
 
@@ -536,7 +894,7 @@ class Handler:
             prospect_id=prospect.id,
             campaign_id=campaign_id,
             channel="email",
-            thread=[Message(sender="prospect", content=reply_text)],
+            thread=[message or Message(sender="prospect", content=reply_text)],
             intent="escalate" if escalate else "unsubscribe",
             stage="closed_lost",
             status="needs_human" if escalate else "closed",
@@ -570,13 +928,26 @@ class Handler:
         reply_uuid: str,
         campaign_id: str = "",
         reply_meta: dict | None = None,
+        headers: dict | None = None,
+        prospect=None,
     ):
-        """Classify, record, and respond to a single reply."""
-        # Find the prospect by email (indexed lookup)
-        prospect = await self.state.get_prospect_by_email(lead_email)
+        """Classify, record, and respond to a single reply.
+
+        ``headers``: the message's headers, lower-cased names (Gmail and
+        Microsoft give them; SMTP doesn't). ``prospect``: who it's from when
+        the address isn't theirs (see _match_sender); the thread keeps the
+        address it really came from."""
+        if prospect is None:
+            prospect = await self.state.get_prospect_by_email(lead_email)
         if not prospect:
             logger.warning(f"Handler: No prospect found for {lead_email}")
             return
+        sender_email = (lead_email or "").strip().lower()
+        # Someone other than the person Harvey emailed: the director from
+        # their own address, the helpdesk. Recorded and classified as theirs,
+        # but never answered automatically (the gate only sends to the
+        # address on record).
+        other_sender = sender_email if sender_email and sender_email != prospect.email else ""
 
         # Their words, without what we sent them. The keyword checks below
         # read every line they wrote, even under or between quoted lines;
@@ -591,37 +962,55 @@ class Handler:
 
         # Several mailboxes: the one it arrived in, which the thread and any
         # answer belong to ("" with one mailbox).
-        receiving = (reply_meta or {}).get("mailbox", "")
+        meta = reply_meta or {}
+        receiving = meta.get("mailbox", "")
+        message = Message(sender="prospect", content=reply_text, from_email=sender_email,
+                          in_reply_to=meta.get("answers") or meta.get("in_reply_to", ""))
         if prospect.status == "opted_out":
             escalate = any(p in keyword_text for p in ESCALATION_PATTERNS)
             await self._record_after_opt_out(prospect, reply_text, campaign_id, escalate,
-                                             mailbox=receiving)
+                                             mailbox=receiving, message=message)
             return
 
-        # Update prospect status + stop-on-reply: a human answered, so every
-        # queued sequence email for them is now wrong to send.
-        await self.state.update_prospect_status(prospect.id, "replied")
-        try:
-            cancelled = await self.state.cancel_pending_outbox_for_prospect(prospect.id)
-            if cancelled:
-                logger.info(
-                    f"Handler: cancelled {cancelled} queued email(s) for "
-                    f"{lead_email} (they replied)."
-                )
-        except Exception as e:
-            logger.debug(f"Handler: outbox cancel failed: {e}")
-
         # 1. Classify intent. Hard keyword checks run FIRST and override
-        # the LLM — opt-outs and legal threats must never be missed.
+        # everything else — opt-outs and legal threats must never be missed.
+        # Then the strict automatic-reply rules, then the model. Nothing is
+        # cancelled before this: an auto-reply must not stop the sequence.
+        # (The heartbeat sends nothing until every reply was handled.)
         opt_out = _opt_out_reason(their_text, reply_text)
+        machine = ""
         if opt_out:
             intent = "unsubscribe"
         elif any(p in keyword_text for p in ESCALATION_PATTERNS):
             intent = "escalate"
         else:
-            intent = await self._classify_intent(reply_text, prospect)
-        logger.info(f"Handler: Intent for {lead_email}: {intent}")
-        if intent not in NO_COMPANY_STOP_INTENTS:
+            machine = automatic_reply(headers, meta.get("subject", ""), their_text, reply_text,
+                                      own_address=not other_sender)
+            if machine:
+                intent = MACHINE_INTENTS[machine]
+            else:
+                try:
+                    intent = await self._classify_intent(reply_text, prospect)
+                except BrainUnavailable:
+                    raise
+                except Exception:
+                    # Can't tell what it is: stop their emails, as any reply
+                    # always did, before the error marks it handled.
+                    await self._stop_on_reply(prospect)
+                    raise
+                if intent == "ooo":
+                    machine = ("left" if not other_sender and left_in_auto_reply(their_text)
+                               else "ooo")
+                    intent = MACHINE_INTENTS[machine]
+        automatic = bool(machine)
+        logger.info(f"Handler: Intent for {lead_email}: {intent}"
+                    + (f" (an automatic reply: {machine})" if automatic else ""))
+
+        if not automatic:
+            # A person answered: every queued sequence email for them is now
+            # wrong to send.
+            await self._stop_on_reply(prospect)
+        if machine == "policy" or (not automatic and intent not in NO_COMPANY_STOP_INTENTS):
             await self._stop_colleagues(prospect)
 
         # 2. The conversation as it will be, in memory only. Nothing about
@@ -632,12 +1021,10 @@ class Handler:
         # twice. (Stop-on-reply above is idempotent and stays first.)
         # A conversation handed to you stays with you: you may have answered by
         # hand, or it's a complaint. Later replies join it and nobody drafts.
-        existing_convos = (await self.state.get_conversations_by_status("needs_human")
-                           + await self.state.get_conversations_by_status("open"))
-        stored = next(
-            (c for c in existing_convos if c.prospect_id == prospect.id), None
-        )
+        # A thread only auto-replies are in becomes theirs when a person writes.
+        stored = await self._stored_conversation(prospect.id)
         handed_off = stored is not None and stored.status == "needs_human"
+        human_thread = stored is not None and stored.status != AUTO_CONVERSATION
         if stored is not None:
             convo = stored.model_copy(deep=True)
         else:
@@ -647,14 +1034,25 @@ class Handler:
                 campaign_id=campaign_id,
                 channel="email",
                 intent=intent,
-                status="open",
+                status=AUTO_CONVERSATION if automatic else "open",
             )
         if receiving:
             convo.mailbox = receiving
-        convo.thread.append(Message(sender="prospect", content=reply_text))
-        convo.intent = intent
+        if automatic:
+            message.sender = "auto"
+        convo.thread.append(message)
         old_stage = convo.stage
-        convo.stage = self._determine_stage(intent, convo.stage, reply_text)
+        if not (automatic and human_thread):
+            # A machine writing in a person's thread changes nothing about it.
+            convo.intent = intent
+            if automatic:
+                convo.status = AUTO_CONVERSATION
+                if machine == "policy":
+                    convo.stage = "closed_lost"
+            else:
+                if convo.status == AUTO_CONVERSATION:
+                    convo.status = "open"
+                convo.stage = self._determine_stage(intent, convo.stage, reply_text)
 
         # 2b. Draft the reply now, while nothing is stored yet. A held
         # Instantly setup can't send it, so don't spend a model call on it.
@@ -665,7 +1063,8 @@ class Handler:
         listed = do_not_contact_match(prospect.email or lead_email,
                                       live_do_not_contact(self.config))
         response = ""
-        if intent in AUTO_REPLY_INTENTS and not held and not listed and not handed_off:
+        if (not automatic and intent in AUTO_REPLY_INTENTS and not held and not listed
+                and not handed_off and not other_sender):
             response = await self._generate_response(intent, reply_text, prospect, convo)
 
         # 2c. Store the conversation in one write.
@@ -675,8 +1074,9 @@ class Handler:
             await self.state.update_conversation(
                 convo.id,
                 thread_json=convo.thread_json(),
-                intent=intent,
+                intent=convo.intent,
                 stage=convo.stage,
+                **({"status": convo.status} if convo.status != stored.status else {}),
                 **({"mailbox": receiving} if receiving else {}),
             )
         if convo.stage != old_stage:
@@ -718,6 +1118,11 @@ class Handler:
             )
             return
 
+        if automatic:
+            await self._after_automatic_reply(machine, prospect, convo, their_text,
+                                              human_thread, sender_email)
+            return
+
         if handed_off:
             logger.info(f"Handler: {lead_email} wrote again. Added to the conversation "
                         "that's with you; Harvey won't answer.")
@@ -742,16 +1147,23 @@ class Handler:
             logger.info(f"Handler: {lead_email} not interested. Closing. One no is enough.")
             return
 
-        if intent == "ooo":
-            # Their follow-ups were cancelled above and nothing re-queues
-            # them, so whether to write again is a human's call. Left 'open',
-            # the thread waited forever on a person who never saw the email.
-            await self.state.update_conversation(convo.id, status="needs_human")
-            logger.info(f"Handler: {lead_email} sent an auto-reply. Handed to a human.")
-            return
-
         if intent not in AUTO_REPLY_INTENTS:
             logger.warning(f"Handler: No auto-reply policy for intent '{intent}'. Skipping reply.")
+            return
+
+        if other_sender:
+            # Harvey only answers the address it emailed (the gate refuses
+            # any other), and that may not reach whoever wrote: you do.
+            await self.state.update_conversation(convo.id, status="needs_human")
+            await self.state.log_action(
+                action_type="escalation",
+                agent="handler",
+                details={"prospect_email": prospect.email, "from": other_sender,
+                         "reason": f"they wrote from {other_sender}, not the address Harvey emailed",
+                         "reply_preview": reply_text[:200]},
+            )
+            logger.info(f"Handler: {other_sender} wrote about {prospect.email}'s email. "
+                        "Handed to you; Harvey won't answer.")
             return
 
         if held:
@@ -906,6 +1318,13 @@ class Handler:
         if msg.is_bounce:
             await self._handle_bounce(msg)
         elif text:
+            # An address Harvey doesn't know may still be a reply (a director
+            # from their own address, the helpdesk, an opt-out): matched by
+            # the thread or the company's domain, never dropped unread.
+            prospect, answers = await self._match_sender(msg)
+            if prospect is None:
+                logger.warning(f"Handler: No prospect found for {msg.from_email}")
+                return
             await self._process_reply(
                 msg.from_email,
                 text,
@@ -914,8 +1333,11 @@ class Handler:
                     "thread_ref": msg.thread_ref,
                     "message_id": msg.message_id,
                     "subject": msg.subject,
+                    "answers": answers,
                     **({"mailbox": msg.mailbox} if msg.mailbox else {}),
                 },
+                headers=getattr(msg, "headers", None) or {},
+                prospect=prospect,
             )
 
     @staticmethod
@@ -1254,7 +1676,7 @@ class Handler:
 - "not_interested" — a clear no, not now, or "we're all set"
 - "unsubscribe" — asks to stop being contacted, remove from list, opt out
 - "escalate" — angry, hostile, threatens legal action, or mentions spam/compliance
-- "ooo" — out of office / auto-reply
+- "ooo" — out of office / auto-reply (one saying "for urgent matters contact ..." is still "ooo")
 - "wrong_person" — not the right contact, suggests someone else
 - "question" — asking for more information before deciding
 
@@ -1339,6 +1761,8 @@ Respond with ONLY the category label, nothing else."""
         self, intent: str, reply_text: str, prospect, convo: Conversation
     ) -> str:
         """Generate an appropriate response based on intent."""
+        if convo.status == AUTO_CONVERSATION:
+            return ""   # only auto-replies are in it: nobody to answer
         history = conversation_history(convo.thread, prospect.full_name())
 
         objection_context = ""
@@ -1445,3 +1869,70 @@ Write a reply that:"""
             enabled=humanizer_enabled(self.config),
         )
         return polished[0]["body"]
+
+
+# ── Backfill: auto-replies classed before Harvey could tell them apart ──
+
+BACKFILL_STATUSES = ("replied", "contacted")
+
+
+async def requeue_auto_acks(state: StateManager, dry_run: bool = False) -> dict:
+    """Undo what auto-replies did before the rules above existed: each one
+    marked the prospect 'replied' and cancelled their follow-ups.
+
+    For everyone whose conversations are all out-of-office or auto-ack
+    (intent ooo / auto_ack) and who no person has written for (Harvey
+    queued no answer to them; nothing in their thread reads as an opt-out,
+    a complaint, a company's no or someone leaving; their address hasn't
+    bounced; no colleague replied): back to 'contacted', the sequence
+    emails a reply cancelled (stop_on_reply) approved again from tomorrow
+    in step order, and the conversation marked auto. Returns the counts;
+    ``dry_run`` only counts."""
+    counts = {"found": 0, "reset_to_contacted": 0, "follow_ups_requeued": 0,
+              "conversations_marked_auto": 0, "skipped": {}}
+
+    def skip(why: str):
+        counts["skipped"][why] = counts["skipped"].get(why, 0) + 1
+
+    start = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(days=1)
+    for entry in await state.auto_reply_backfill():
+        prospect, convos = entry["prospect"], entry["conversations"]
+        counts["found"] += 1
+        if any(c.intent not in ("ooo", AUTO_ACK) for c in convos):
+            skip("a person wrote too")
+            continue
+        if entry["answers"]:
+            skip("Harvey answered them")
+            continue
+        if prospect.status not in BACKFILL_STATUSES:
+            skip(f"status {prospect.status}")
+            continue
+        if (prospect.email_status or "") == "invalid":
+            skip("address bounced")
+            continue
+        texts = [m.content for c in convos for m in c.thread if m.sender != "harvey"]
+        if any(_opt_out_reason(t, t) or any(p in _flat(t) for p in ESCALATION_PATTERNS)
+               or automatic_reply({}, "", t) in ("policy", "left") for t in texts):
+            skip("their auto-reply was a stop")
+            continue
+        if await state.colleague_who_replied(prospect.id):
+            skip("a colleague replied")
+            continue
+        counts["reset_to_contacted"] += prospect.status == "replied"
+        counts["follow_ups_requeued"] += entry["stopped"]
+        counts["conversations_marked_auto"] += sum(c.status != AUTO_CONVERSATION for c in convos)
+        if dry_run:
+            continue
+        if prospect.status == "replied":
+            await state.update_prospect_status(prospect.id, "contacted")
+        await state.requeue_stopped_follow_ups(prospect.id, start)
+        for c in convos:
+            for m in c.thread:
+                if m.sender == "prospect":
+                    m.sender = "auto"
+            await state.update_conversation(c.id, status=AUTO_CONVERSATION,
+                                            thread_json=c.thread_json())
+    if not dry_run and counts["found"]:
+        await state.log_action("requeue_auto_acks", "cli",
+                               {k: v for k, v in counts.items() if k != "skipped"})
+    return counts

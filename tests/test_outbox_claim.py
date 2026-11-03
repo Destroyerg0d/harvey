@@ -31,7 +31,8 @@ async def _approved(state, pid, step=2):
 
 
 async def _reply_lands(state, pid):
-    # What the Handler does when a reply arrives: status first, then cancel.
+    # What the Handler does when a person replies (once it has read the reply
+    # as theirs, not an auto-reply): status first, then cancel.
     await state.update_prospect_status(pid, "replied")
     await state.cancel_pending_outbox_for_prospect(pid)
 

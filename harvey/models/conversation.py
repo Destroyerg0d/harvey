@@ -12,9 +12,16 @@ def _utcnow() -> datetime:
 
 
 class Message(BaseModel):
-    sender: str  # "harvey" or "prospect"
+    # "harvey", "prospect", or "auto" (an auto-reply: out-of-office, a
+    # helpdesk acknowledgement), which is never counted or answered as theirs.
+    sender: str
     content: str
     timestamp: datetime = Field(default_factory=_utcnow)
+    # The address it came from, which can be someone other than the prospect
+    # (a director answering from their own address, the helpdesk), and the
+    # Message-ID of the email it answers, when known.
+    from_email: str = ""
+    in_reply_to: str = ""
 
 
 # Sales stages: tracks where the deal is in the pipeline

@@ -1680,7 +1680,9 @@ async def _awaiting_reply() -> list[dict]:
         "AND p.status NOT IN ('replied', 'opted_out', 'lost', 'meeting', 'closed') "
         "AND COALESCE(p.email_status, '') != 'invalid' "
         "AND NOT EXISTS (SELECT 1 FROM conversations c JOIN prospects q ON q.id = c.prospect_id "
-        "WHERE q.id = p.id OR (q.company_id = p.company_id AND COALESCE(p.company_id, '') != '')) "
+        "WHERE (q.id = p.id OR (q.company_id = p.company_id AND COALESCE(p.company_id, '') != '')) "
+        # An auto-reply isn't an answer: they're still waiting on a person.
+        "AND COALESCE(c.status, '') != 'auto') "
         "ORDER BY o.sent_at DESC LIMIT 2000")
     for e in reversed(sent):
         pid = e["prospect_id"]
@@ -1748,7 +1750,8 @@ async def get_trend(days: int = 14, tz: int = 0):
         "days": labels,
         "found": await per_day("prospects", "created_at"),
         "sent": await per_day("outbox", "sent_at", "AND status = 'sent'"),
-        "replies": await per_day("conversations", "created_at"),
+        # A thread only an auto-reply is in (status auto) is nobody replying.
+        "replies": await per_day("conversations", "created_at", "AND status != 'auto'"),
     }
 
 

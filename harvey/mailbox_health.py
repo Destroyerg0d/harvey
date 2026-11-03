@@ -35,6 +35,7 @@ import aiosqlite
 
 from harvey import deliverability as d
 from harvey import mailboxes as mb
+from harvey.state import AUTO_CONVERSATION
 
 # The global bounce counter (agents/handler.BOUNCE_COUNT_KEY): with one
 # mailbox it is that mailbox's "since last resume".
@@ -401,12 +402,14 @@ async def collect(db_path, config, *, tz_minutes: int = 0, now: datetime | None 
                 box["bounces_total"] = int(r["total"] or 0)
                 box["bounces_7d"] = int(r["week"] or 0)
 
-            # The latest conversation of each prospect: how a reply went.
-            latest = ("LEFT JOIN (SELECT prospect_id, stage, intent, ROW_NUMBER() OVER ("
+            # The latest conversation of each prospect: how a reply went. One
+            # only an auto-reply is in (status auto) is no reply.
+            latest = ("LEFT JOIN (SELECT prospect_id, stage, intent, status, ROW_NUMBER() OVER ("
                       "PARTITION BY prospect_id ORDER BY updated_at DESC, created_at DESC) AS rn "
                       "FROM conversations) l ON l.prospect_id = p.id AND l.rn = 1")
             for r in await _rows(db, (
-                    "SELECT x.box, p.status, p.email_status, l.stage, l.intent FROM ("
+                    "SELECT x.box, p.status, p.email_status, l.stage, l.intent, "
+                    "l.status AS convo_status FROM ("
                     f"SELECT DISTINCT {_box('o')} AS box, o.prospect_id AS pid FROM outbox o "
                     "WHERE o.status = 'sent' AND o.kind = 'sequence' "
                     "AND COALESCE(o.prospect_id, '') != '') x "
@@ -414,7 +417,7 @@ async def collect(db_path, config, *, tz_minutes: int = 0, now: datetime | None 
                 box = boxes.setdefault(r["box"], _empty_box(r["box"]))
                 status = r["status"] or "new"
                 box["contacted"] += 1
-                box["replied"] += status in WROTE_BACK_STATUSES
+                box["replied"] += _wrote_back(status, r["convo_status"])
                 box["opted_out"] += status == "opted_out"
                 bucket = _pipeline_bucket(status, r["stage"], r["intent"], r["email_status"])
                 box["positive"] += bucket in ("interested", "ready_to_meet")
@@ -434,8 +437,9 @@ async def collect(db_path, config, *, tz_minutes: int = 0, now: datetime | None 
             companies = int((await _rows(db, "SELECT COUNT(*) AS n FROM companies"))[0]["n"] or 0)
             funnel_rows = await _rows(db, (
                 "SELECT p.status, p.email_status, COALESCE(p.email, '') != '' AS has_email, "
-                f"l.stage, l.intent, COUNT(*) AS n FROM prospects p {latest} "
-                "GROUP BY p.status, p.email_status, has_email, l.stage, l.intent"))
+                f"l.stage, l.intent, l.status AS convo_status, COUNT(*) AS n FROM prospects p "
+                f"{latest} GROUP BY p.status, p.email_status, has_email, l.stage, l.intent, "
+                "l.status"))
 
             keys = [mb.GLOBAL_PAUSE_KEY, GLOBAL_BOUNCE_KEY]
             for m in configured:
@@ -591,6 +595,13 @@ async def collect(db_path, config, *, tz_minutes: int = 0, now: datetime | None 
     }
 
 
+def _wrote_back(status: str, convo_status) -> bool:
+    """A person answered: their status says so, and their latest conversation
+    isn't one only an auto-reply is in (a company's "we take no sales email"
+    makes them 'lost' without anyone replying)."""
+    return status in WROTE_BACK_STATUSES and convo_status != AUTO_CONVERSATION
+
+
 def _funnel(companies: int, rows: list[dict], bucket) -> dict:
     """The pipeline from businesses found to meetings, counted the way the
     Today tab counts it (prospect status, then the latest conversation)."""
@@ -609,7 +620,7 @@ def _funnel(companies: int, rows: list[dict], bucket) -> dict:
                                    or contacted):
             out["sendable"] += n
         out["contacted"] += n if contacted else 0
-        out["replied"] += n if status in WROTE_BACK_STATUSES else 0
+        out["replied"] += n if _wrote_back(status, r.get("convo_status")) else 0
         out["not_interested"] += n if status == "lost" else 0
         out["opted_out"] += n if status == "opted_out" else 0
         stage = bucket(status, r.get("stage"), r.get("intent"), r.get("email_status"))

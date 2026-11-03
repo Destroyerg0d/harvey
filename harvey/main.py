@@ -457,9 +457,11 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
             # 5. Execute — run independent agents in parallel where possible
             # Handler is always safe to run alongside other agents
             tasks = []
-            # An auto-reply handed to you was open until now: keep reading for it.
+            # An auto-reply handed to you was open until now, and someone whose
+            # auto-reply came back may still write: keep reading for them.
             has_open_convos = (summary.get("open_conversations", 0)
-                               + summary.get("auto_reply_handoffs", 0)) > 0
+                               + summary.get("auto_reply_handoffs", 0)
+                               + summary.get("auto_conversations", 0)) > 0
 
             if action == "prospect":
                 tasks.append(("prospect", scout.run()))

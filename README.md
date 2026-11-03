@@ -638,6 +638,7 @@ harvey usage                 # active provider's quota + per-agent tokens
 harvey outbox                # review queued email
 harvey export                # deliverable prospects → CSV
 harvey sending pause|resume  # kill switch (--mailbox EMAIL: just that mailbox)
+harvey replies requeue-auto-acks  # put back follow-ups older auto-replies cancelled (--dry-run)
 harvey warmup [domain]       # is the sending domain ready? (SPF/DKIM/DMARC, age, blocklists, warmup)
 harvey trulyinbox connect    # connect TrulyInbox so Harvey reads the mailbox's warmup
 harvey retry-writes          # retry prospects the Writer gave up on
