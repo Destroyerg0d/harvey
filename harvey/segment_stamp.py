@@ -57,30 +57,34 @@ async def segment_for_company(state, company_id: str, prospect=None) -> str:
     (when that signal exists and was recorded), the tools detected on its
     site, then the company's or the prospect's industry naming Shopify; else
     "unknown"."""
-    company = None
+    # One rule for the Writer's campaigns and these stamps: harvey.segments.
+    from harvey.segments import segment_of
+
+    company, platform, score = None, "", None
     if company_id:
         try:
             rows = await state.get_observations(company_id=company_id, signal_code="SITE_PLATFORM",
                                                 latest_only=True, limit=1)
+            platform = str(rows[0].get("value_text") or "") if rows else ""
+            rows = await state.get_observations(company_id=company_id, signal_code="LEGACY_SITE_SCORE",
+                                                latest_only=True, limit=1)
+            score = rows[0].get("value_num") if rows else None
         except Exception:
-            rows = []
-        if rows:
-            found = _platform_segment(str(rows[0].get("value_text") or ""))
-            if found:
-                return found
+            pass
         try:
             company = await state.get_company(company_id)
         except Exception:
             company = None
-    if company is not None:
-        found = _stack_segment(getattr(company, "tech_stack", None))
-        if found:
-            return found
-    industries = [getattr(company, "industry", "") if company is not None else "",
-                  getattr(prospect, "industry", "") if prospect is not None else ""]
-    if any("shopify" in (i or "").lower() for i in industries):
-        return "shopify"
-    return "unknown"
+    stack = getattr(company, "tech_stack", None) if company is not None else None
+    industry = " ".join(i for i in (getattr(company, "industry", "") if company is not None else "",
+                                    getattr(prospect, "industry", "") if prospect is not None else "") if i)
+    # "Zen Cart" / "magento 1" -> the profile's ids ("zencart", "magento1");
+    # underscores stay ("custom_php").
+    platform_id = re.sub(r"[\s\-./]+", "", platform.strip().lower())
+    segment = segment_of(platform_id or None, stack, industry, score)
+    if segment == "other" and not _platform_segment(platform) and not _stack_segment(stack):
+        return "unknown"   # nothing read the site yet: not a real "other"
+    return segment
 
 
 def variant_for(prospect_id: str) -> str:
