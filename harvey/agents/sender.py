@@ -33,6 +33,7 @@ from harvey.mailboxes import (
     down_since_key, is_multi, least_loaded, mailbox_for, normalize, pause_problem,
     primary_mailbox, render_sender, takes_new_prospects,
 )
+from harvey.segment_stamp import segment_for_company, variant_for
 from harvey.sending_mode import sync_sending_mode
 from harvey.state import (
     AUTOPILOT_OFF_REASON, COLLEAGUE_REPLIED, HAND_SENT_REASON, HELD_FOR_REVIEW,
@@ -894,6 +895,7 @@ class Sender:
                     status=initial_status,
                     provider=self.provider.name,
                     approved_by="" if require_approval else "autopilot",
+                    variant=variant_for(prospect.id) if step.step == 1 else "",
                 )
                 if item_id:
                     staged += 1
@@ -923,6 +925,22 @@ class Sender:
                 agent="sender",
                 details={"campaign": campaign.name, "staged": staged, "mode": mode},
             )
+
+    async def _outcome_stamp(self, item: dict, prospect) -> dict:
+        """What the outcome table keys this email by, fixed as it goes out:
+        the segment its company is in now, and a first email's subject
+        variant when it was queued without one. Never stops a send."""
+        stamp = {}
+        try:
+            if not item.get("segment"):
+                stamp["segment"] = await segment_for_company(
+                    self.state, getattr(prospect, "company_id", "") or "", prospect)
+            if (item.get("kind") == "sequence" and int(item.get("step") or 0) == 1
+                    and not item.get("variant")):
+                stamp["variant"] = variant_for(item.get("prospect_id") or "")
+        except Exception as e:
+            logger.debug(f"Sender: couldn't stamp the outcome fields: {e}")
+        return stamp
 
     def _with_footer(self, body: str) -> str:
         """A cold email as it leaves: the postal address and opt-out line
@@ -1379,6 +1397,7 @@ class Sender:
             await self.state.update_outbox_item(
                 item["id"], status="sent", sent_at=now_iso, body=body,
                 message_id=result.message_id, thread_ref=result.thread_ref, **note,
+                **await self._outcome_stamp(item, prospect),
             )
             if prospect.status in ("new", "queued"):
                 await self.state.update_prospect_status(prospect.id, "contacted")

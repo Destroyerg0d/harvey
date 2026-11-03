@@ -25,6 +25,7 @@ from harvey.mailboxes import (
     least_loaded, normalize, takes_new_prospects,
 )
 from harvey.models.campaign import Campaign, EmailStep
+from harvey.segment_stamp import clean_angle, variant_for
 from harvey.segments import (
     OLD_SITE_SEGMENTS, PLATFORM_CLAIM_FLOOR, SEGMENT_LABELS, add_mx, company_site_facts,
     eligible_for_old_site_pitch, segment_of,
@@ -413,7 +414,7 @@ class Writer:
         )
 
         drafted = 0
-        for (prospect, _), draft in zip(pending, polished):
+        for (prospect, original), draft in zip(pending, polished):
             item_id = await self.state.add_outbox_item(
                 prospect_id=prospect.id,
                 campaign_id=campaign_id,
@@ -425,6 +426,10 @@ class Writer:
                 status=status,
                 provider=provider,
                 approved_by="" if require_approval else "autopilot",
+                # For the outcome table: the kind of fact the opener used, if
+                # the model said, and a fixed subject variant per person.
+                angle=original.get("angle", ""),
+                variant=variant_for(prospect.id),
             )
             if item_id:
                 drafted += 1
@@ -629,7 +634,9 @@ Requirements:
 {footer_rule(self.config, rules)}
 {strict}{inbox_rule}{sign_off}
 
-Return ONLY JSON: {{"subject": "...", "body": "..."}}"""
+Return ONLY JSON: {{"subject": "...", "body": "..."}}
+You may add "angle": one or two words for the kind of fact your opening line
+uses (for example tools, signal, description, research, industry, hiring)."""
 
         result = await self.brain.think_json(
             prompt, session_id="harvey-writer",
@@ -641,7 +648,11 @@ Return ONLY JSON: {{"subject": "...", "body": "..."}}"""
         body = str(result.get("body") or "").strip()
         if not subject or not body:
             return None
-        return {"subject": subject[:120], "body": body[:2000]}
+        draft = {"subject": subject[:120], "body": body[:2000]}
+        angle = clean_angle(result.get("angle"))
+        if angle:
+            draft["angle"] = angle
+        return draft
 
     async def _write_sequence(self, prospects: list) -> list[EmailStep]:
         """Ask the brain to write a 3-email sequence."""

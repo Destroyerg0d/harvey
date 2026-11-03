@@ -547,6 +547,12 @@ _EXTRA_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("prospects", "mailbox", "TEXT DEFAULT ''"),
     ("outbox", "mailbox", "TEXT DEFAULT ''"),
     ("conversations", "mailbox", "TEXT DEFAULT ''"),
+    # What the outcome table keys a sent email by (harvey/segment_stamp.py):
+    # the segment stamped when it went out, the kind of fact its opening
+    # used, and a first email's subject variant ("a"/"b").
+    ("outbox", "segment", "TEXT DEFAULT ''"),
+    ("outbox", "angle", "TEXT DEFAULT ''"),
+    ("outbox", "variant", "TEXT DEFAULT ''"),
 )
 
 
@@ -1132,12 +1138,16 @@ class StateManager(LinkedInStateMixin):
         in_reply_to: str = "",
         approved_by: str = "",
         mailbox: str | None = None,
+        angle: str = "",
+        variant: str = "",
     ) -> str | None:
         """Queue one outgoing email. Returns its id, or None when the
         (campaign, prospect, step) slot already exists — the double-send guard.
         ``approved_by="autopilot"`` when it's queued approved on autopilot.
         ``mailbox``: the mailbox it goes out from ("" the primary); None
-        takes the prospect's, so a caller that doesn't know still gets it."""
+        takes the prospect's, so a caller that doesn't know still gets it.
+        ``angle``/``variant``: what the outcome table keys it by (the segment
+        is stamped when it is sent)."""
         item_id = _new_id()
         if mailbox is None:
             mailbox_sql = "lower(COALESCE((SELECT mailbox FROM prospects WHERE id = ?), ''))"
@@ -1160,6 +1170,9 @@ class StateManager(LinkedInStateMixin):
             )
             if cursor.rowcount > 0 and approved_by:
                 await db.execute("UPDATE outbox SET approved_by = ? WHERE id = ?", (approved_by, item_id))
+            if cursor.rowcount > 0 and (angle or variant):
+                await db.execute("UPDATE outbox SET angle = ?, variant = ? WHERE id = ?",
+                                 (angle, variant, item_id))
             await db.commit()
             return item_id if cursor.rowcount > 0 else None
 
@@ -1329,6 +1342,7 @@ class StateManager(LinkedInStateMixin):
     _OUTBOX_COLUMNS = frozenset({
         "status", "error", "message_id", "thread_ref", "sent_at",
         "subject", "body", "send_at", "provider", "mailbox",
+        "segment", "angle", "variant",
     })
 
     async def update_outbox_item(self, item_id: str, **kwargs):

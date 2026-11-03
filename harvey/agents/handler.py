@@ -1584,7 +1584,8 @@ class Handler:
                 action_type="bounce",
                 agent="handler",
                 details={"prospect": prospect.email if prospect else "unknown",
-                         "mailbox": address, "bounces": bounces, "total_sent": total_sent},
+                         "mailbox": address, "bounces": bounces, "total_sent": total_sent,
+                         "outbox_id": outbox_item.get("id", "")},
             )
             if (max_rate > 0 and total_sent >= MIN_SENDS_FOR_KILL_SWITCH
                     and bounces / total_sent > max_rate):
@@ -1601,7 +1602,9 @@ class Handler:
             action_type="bounce",
             agent="handler",
             details={"prospect": prospect.email if prospect else "unknown",
-                     "bounces": bounces, "total_sent": total_sent},
+                     "bounces": bounces, "total_sent": total_sent,
+                     # The email it bounced, for the outcome table.
+                     "outbox_id": outbox_item.get("id", "")},
         )
 
         if (

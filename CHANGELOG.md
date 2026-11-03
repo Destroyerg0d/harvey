@@ -35,6 +35,18 @@ minor versions can still change behaviour.
   loads `skills/segment_<segment>.md` when present, pitches a site as old only
   while it answers, its domain has an MX record and it isn't marked
   dissolved, and writes the custom segment to verified addresses only.
+- **Outcome data per kind of email.** Outbox rows gain `segment`, `angle` and
+  `variant`. The segment (shopify, wordpress, custom, other, unknown) is
+  stamped when an email is sent, from the company's `SITE_PLATFORM`
+  observation when there is one, else its detected tools, else an industry
+  naming Shopify (`harvey/segment_stamp.py`); a first email gets a stable
+  "a"/"b" subject variant per prospect, and the Writer may report the kind of
+  fact its opener used (`angle`). A reply is tied to the email it answers
+  (In-Reply-To, else the last sequence email before it), and a bounce now
+  records the email it bounced. The Analyst writes `data/outcomes.json`
+  (`harvey/outcomes.py`, read-only): per channel, segment, angle, step,
+  mailbox and country over the last 30 days, emails sent, human replies
+  (auto-replies left out), positive replies, no's, opt-outs and bounces.
 
 - **Mailboxes tab on the dashboard.** Sending health and results for every
   configured mailbox and sending domain, read-only. A summary (sent today

@@ -48,6 +48,15 @@ class Analyst:
         except OSError as e:
             logger.error(f"Analyst: Failed to write report: {e}")
 
+        # The outcome table (harvey/outcomes.py): read-only, and never the
+        # reason the rest of the report isn't written.
+        try:
+            from harvey.outcomes import write_outcomes
+            path = await write_outcomes(self.state)
+            logger.info(f"Analyst: Outcome table written to {path}")
+        except Exception as e:
+            logger.error(f"Analyst: Failed to write the outcome table: {e}")
+
         # Log key metrics
         pipeline = report["pipeline"]
         total = sum(pipeline.values())

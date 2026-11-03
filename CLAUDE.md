@@ -325,7 +325,7 @@ Users will come back with questions and tasks. Common ones:
 - **Writer**: Generates 3-email sequences (Email 1 < 75 words, Email 2 < 75, Email 3 < 40). Strict ban list on AI patterns.
 - **Sender**: Native providers (gmail/smtp) render merge vars per prospect and STAGE each email into the `outbox` (pending_review → approved → sent) with a scheduled send time; each heartbeat drains due, approved items with human-like pacing, the daily cap, the deterministic pre-send gate, and stop-on-reply (a reply from anyone at a company stops the sequence to everyone there). Legacy Instantly path deploys campaigns via API. Enforces daily send limits either way.
 - **Handler**: Polls the provider (or Instantly) for replies, dedups them, classifies intent, advances conversation stage, and queues auto-responses through the same outbox approval ladder. On native providers it also detects bounces → marks the address invalid, cancels the prospect's queued sends, and trips a global kill switch past a bounce-rate threshold.
-- **Analyst**: Runs on idle cycles. Generates `data/analytics.json` with pipeline stats and insights.
+- **Analyst**: Runs on idle cycles. Generates `data/analytics.json` with pipeline stats and insights, and `data/outcomes.json`: sent, human replies, positive, no's, opt-outs and bounces per segment, angle, step, mailbox and country (`harvey/outcomes.py`).
 
 ### Conversation Stages
 `initial_outreach → engaged → qualifying → presenting → negotiating → closing → closed_won / closed_lost`
