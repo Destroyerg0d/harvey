@@ -24,6 +24,7 @@ from harvey.public_http import public_http_client
 from harvey.startups import funding_text
 
 from harvey.collectors.ats import detect_board, matching_roles, read_board, role_keywords
+from harvey.collectors.country import country_from_import, infer_country
 
 from harvey.collectors.discover import (
     name_from_domain, name_matches_domain, site_name_from_html,
@@ -48,6 +49,8 @@ MOBILE_USER_AGENT = (
     "(KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1")
 # The site signals one profile pass reads together (harvey/collectors/site_age.py).
 SITE_AGE_CODES = ("SITE_PLATFORM", "LEGACY_SITE_SCORE", "SITE_AGE_FACTS")
+# Where COUNTRY looks when the homepage doesn't say (harvey/collectors/country.py).
+COUNTRY_PAGES = ("/contact", "/contact-us")
 
 
 def _fetch_error(e: Exception) -> str:
@@ -856,6 +859,9 @@ class ProfileCollector:
         self.role_keywords = list(role_keywords or [])
         self._client: httpx.AsyncClient | None = None
         self.site_names: dict[str, str] = {}
+        # COUNTRY found for a company whose location is empty: the location
+        # run() fills in once the observations are saved.
+        self.locations: dict[str, str] = {}
         # Hosts that answered with a bot challenge (SiteGround's 202,
         # Cloudflare's "Just a moment...") rather than a page.
         self.challenged: set[str] = set()
@@ -960,6 +966,41 @@ class ProfileCollector:
         add("SITE_AGE_FACTS", num=len(claimable), text=json.dumps(claimable), url=final)
         logger.debug(f"profile: {domain} platform {platform} ({evidence or 'no marker'}), "
                      f"{len(claimable)} claimable age fact(s) of {len(facts)}")
+
+    async def _country(self, company_id: str, domain: str, site: str, home: str, add) -> None:
+        """COUNTRY, from the data the company was imported with when it names
+        the country, else its homepage, then (only while its location is
+        empty) its contact page. Recorded with the evidence; "checked, none"
+        when the site was read and proved nothing. An empty location is
+        filled from it in run()."""
+        record = await self.state.get_company(company_id)
+        location = (getattr(record, "location", "") or "").strip() if record else ""
+        found = (country_from_import(getattr(record, "notes", ""), getattr(record, "description", ""))
+                 if record else None)
+        if found is None and home:
+            pages = [(site, home)]
+            found = infer_country(domain, pages)
+            if found is None and not location:
+                url, html = await self._first_present(site, COUNTRY_PAGES)
+                if html:
+                    found = infer_country(domain, pages + [(url, html)])
+        if found is not None:
+            add("COUNTRY", num=1, text=found.text, conf=found.confidence, url=found.url or site)
+            if not location:
+                self.locations[company_id] = found.location
+        elif home:
+            add("COUNTRY", num=0, text="", conf=0.0, url=site)
+
+    async def _fill_location(self, company_id: str, domain: str):
+        """Set the location COUNTRY found, only while the company has none."""
+        location = self.locations.pop(company_id, "")
+        if not location:
+            return
+        try:
+            if await self.state.set_company_location_if_empty(company_id, location):
+                logger.info(f"profile: {domain} located in {location} (from its own site)")
+        except Exception as e:
+            logger.debug(f"set_company_location_if_empty failed for {domain}: {e}")
 
     async def _first_present(self, site: str, paths) -> tuple[str, str]:
         """Return (url, html) for the first path that returns content."""
@@ -1200,6 +1241,12 @@ class ProfileCollector:
         self.__dict__.setdefault("site_fetch", {}).pop(domain, None)
         site, home = await self._resolve_site(domain)
         if not home:
+            if self.wants("COUNTRY"):
+                # Import data can still name the country of a site that's down.
+                try:
+                    await self._country(company_id, domain, "", "", add)
+                except Exception as e:
+                    logger.info(f"profile: {domain} country unread: {type(e).__name__}: {e}")
             # A failure IS an observation — silent failures look like clean results.
             if domain in self.challenged:
                 logger.info(f"profile: {domain} answered with a bot challenge (challenged, not unreachable)")
@@ -1228,6 +1275,14 @@ class ProfileCollector:
                 # again every cycle (state._UNCLASSIFIED).
                 obs[:] = [o for o in obs if o["signal_code"] not in SITE_AGE_CODES]
                 add("SITE_PLATFORM", text="unknown", conf=0.0)
+
+        # Where the company is, when its own site proves it: fills an empty
+        # location (the sure country the cold-email check and send window read).
+        if self.wants("COUNTRY"):
+            try:
+                await self._country(company_id, domain, site, home, add)
+            except Exception as e:
+                logger.info(f"profile: {domain} country unread: {type(e).__name__}: {e}")
 
         # Structured data gap
         has_schema = bool(re.search(r'application/ld\+json', home, re.I)
@@ -1416,6 +1471,7 @@ class ProfileCollector:
             if obs:
                 total += await self.state.add_observations(obs, run_id=run_id)
                 logger.info(f"profile: {domain} → {len(obs)} observation(s)")
+            await self._fill_location(company["id"], domain)
             await asyncio.sleep(random.uniform(0.4, 1.2))
         return total
 

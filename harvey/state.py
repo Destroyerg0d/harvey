@@ -599,6 +599,17 @@ _UNCLASSIFIED = (
     " AND NOT EXISTS (SELECT 1 FROM observations so WHERE so.company_id = c.id"
     " AND so.signal_code = 'SITE_PLATFORM'))"
 )
+# The same once for COUNTRY: a company with no location, profiled before the
+# signal was confirmed, comes back once so its own site can say where it is.
+_UNLOCATED = (
+    "(EXISTS (SELECT 1 FROM signal_codes sc WHERE sc.code = 'COUNTRY'"
+    " AND sc.status = 'confirmed')"
+    " AND trim(COALESCE(c.location, '')) = ''"
+    " AND p.last_seen IS NOT NULL"
+    " AND (c.profile_checked_at IS NULL OR c.profile_checked_at <= p.last_seen)"
+    " AND NOT EXISTS (SELECT 1 FROM observations so WHERE so.company_id = c.id"
+    " AND so.signal_code = 'COUNTRY'))"
+)
 
 
 def _writer_holds(p: str) -> str:
@@ -2381,7 +2392,7 @@ class StateManager(LinkedInStateMixin):
                    WHERE c.domain != ''
                      AND ({_LAST_PROFILED} IS NULL
                           OR {_LAST_PROFILED} < datetime('now', ?)
-                          OR {_UNCLASSIFIED})
+                          OR {_UNCLASSIFIED} OR {_UNLOCATED})
                    ORDER BY {_LAST_PROFILED} IS NOT NULL, {_LAST_PROFILED}
                    LIMIT ?""",
                 (f"-{int(stale_days)} days", int(limit)),
@@ -2396,7 +2407,7 @@ class StateManager(LinkedInStateMixin):
                    WHERE c.domain != ''
                      AND ({_LAST_PROFILED} IS NULL
                           OR {_LAST_PROFILED} < datetime('now', ?)
-                          OR {_UNCLASSIFIED})""",
+                          OR {_UNCLASSIFIED} OR {_UNLOCATED})""",
                 (f"-{int(stale_days)} days",),
             ) as cursor:
                 row = await cursor.fetchone()
@@ -2412,6 +2423,17 @@ class StateManager(LinkedInStateMixin):
                 (company_id,),
             )
             await db.commit()
+
+    async def set_company_location_if_empty(self, company_id: str, location: str) -> bool:
+        """Set a company's location only while it has none; True when set."""
+        async with self._connect() as db:
+            cursor = await db.execute(
+                "UPDATE companies SET location = ?, updated_at = CURRENT_TIMESTAMP "
+                "WHERE id = ? AND trim(COALESCE(location, '')) = ''",
+                (location, company_id),
+            )
+            await db.commit()
+            return (cursor.rowcount or 0) > 0
 
     async def rename_company(self, company_id: str, name: str):
         """Set a company's name, and the copy each of its prospects carries."""

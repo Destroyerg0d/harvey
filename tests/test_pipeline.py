@@ -53,6 +53,7 @@ async def test_a_profiled_company_drops_out(state):
                                 collector="profile", value_text="wordpress")
     await state.add_observation("SITE_PLATFORM", company_id=cid,
                                 collector="profile", value_text="wordpress")
+    await state.add_observation("COUNTRY", company_id=cid, collector="profile", value_text="")
     assert await state.count_companies_needing_profile() == 0
 
 
@@ -61,7 +62,7 @@ async def test_a_stale_profile_comes_back_round(state):
     """Re-reading on a schedule is what makes 'they dropped their agency'
     visible. A company profiled last year is not done forever."""
     cid = await state.add_company(Company(name="Baker", domain="baker.com"))
-    for code in ("TECH_STACK", "SITE_PLATFORM"):
+    for code in ("TECH_STACK", "SITE_PLATFORM", "COUNTRY"):
         await state.add_observation(code, company_id=cid, collector="profile",
                                     value_text="wordpress",
                                     observed_at="2020-01-01 00:00:00")

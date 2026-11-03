@@ -276,6 +276,23 @@ SIGNAL_CATALOG: list[dict] = [
         "confidence_floor": 0.0,
     },
     {
+        "code": "COUNTRY",
+        "label": "Country (from its own site)",
+        "description": (
+            "The country the company's own site proves it is in, with the evidence: a US "
+            "street address with a state and ZIP, or a +1 phone with a US area code and "
+            "dollar prices; a .uk domain or a UK postcode; a .ca domain with a Canadian "
+            "postal code; a .au domain with an Australian address. Never a .com domain or "
+            "dollar prices alone. It fills an empty location, which is what the cold-email "
+            "check (Precleared skip_countries) and each recipient's send window read."
+        ),
+        "category": "profile",
+        "value_type": "text",
+        "collector": "profile",
+        "cost_note": "free (homepage HTML, plus the contact page when that says nothing)",
+        "confidence_floor": 0.0,
+    },
+    {
         "code": "YC_BACKED",
         "label": "Backed by Y Combinator",
         "description": ("The company says on its own site that it's YC-backed (a batch like "
