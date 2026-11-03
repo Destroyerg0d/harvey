@@ -822,12 +822,18 @@ class EnvConfig(BaseModel):
     tinyfish_api_key: str = ""
     reoon_api_key: str = ""
     zerobounce_api_key: str = ""
-    # Free-tier verifiers whose monthly allowances Harvey counts itself
-    # (*_MONTHLY_CHECKS in .env, read by integrations/email_finder.py).
+    # Free-tier verifiers whose allowances Harvey counts itself
+    # (*_MONTHLY_CHECKS and optional *_DAILY_CHECKS in .env, read by
+    # integrations/email_finder.py).
     bounceless_api_key: str = ""
     emailverify_api_key: str = ""
     getprospect_api_key: str = ""
     abstract_api_key: str = ""
+    mailboxvalidator_api_key: str = ""
+    sniffmail_api_key: str = ""
+    emailvalidationio_api_key: str = ""
+    bouncezero_api_key: str = ""
+    myemailverifier_api_key: str = ""
     # Native mail providers (channels.email.provider: gmail | smtp)
     gmail_client_id: str = ""
     gmail_client_secret: str = ""
@@ -950,6 +956,11 @@ def load_env() -> EnvConfig:
         emailverify_api_key=os.getenv("EMAILVERIFY_API_KEY", "").strip(),
         getprospect_api_key=os.getenv("GETPROSPECT_API_KEY", "").strip(),
         abstract_api_key=os.getenv("ABSTRACT_API_KEY", "").strip(),
+        mailboxvalidator_api_key=os.getenv("MAILBOXVALIDATOR_API_KEY", "").strip(),
+        sniffmail_api_key=os.getenv("SNIFFMAIL_API_KEY", "").strip(),
+        emailvalidationio_api_key=os.getenv("EMAILVALIDATIONIO_API_KEY", "").strip(),
+        bouncezero_api_key=os.getenv("BOUNCEZERO_API_KEY", "").strip(),
+        myemailverifier_api_key=os.getenv("MYEMAILVERIFIER_API_KEY", "").strip(),
         gmail_client_id=os.getenv("GMAIL_CLIENT_ID", "").strip(),
         gmail_client_secret=os.getenv("GMAIL_CLIENT_SECRET", "").strip(),
         smtp_host=os.getenv("SMTP_HOST", "").strip(),

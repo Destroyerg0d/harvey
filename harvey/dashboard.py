@@ -39,6 +39,8 @@ TOKEN_FILE = PROJECT_ROOT / "data" / "dashboard-token"
 VERIFIER_KEYS = (
     "REOON_API_KEY", "ZEROBOUNCE_API_KEY", "HUNTER_API_KEY",
     "BOUNCELESS_API_KEY", "EMAILVERIFY_API_KEY", "GETPROSPECT_API_KEY", "ABSTRACT_API_KEY",
+    "MAILBOXVALIDATOR_API_KEY", "SNIFFMAIL_API_KEY", "EMAILVALIDATIONIO_API_KEY",
+    "BOUNCEZERO_API_KEY", "MYEMAILVERIFIER_API_KEY",
 )
 
 
@@ -247,8 +249,9 @@ async def get_setup_status():
         "id": "verifier", "label": "Email verification key",
         "done": verifier_set,
         "required": True,
-        "help": "Add a Reoon (free 600/mo), Bounceless (free 1,000/mo), ZeroBounce, Hunter, "
-                "EmailVerify.io, GetProspect or Abstract key in Settings — "
+        "help": "Add a Reoon (free 600/mo), Bounceless (free 1,000/mo), Sniffmail (free 500/mo), "
+                "ZeroBounce, Hunter, MailboxValidator, EmailVerify.io, GetProspect, Abstract, "
+                "emailvalidation.io, BounceZero or MyEmailVerifier key in Settings — "
                 "without one, found emails stay 'guess' and are never sent.",
     })
 
@@ -404,6 +407,11 @@ async def get_settings():
         "emailverify_api_key_set": is_set("EMAILVERIFY_API_KEY"),
         "getprospect_api_key_set": is_set("GETPROSPECT_API_KEY"),
         "abstract_api_key_set": is_set("ABSTRACT_API_KEY"),
+        "mailboxvalidator_api_key_set": is_set("MAILBOXVALIDATOR_API_KEY"),
+        "sniffmail_api_key_set": is_set("SNIFFMAIL_API_KEY"),
+        "emailvalidationio_api_key_set": is_set("EMAILVALIDATIONIO_API_KEY"),
+        "bouncezero_api_key_set": is_set("BOUNCEZERO_API_KEY"),
+        "myemailverifier_api_key_set": is_set("MYEMAILVERIFIER_API_KEY"),
     }
 
 

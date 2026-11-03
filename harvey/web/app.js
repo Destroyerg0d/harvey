@@ -1266,6 +1266,11 @@ async function loadSettings() {
   savedPh('emailverify-key', data.emailverify_api_key_set, '100 free/mo');
   savedPh('getprospect-key', data.getprospect_api_key_set, '100 free/mo');
   savedPh('abstract-key', data.abstract_api_key_set, '100 free/mo — Email Validation API');
+  savedPh('mailboxvalidator-key', data.mailboxvalidator_api_key_set, '300 free/mo');
+  savedPh('sniffmail-key', data.sniffmail_api_key_set, '500 free/mo');
+  savedPh('emailvalidationio-key', data.emailvalidationio_api_key_set, '100 free/mo');
+  savedPh('bouncezero-key', data.bouncezero_api_key_set, '100 free/mo');
+  savedPh('myemailverifier-key', data.myemailverifier_api_key_set, '100 free credits');
   savedPh('linkedin-password', data.linkedin_password_set, 'Enter password');
   savedPh('cf-api-token', data.cloudflare_api_token_set, 'Your Cloudflare API Token');
 
@@ -1294,6 +1299,11 @@ async function loadSettings() {
   tag('emailverify-status', data.emailverify_api_key_set, 'set');
   tag('getprospect-status', data.getprospect_api_key_set, 'set');
   tag('abstract-status', data.abstract_api_key_set, 'set');
+  tag('mailboxvalidator-status', data.mailboxvalidator_api_key_set, 'set');
+  tag('sniffmail-status', data.sniffmail_api_key_set, 'set');
+  tag('emailvalidationio-status', data.emailvalidationio_api_key_set, 'set');
+  tag('bouncezero-status', data.bouncezero_api_key_set, 'set');
+  tag('myemailverifier-status', data.myemailverifier_api_key_set, 'set');
 }
 
 function saveGmail() {
@@ -1346,6 +1356,16 @@ function saveVerifiers() {
   if (ev) payload.EMAILVERIFY_API_KEY = ev;
   if (gp) payload.GETPROSPECT_API_KEY = gp;
   if (ab) payload.ABSTRACT_API_KEY = ab;
+  const mv = document.getElementById('mailboxvalidator-key').value;
+  const sn = document.getElementById('sniffmail-key').value;
+  const evio = document.getElementById('emailvalidationio-key').value;
+  const bz = document.getElementById('bouncezero-key').value;
+  const mev = document.getElementById('myemailverifier-key').value;
+  if (mv) payload.MAILBOXVALIDATOR_API_KEY = mv;
+  if (sn) payload.SNIFFMAIL_API_KEY = sn;
+  if (evio) payload.EMAILVALIDATIONIO_API_KEY = evio;
+  if (bz) payload.BOUNCEZERO_API_KEY = bz;
+  if (mev) payload.MYEMAILVERIFIER_API_KEY = mev;
   if (!Object.keys(payload).length) { showToast('Enter at least one key first.', 'error'); return; }
   saveEnv(payload, 'Verification keys saved.').then(loadSettings);
 }

@@ -26,6 +26,18 @@ def test_every_key_parameter_name_is_covered():
         assert "s3cr3t" not in record.getMessage() and "mode=power" in record.getMessage()
 
 
+def test_a_key_in_the_url_path_is_redacted():
+    # MyEmailVerifier: /verifier/validate_single/{email}/{key}
+    record = _record('HTTP Request: %s %s "%s"', "GET",
+                     "https://client.myemailverifier.test/verifier/validate_single/"
+                     "a%2Bb@c.example.test/pathsecret123", "HTTP/1.1 200 OK")
+    RedactKeysFilter().filter(record)
+    message = record.getMessage()
+    assert "pathsecret123" not in message
+    assert "/validate_single/a%2Bb@c.example.test/<redacted>" in message
+    assert message.endswith('"HTTP/1.1 200 OK"')
+
+
 def test_a_line_without_a_key_is_left_alone():
     record = _record("HTTP Request: GET https://shop.example.test/about \"HTTP/1.1 404\"")
     RedactKeysFilter().filter(record)

@@ -417,7 +417,7 @@
     <div class="settings-row">
       <div>
         <h3>Verifiers</h3>
-        <p class="desc">Add at least one so found emails get verified. Without any, addresses stay <span class="email-tag guess" style="margin:0">guess</span> and are never sent. Reoon has the best free tier (600 a month). Bounceless, EmailVerify.io, GetProspect and Abstract are tried last, and Harvey counts their free checks so a month's allowance is never overrun.</p>
+        <p class="desc">Add at least one so found emails get verified. Without any, addresses stay <span class="email-tag guess" style="margin:0">guess</span> and are never sent. Reoon has the best free tier (600 a month). Bounceless, EmailVerify.io, GetProspect, Abstract, MailboxValidator, Sniffmail, emailvalidation.io, BounceZero and MyEmailVerifier are tried last, and Harvey counts their free checks so a month's allowance is never overrun.</p>
       </div>
       <div class="fields">
         <div class="form-group"><label class="form-label" for="reoon-key">Reoon API key <span id="reoon-status" class="email-tag"></span></label>
@@ -435,6 +435,16 @@
           <input type="password" class="form-input" id="getprospect-key" placeholder="100 free/mo" autocomplete="off"></div>
         <div class="form-group"><label class="form-label" for="abstract-key">Abstract API key <span id="abstract-status" class="email-tag"></span></label>
           <input type="password" class="form-input" id="abstract-key" placeholder="100 free/mo — Email Validation API" autocomplete="off"></div>
+        <div class="form-group"><label class="form-label" for="mailboxvalidator-key">MailboxValidator API key <span id="mailboxvalidator-status" class="email-tag"></span></label>
+          <input type="password" class="form-input" id="mailboxvalidator-key" placeholder="300 free/mo" autocomplete="off"></div>
+        <div class="form-group"><label class="form-label" for="sniffmail-key">Sniffmail API key <span id="sniffmail-status" class="email-tag"></span></label>
+          <input type="password" class="form-input" id="sniffmail-key" placeholder="500 free/mo" autocomplete="off"></div>
+        <div class="form-group"><label class="form-label" for="emailvalidationio-key">emailvalidation.io API key <span id="emailvalidationio-status" class="email-tag"></span></label>
+          <input type="password" class="form-input" id="emailvalidationio-key" placeholder="100 free/mo" autocomplete="off"></div>
+        <div class="form-group"><label class="form-label" for="bouncezero-key">BounceZero API key <span id="bouncezero-status" class="email-tag"></span></label>
+          <input type="password" class="form-input" id="bouncezero-key" placeholder="100 free/mo" autocomplete="off"></div>
+        <div class="form-group"><label class="form-label" for="myemailverifier-key">MyEmailVerifier API key <span id="myemailverifier-status" class="email-tag"></span></label>
+          <input type="password" class="form-input" id="myemailverifier-key" placeholder="100 free credits" autocomplete="off"></div>
         <button class="btn btn-primary btn-sm" onclick="saveVerifiers()">Save verification keys</button>
       </div>
     </div>

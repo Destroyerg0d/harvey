@@ -13,7 +13,8 @@ permutation, this pipeline:
    the domain type: a real-verdict API (Reoon, ZeroBounce for the big
    providers), Hunter, or SMTP for small self-hosted servers, then the
    free tiers Harvey counts itself (Bounceless, EmailVerify.io,
-   GetProspect, Abstract) when those couldn't decide.
+   GetProspect, Abstract, MailboxValidator, Sniffmail, emailvalidation.io,
+   BounceZero, MyEmailVerifier) when those couldn't decide.
 4. Detects catch-all domains and buckets them as ``risky`` instead of
    pretending they're verified.
 
@@ -31,6 +32,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Awaitable, Callable, Optional
+from urllib.parse import quote
 
 import dns.resolver
 import aiosmtplib
@@ -584,19 +586,47 @@ async def verify_hunter(email: str, api_key: str) -> Optional[dict]:
 
 # ── Free tiers Harvey counts itself ──
 #
-# Four more verifiers, tried after the ones above when those couldn't
-# decide. Their free tiers are monthly, so every call to each is counted per
+# More verifiers, tried after the ones above when those couldn't decide.
+# Their free tiers are monthly, so every call to each is counted per
 # calendar month (UTC) in the settings table, like the Hunter domain-search
 # budget, and a verifier whose allowance is used is skipped until the month
 # turns: a free tier is never overrun. .env can set each allowance (a paid
 # plan, or a smaller share of the free tier).
+#
+# Any of them can also have a daily allowance, <SERVICE>_DAILY_CHECKS (the
+# monthly setting's name with DAILY for MONTHLY). Unset or 0 means no daily
+# cap. When one is set, checks are also counted per UTC day and both caps
+# hold: a verifier stops at whichever runs out first.
 VERIFIER_ALLOWANCES = {
     # service: (.env setting, free checks a month)
     "bounceless": ("BOUNCELESS_MONTHLY_CHECKS", 1000),
     "emailverify": ("EMAILVERIFY_MONTHLY_CHECKS", 100),
     "getprospect": ("GETPROSPECT_MONTHLY_CHECKS", 100),
     "abstract": ("ABSTRACT_MONTHLY_CHECKS", 100),
+    "mailboxvalidator": ("MAILBOXVALIDATOR_MONTHLY_CHECKS", 300),
+    "sniffmail": ("SNIFFMAIL_MONTHLY_CHECKS", 500),
+    "emailvalidationio": ("EMAILVALIDATIONIO_MONTHLY_CHECKS", 100),
+    "bouncezero": ("BOUNCEZERO_MONTHLY_CHECKS", 100),
+    # MyEmailVerifier's pricing page says 100 free credits a day, its FAQ a
+    # one-time 100, so the default assumes the smaller. If the daily credits
+    # prove real, set MYEMAILVERIFIER_DAILY_CHECKS=100 and
+    # MYEMAILVERIFIER_MONTHLY_CHECKS=3000.
+    "myemailverifier": ("MYEMAILVERIFIER_MONTHLY_CHECKS", 100),
 }
+# Free plans that cap requests a minute, as seconds between two calls:
+# Sniffmail and emailvalidation.io 10 a minute, BounceZero and
+# MyEmailVerifier 30. A call refused for going too fast is still counted,
+# so Harvey waits rather than waste the check.
+VERIFIER_MIN_INTERVALS = {
+    "sniffmail": 6.1,
+    "emailvalidationio": 6.1,
+    "bouncezero": 2.1,
+    "myemailverifier": 2.1,
+}
+_verifier_last_calls: dict[str, float] = {}
+# emailvalidation.io's own SMTP timeout in seconds (its default is 30): under
+# API_TIMEOUT's read timeout, so its answer arrives before Harvey gives up.
+EMAILVALIDATIONIO_TIMEOUT_S = 15
 # Bounceless may take this long before it answers; under API_TIMEOUT's read
 # timeout, so its answer arrives before Harvey gives up on it.
 BOUNCELESS_TIMEOUT_MS = 15000
@@ -623,35 +653,60 @@ def _verifier_monthly_cap(service: str) -> int:
         return free
 
 
-def _verifier_usage_key(service: str) -> str:
-    return f"{service}_check_count:{datetime.now(timezone.utc):%Y-%m}"
+def _verifier_daily_cap(service: str) -> int:
+    """The optional daily allowance; 0 (unset, 0 or unreadable) means none."""
+    setting = VERIFIER_ALLOWANCES[service][0].replace("_MONTHLY_", "_DAILY_")
+    try:
+        return max(int(os.getenv(setting, "").strip() or 0), 0)
+    except ValueError:
+        return 0
+
+
+def _verifier_usage_key(service: str, now: Optional[datetime] = None, daily: bool = False) -> str:
+    now = now or datetime.now(timezone.utc)
+    return f"{service}_check_count:{now:%Y-%m-%d}" if daily else f"{service}_check_count:{now:%Y-%m}"
+
+
+async def _checks_used(state, key: str) -> int:
+    try:
+        return int(await state.get_setting(key, "0") or "0")
+    except (ValueError, TypeError):
+        return 0
 
 
 async def verifier_checks_remaining(service: str, state) -> int:
-    """Checks left on this verifier this calendar month (UTC). Without a
+    """Checks left on this verifier this calendar month (UTC), and today
+    (UTC) when it has a daily allowance: the smaller of the two. Without a
     state store nothing can be counted, so none are left: an uncounted call
     could overrun the free tier."""
     if state is None:
         return 0
-    cap = _verifier_monthly_cap(service)
+    now = datetime.now(timezone.utc)
     try:
-        used = int(await state.get_setting(_verifier_usage_key(service), "0") or "0")
-    except (ValueError, TypeError):
-        used = 0
+        left = _verifier_monthly_cap(service) - await _checks_used(
+            state, _verifier_usage_key(service, now))
+        daily_cap = _verifier_daily_cap(service)
+        if daily_cap:
+            left = min(left, daily_cap - await _checks_used(
+                state, _verifier_usage_key(service, now, daily=True)))
     except Exception as e:
         logger.debug(f"{service} usage read failed: {e}")
         return 0
-    return max(cap - used, 0)
+    return max(left, 0)
 
 
 async def record_verifier_check(service: str, state) -> bool:
-    """Count one check against this month's allowance. Called just before
-    the request, so a call that fails mid-flight is still counted. False
-    when it couldn't be counted, and then the call isn't made."""
+    """Count one check against this month's allowance, and today's when the
+    verifier has a daily one. Called just before the request, so a call that
+    fails mid-flight is still counted. False when it couldn't be counted,
+    and then the call isn't made."""
     if state is None:
         return False
+    now = datetime.now(timezone.utc)
     try:
-        await state.increment_setting(_verifier_usage_key(service))
+        await state.increment_setting(_verifier_usage_key(service, now))
+        if _verifier_daily_cap(service):
+            await state.increment_setting(_verifier_usage_key(service, now, daily=True))
         return True
     except Exception as e:
         logger.debug(f"{service} usage write failed: {e}")
@@ -849,6 +904,212 @@ def _abstract_validation_verdict(data: dict) -> Optional[dict]:
     return None
 
 
+async def _pace(service: str) -> None:
+    """Space calls to a verifier VERIFIER_MIN_INTERVALS apart, as
+    _abstract_pace does for Abstract."""
+    interval = VERIFIER_MIN_INTERVALS.get(service, 0.0)
+    wait = _verifier_last_calls.get(service, 0.0) + interval - time.monotonic()
+    if wait > 0:
+        await asyncio.sleep(wait)
+    _verifier_last_calls[service] = time.monotonic()
+
+
+def _text_flag(value) -> Optional[bool]:
+    """A yes/no field sent as a JSON boolean or as the text "true"/"false"
+    (MyEmailVerifier sends text). None when it is neither."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().lower() in ("true", "false"):
+        return value.strip().lower() == "true"
+    return None
+
+
+async def verify_mailboxvalidator(email: str, api_key: str) -> Optional[dict]:
+    """MailboxValidator: 300 free checks a month.
+
+    v2 single validation (https://www.mailboxvalidator.com/api-single-validation)
+    answers JSON booleans, any of which may be null (not applicable):
+    ``is_smtp`` (the MX servers answered), ``is_verified`` (the mail server
+    confirmed the mailbox exists), ``is_catchall``, ``is_disposable``,
+    ``is_server_down``, ``is_greylisted``, and ``status``, its own overall
+    verdict. A bad key or no credits is an ``error`` object (HTTP 401).
+
+    Valid needs the mailbox confirmed, a catch-all ruled out (false, not
+    null: a catch-all server confirms any mailbox) and ``status`` true.
+    Invalid needs the server to have answered and denied the mailbox, or no
+    valid syntax or MX at all. A down or greylisting server, or anything
+    else, is inconclusive: None.
+    """
+    data = await _verifier_json(
+        "MailboxValidator", "GET", "https://api.mailboxvalidator.com/v2/validation/single",
+        params={"key": api_key, "email": email, "format": "json"},
+    )
+    if data is None or data.get("error"):
+        return None
+    if data.get("is_disposable") is True:
+        return {"status": "disposable", "catch_all": False}
+    if data.get("is_syntax") is False or data.get("is_domain") is False:
+        return {"status": "invalid", "catch_all": False}
+    if data.get("is_server_down") is True or data.get("is_greylisted") is True:
+        return None
+    if data.get("is_catchall") is True:
+        return {"status": "catch_all", "catch_all": True}
+    smtp, verified = data.get("is_smtp"), data.get("is_verified")
+    if smtp is True and verified is True and data.get("is_catchall") is False \
+            and data.get("status") is True:
+        return {"status": "valid", "catch_all": False}
+    if smtp is True and verified is False and data.get("status") is False:
+        return {"status": "invalid", "catch_all": False}
+    return None
+
+
+async def verify_sniffmail(email: str, api_key: str) -> Optional[dict]:
+    """Sniffmail: 500 free checks a month, 10 a minute.
+
+    ``is_reachable`` is safe, risky, invalid, unknown or unverified
+    (https://sniffmail-landing-page.pages.dev/docs), with ``is_deliverable``
+    (the mailbox exists and accepts mail) and ``is_disposable``. Valid needs
+    safe and a deliverable mailbox.
+
+    "risky" covers a catch-all, a role address and a full mailbox alike, and
+    the REST answer documents no catch-all flag of its own, so risky is
+    inconclusive: None. Only an explicit ``is_catch_all: true`` (top level,
+    or in a Reacher-style ``smtp`` object; neither is documented as of
+    2026-11) counts as a catch-all. Out of checks is a 403.
+    """
+    await _pace("sniffmail")
+    data = await _verifier_json(
+        "Sniffmail", "POST", "https://api.sniffmail.io/verify",
+        headers={"Authorization": f"Bearer {api_key}"}, json={"email": email},
+    )
+    if data is None:
+        return None
+    if data.get("is_disposable") is True:
+        return {"status": "disposable", "catch_all": False}
+    reachable = _word(data.get("is_reachable"))
+    if reachable == "invalid":
+        return {"status": "invalid", "catch_all": False}
+    smtp = data.get("smtp") if isinstance(data.get("smtp"), dict) else {}
+    if data.get("is_catch_all") is True or smtp.get("is_catch_all") is True:
+        return {"status": "catch_all", "catch_all": True}
+    if reachable == "safe" and data.get("is_deliverable") is True:
+        return {"status": "valid", "catch_all": False}
+    return None
+
+
+async def verify_emailvalidationio(email: str, api_key: str) -> Optional[dict]:
+    """emailvalidation.io: 100 free checks a month, 10 a minute.
+
+    ``/v1/info`` (https://emailvalidation.io/docs/info/) answers ``state``
+    (deliverable / undeliverable / unknown) with a ``reason``, plus
+    ``status`` (valid, invalid, catch_all, risky, do_not_mail, unknown),
+    ``sub_status``, ``smtp_check`` and ``disposable``. A catch-all comes
+    back as state deliverable (reason low_deliverability, status catch_all,
+    sub_status accept_all), and so do a disposable address and a full
+    mailbox, so state alone never means valid. Valid needs status valid,
+    the SMTP check passed and the mailbox itself as the reason (a role
+    mailbox included). ``catch_all=1`` needs a paid plan (a 403), so it
+    isn't sent. Out of checks or too fast is a 429.
+    """
+    await _pace("emailvalidationio")
+    data = await _verifier_json(
+        "emailvalidation.io", "GET", "https://api.emailvalidation.io/v1/info",
+        params={"email": email, "timeout": EMAILVALIDATIONIO_TIMEOUT_S},
+        headers={"apikey": api_key},
+    )
+    if data is None:
+        return None
+    status = _word(data.get("status"))
+    sub = _word(data.get("sub_status"))
+    state_word = _word(data.get("state"))
+    if status in ("invalid", "spamtrap", "abuse") or state_word == "undeliverable":
+        return {"status": "invalid", "catch_all": False}
+    if data.get("disposable") is True or sub == "disposable":
+        return {"status": "disposable", "catch_all": False}
+    if status == "do_not_mail":
+        return {"status": "invalid", "catch_all": False}
+    if status == "catch_all" or sub in _CATCH_ALL_WORDS or data.get("catch_all") is True:
+        return {"status": "catch_all", "catch_all": True}
+    if status == "valid" and state_word == "deliverable" and data.get("smtp_check") is True \
+            and _word(data.get("reason")) in ("valid_mailbox", "low_quality"):
+        return {"status": "valid", "catch_all": False}
+    return None
+
+
+async def verify_bouncezero(email: str, api_key: str) -> Optional[dict]:
+    """BounceZero: 100 free checks a month, 30 a minute.
+
+    Its public ``classification`` is only valid or invalid, and a catch-all
+    is reported as VALID (https://docs.bouncezero.io/, "Verification
+    Statuses"). So the verdict is read from ``metadata.internal_classification``
+    instead: verified (the mailbox was confirmed), likely_valid (signals,
+    no confirmation), catch_all (with ``catch_all_unresolved: true``),
+    invalid, disposable, spamtrap, risky, unknown or error. Only verified,
+    with ``checks.mailbox_verified`` true and no catch-all sign, is valid;
+    a catch-all is never valid. ``metadata.refunded`` means it couldn't
+    verify (reported as invalid, credit refunded): inconclusive. likely_valid,
+    risky (a full mailbox or bounce history), unknown and error are
+    inconclusive too: None. Out of credits is a 402.
+    """
+    await _pace("bouncezero")
+    data = await _verifier_json(
+        "BounceZero", "POST", "https://api.bouncezero.io/api/v1/verify",
+        headers={"X-API-Key": api_key}, json={"email": email},
+    )
+    if data is None:
+        return None
+    metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+    checks = data.get("checks") if isinstance(data.get("checks"), dict) else {}
+    internal = _word(metadata.get("internal_classification"))
+    if metadata.get("refunded") is True:
+        return None
+    if internal == "disposable" or checks.get("not_disposable") is False:
+        return {"status": "disposable", "catch_all": False}
+    if internal in ("invalid", "spamtrap"):
+        return {"status": "invalid", "catch_all": False}
+    if internal == "catch_all" or metadata.get("catch_all_unresolved") is True \
+            or checks.get("not_catch_all") is False:
+        return {"status": "catch_all", "catch_all": True}
+    if internal == "verified" and _word(data.get("classification")) == "valid" \
+            and checks.get("mailbox_verified") is True:
+        return {"status": "valid", "catch_all": False}
+    return None
+
+
+async def verify_myemailverifier(email: str, api_key: str) -> Optional[dict]:
+    """MyEmailVerifier: 100 free checks by default (see VERIFIER_ALLOWANCES),
+    30 a minute.
+
+    The key travels in the URL PATH (https://myemailverifier.com/api-info),
+    so the URL is never logged here (_verifier_json logs errors by type)
+    and RedactKeysFilter in harvey/main.py redacts it from httpx's request
+    log. ``Status`` is Valid, Invalid, Unknown, Catch All or Grey-listed,
+    and ``catch_all``, ``Disposable_Domain`` and ``Greylisted`` are the
+    text "true"/"false". Valid needs Status Valid with catch_all "false".
+    A bad key, no credits or a blocked account answers HTTP 200 with
+    ``status: false``: inconclusive, like Unknown and Grey-listed.
+    """
+    await _pace("myemailverifier")
+    url = ("https://client.myemailverifier.com/verifier/validate_single/"
+           f"{quote(email, safe='@')}/{quote(api_key, safe='')}")
+    data = await _verifier_json("MyEmailVerifier", "GET", url)
+    if data is None or data.get("status") is False or data.get("success") is False:
+        return None
+    status = _word(data.get("Status"))
+    catch_all = _text_flag(data.get("catch_all"))
+    if _text_flag(data.get("Disposable_Domain")) is True:
+        return {"status": "disposable", "catch_all": False}
+    if status == "invalid":
+        return {"status": "invalid", "catch_all": False}
+    if status in _CATCH_ALL_WORDS or catch_all is True:
+        return {"status": "catch_all", "catch_all": True}
+    if _text_flag(data.get("Greylisted")) is True:
+        return None
+    if status == "valid" and catch_all is False:
+        return {"status": "valid", "catch_all": False}
+    return None
+
+
 def _counted_channels(env) -> list[tuple[str, Verifier, str]]:
     """The counted verifiers that have a key, in the order they're tried:
     (service, verify function, key)."""
@@ -858,6 +1119,11 @@ def _counted_channels(env) -> list[tuple[str, Verifier, str]]:
         ("emailverify", "emailverify_api_key", verify_emailverify),
         ("getprospect", "getprospect_api_key", verify_getprospect),
         ("abstract", "abstract_api_key", verify_abstract),
+        ("mailboxvalidator", "mailboxvalidator_api_key", verify_mailboxvalidator),
+        ("sniffmail", "sniffmail_api_key", verify_sniffmail),
+        ("emailvalidationio", "emailvalidationio_api_key", verify_emailvalidationio),
+        ("bouncezero", "bouncezero_api_key", verify_bouncezero),
+        ("myemailverifier", "myemailverifier_api_key", verify_myemailverifier),
     ):
         key = getattr(env, attr, "") if env else ""
         if isinstance(key, str) and key.strip():
@@ -867,7 +1133,7 @@ def _counted_channels(env) -> list[tuple[str, Verifier, str]]:
 
 async def _run_counted(email: str, env, state) -> tuple[Optional[str], bool]:
     """Try the counted verifiers in turn, each only while this month's
-    allowance lasts. Returns (first conclusive status or None, catch_all_seen)."""
+    (and today's, if it has one) allowance lasts. Returns (first conclusive status or None, catch_all_seen)."""
     catch_all_seen = False
     for service, verify, key in _counted_channels(env):
         if await verifier_checks_remaining(service, state) <= 0:
@@ -954,8 +1220,9 @@ async def _verify_candidate(email: str, mx_type: str, env, state=None) -> tuple[
     Returns (status_or_None, catch_all_seen). Order is chosen so scarce
     paid-ish credits are spent only where they actually resolve the domain.
     The counted free tiers (Bounceless, EmailVerify.io, GetProspect,
-    Abstract) come last in both orders, and only with ``state`` to count
-    their monthly allowances in.
+    Abstract, MailboxValidator, Sniffmail, emailvalidation.io, BounceZero,
+    MyEmailVerifier) come last in both orders, and only with ``state`` to
+    count their allowances in.
     """
     reoon_key = getattr(env, "reoon_api_key", "") if env else ""
     zerobounce_key = getattr(env, "zerobounce_api_key", "") if env else ""

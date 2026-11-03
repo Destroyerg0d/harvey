@@ -32,13 +32,17 @@ logger = logging.getLogger("harvey")
 
 class RedactKeysFilter(logging.Filter):
     """httpx logs every request URL, and several verifiers take their API
-    key as a query parameter: keep the key out of the terminal and logs."""
+    key as a query parameter, or (MyEmailVerifier) as the last segment of
+    the path: keep the key out of the terminal and logs."""
 
     KEY_PARAM = re.compile(r"(?i)\b((?:api_?key|key|token|access_token)=)[^&\s\"']+")
+    # MyEmailVerifier: /verifier/validate_single/{email}/{key}
+    KEY_PATH = re.compile(r"(?i)(/verifier/validate_single/[^/\s\"']*/)[^/?#\s\"']+")
 
     def filter(self, record: logging.LogRecord) -> bool:
         message = record.getMessage()
         redacted = self.KEY_PARAM.sub(r"\1<redacted>", message)
+        redacted = self.KEY_PATH.sub(r"\1<redacted>", redacted)
         if redacted != message:
             record.msg, record.args = redacted, ()
         return True
@@ -162,7 +166,9 @@ def unusable_backlog_notice(summary: dict) -> str:
         "or catch-all email, so it paused prospecting for about a day to save search "
         "and verifier credits. Add an email verifier key (REOON_API_KEY, "
         "ZEROBOUNCE_API_KEY, HUNTER_API_KEY, BOUNCELESS_API_KEY, EMAILVERIFY_API_KEY, "
-        "GETPROSPECT_API_KEY or ABSTRACT_API_KEY in .env) or check it still has credits. "
+        "GETPROSPECT_API_KEY, ABSTRACT_API_KEY, MAILBOXVALIDATOR_API_KEY, SNIFFMAIL_API_KEY, "
+        "EMAILVALIDATIONIO_API_KEY, BOUNCEZERO_API_KEY or MYEMAILVERIFIER_API_KEY in .env) "
+        "or check it still has credits. "
         "`harvey export --all` exports the list as it is."
     )
 
