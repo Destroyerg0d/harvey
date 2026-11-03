@@ -353,6 +353,10 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
     shared = getattr(sender, "mailbox_providers", None)
     if shared is not None:
         writer.mailbox_providers = handler.mailbox_providers = shared
+    # LinkedIn (channels.linkedin.enabled): a paced session in the background,
+    # inside LinkedIn hours, never two at once, at most one every ~2 hours.
+    from harvey.agents.linkedin_agent import LinkedInRunner
+    linkedin = LinkedInRunner(brain, state, config)
 
     interval = config.usage.heartbeat_interval_minutes * 60
     max_calls = max(int(200 * (config.usage.max_daily_claude_percent / 100)), 1)
@@ -430,6 +434,14 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
                 if await _interruptible_sleep(3600, stop_event):
                     break
                 continue
+
+            # 3b. LinkedIn: start a run if one is due (it runs on in the
+            # background, far longer than a cycle; it never blocks this one).
+            if not send_only:
+                try:
+                    await linkedin.maybe_start()
+                except Exception as e:
+                    logger.warning(f"LinkedIn couldn't start: {e}")
 
             # 4. Decide what to do (in quiet hours: only read replies and send)
             if send_only:
@@ -542,6 +554,7 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
             if await _interruptible_sleep(backoff, stop_event):
                 break
 
+    await linkedin.shutdown()
     logger.info("Harvey shutting down. Deals don't close themselves, but I need a break.")
 
 

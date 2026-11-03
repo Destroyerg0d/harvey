@@ -364,10 +364,107 @@ def sending_notice(config) -> str:
     )
 
 
+class LinkedInHoursConfig(BaseModel):
+    """When Harvey may act on LinkedIn (harvey/linkedin/pacing.py)."""
+
+    start: str = "10:00"
+    end: str = "19:00"
+    timezone: str = "Asia/Kolkata"
+    weekdays_only: bool = True
+
+    @field_validator("start", "end")
+    @classmethod
+    def _clock(cls, v: str) -> str:
+        try:
+            _time.fromisoformat(str(v))
+        except ValueError:
+            raise ValueError(f"'{v}' is not a time like 10:00")
+        return str(v)
+
+    @field_validator("timezone")
+    @classmethod
+    def _zone(cls, v: str) -> str:
+        import pytz
+        try:
+            pytz.timezone(v)
+        except pytz.UnknownTimeZoneError:
+            raise ValueError(f"'{v}' is not a time zone name like Asia/Kolkata")
+        return v
+
+
 class LinkedInChannelConfig(BaseModel):
+    """LinkedIn invites, messages, follow-ups and replies (harvey/linkedin/).
+
+    Automating a LinkedIn account is against LinkedIn's terms: these limits
+    are the account's safety margin, so they are deliberately low."""
+
     enabled: bool = False
-    max_daily_connections: int = 20
-    max_daily_messages: int = 10
+    # Daily caps: connection invites, and messages (first messages,
+    # follow-ups and replies together).
+    max_daily_connections: int = 15
+    max_daily_messages: int = 25
+    max_weekly_invites: int = 75
+    # Sends, invites and withdrawals in any one hour, and old invites withdrawn a day.
+    max_actions_per_hour: int = 12
+    max_daily_withdrawals: int = 10
+    # Drafts wait for your approval on the dashboard until this is true
+    # (the dashboard's switch overrides it once used).
+    autopilot: bool = False
+    hours: LinkedInHoursConfig = LinkedInHoursConfig()
+    # Human pacing: a random wait between actions, and a longer break every few.
+    min_delay_seconds: int = 60
+    max_delay_seconds: int = 240
+    break_every_actions: int = 5
+    break_min_seconds: int = 300
+    break_max_seconds: int = 900
+    # One run at a time, at most one every run_every_minutes, each at most this long.
+    run_every_minutes: int = 120
+    max_run_minutes: int = 90
+    # A warning, captcha, sign-in challenge or limit notice pauses LinkedIn this long.
+    pause_hours_on_warning: int = 48
+    withdraw_after_days: int = 21
+    # First message 1-3 days after they accept, one follow-up 5-7 days later
+    # if silent, never more than max_unanswered messages without a reply.
+    first_message_min_days: int = 1
+    first_message_max_days: int = 3
+    follow_up_min_days: int = 5
+    follow_up_max_days: int = 7
+    max_unanswered: int = 3
+    # A short note with each invite while the account allows notes.
+    invite_notes: bool = True
+    invite_note_max_chars: int = 200
+    # Who gets invites: Harvey contacts with a LinkedIn URL and one of these in their title.
+    invite_titles: list[str] = ["founder", "co-founder", "owner", "ceo", "chief executive",
+                                "managing director", "director", "president", "proprietor",
+                                "partner"]
+    # The dedicated Chrome profile (relative to the project), and Chrome itself
+    # ("" finds the installed Google Chrome).
+    profile_dir: str = "data/linkedin-profile"
+    chrome_path: str = ""
+    headless: bool = False
+
+    @field_validator("max_daily_connections", "max_daily_messages", "max_weekly_invites",
+                     "max_actions_per_hour", "max_daily_withdrawals", "min_delay_seconds",
+                     "max_delay_seconds", "break_every_actions", "break_min_seconds",
+                     "break_max_seconds", "run_every_minutes", "max_run_minutes",
+                     "pause_hours_on_warning", "withdraw_after_days", "first_message_min_days",
+                     "first_message_max_days", "follow_up_min_days", "follow_up_max_days",
+                     "max_unanswered", "invite_note_max_chars")
+    @classmethod
+    def _not_negative(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("must be 0 or more")
+        return v
+
+    @model_validator(mode="after")
+    def _ranges(self):
+        for low, high in (("min_delay_seconds", "max_delay_seconds"),
+                          ("break_min_seconds", "break_max_seconds"),
+                          ("first_message_min_days", "first_message_max_days"),
+                          ("follow_up_min_days", "follow_up_max_days")):
+            if getattr(self, low) > getattr(self, high):
+                raise ValueError(f"channels.linkedin.{low} is more than {high}")
+        return self
 
 
 class ChannelsConfig(BaseModel):

@@ -25,6 +25,10 @@ from harvey.models.conversation import Conversation, Message  # noqa: F401
 
 from harvey.paths import PROJECT_ROOT
 from harvey.startups import parse_funding
+# LinkedIn (harvey/linkedin/): its tables are created in init_db, its state
+# methods live in harvey/linkedin/store.py.
+from harvey.linkedin.schema import LINKEDIN_SCHEMA
+from harvey.linkedin.store import LinkedInStateMixin
 
 DB_PATH = PROJECT_ROOT / "data" / "harvey.db"
 
@@ -575,7 +579,7 @@ _CONVERSATION_COLUMNS = frozenset({
 })
 
 
-class StateManager:
+class StateManager(LinkedInStateMixin):
     def __init__(self, db_path: str | None = None):
         self.db_path = db_path or str(DB_PATH)
 
@@ -611,6 +615,9 @@ class StateManager:
                     await db.commit()
 
             await self._add_extra_columns(db)
+            # LinkedIn's tables, outside MIGRATIONS like _EXTRA_COLUMNS.
+            await db.executescript(LINKEDIN_SCHEMA)
+            await db.commit()
 
     @staticmethod
     async def _add_extra_columns(db):

@@ -106,7 +106,7 @@ def test_usage_and_channel_overrides():
     assert config.channels.email.enabled is False
     assert config.channels.email.max_daily_sends == 10
     # linkedin channel keeps its defaults
-    assert config.channels.linkedin.max_daily_connections == 20
+    assert config.channels.linkedin.max_daily_connections == 15
 
 
 def test_quiet_hours_defaults():

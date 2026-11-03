@@ -888,8 +888,8 @@ What prospects do instead of buying a solution like ours:
                 },
                 "linkedin": {
                     "enabled": False,
-                    "max_daily_connections": 20,
-                    "max_daily_messages": 10,
+                    "max_daily_connections": 15,
+                    "max_daily_messages": 25,
                 },
             },
             "usage": {

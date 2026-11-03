@@ -563,8 +563,8 @@ class SetupWizard:
                 },
                 "linkedin": {
                     "enabled": bool(self.env_vars.get("LINKEDIN_EMAIL")),
-                    "max_daily_connections": 20,
-                    "max_daily_messages": 10,
+                    "max_daily_connections": 15,
+                    "max_daily_messages": 25,
                 },
             },
             "usage": {

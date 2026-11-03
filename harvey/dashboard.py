@@ -61,6 +61,10 @@ app = FastAPI(title="Harvey Dashboard", docs_url=None, redoc_url=None, openapi_u
 token_store = auth.TokenStore(TOKEN_FILE)
 app.add_middleware(auth.DashboardGuard, store=token_store)
 
+# The LinkedIn tab's routes (/api/linkedin...), behind the same guard.
+from harvey.linkedin.web import router as linkedin_router  # noqa: E402
+app.include_router(linkedin_router)
+
 # Harvey process tracking
 _harvey_process: subprocess.Popen | None = None
 _harvey_started_at: datetime | None = None
@@ -2376,6 +2380,10 @@ async def get_today():
                 "detail": "People replied. Check how Harvey is handling them.",
                 "action": "Read conversations", "tab": "conversations",
             })
+
+        # LinkedIn: drafts waiting for approval, and a pause (harvey/linkedin/web.py).
+        from harvey.linkedin.web import today_items as linkedin_today_items
+        items.extend(await linkedin_today_items(state))
 
         return {"items": items, "stats": stats}
     except Exception as e:

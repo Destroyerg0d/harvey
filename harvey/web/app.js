@@ -416,6 +416,7 @@ function loadCurrentTab() {
     case 'outbox': loadOutbox(); break;
     case 'conversations': loadConversations(); break;
     case 'mailboxes': loadMailboxes(); break;
+    case 'linkedin': loadLinkedIn(); break;
     case 'activity': loadActivity(); break;
     case 'usage': loadUsage(); break;
     case 'settings': loadSettings(); loadSendingModeCard(); break;
@@ -2976,6 +2977,326 @@ function mbxFunnelHtml(f) {
       'Contacts by stage does; Harvey doesn\'t see your calendar, so a meeting booked elsewhere isn\'t counted.</p>';
 }
 
+// ── LinkedIn: invites, messages, follow-ups and replies ──
+
+let _li = null, _liEditing = null, _liArmed = false, _liBusy = false;
+const LI_KIND = {invite_note: 'Invite', message: 'Message', reply: 'Reply'};
+const LI_STAGE = {found: 'Found', invited: 'Invited', accepted: 'Accepted', messaged: 'Messaged',
+  replied: 'Replied', warm: 'Warm', meeting: 'Meeting', declined: 'Declined', withdrawn: 'Withdrawn'};
+
+async function loadLinkedIn() {
+  const data = await api('/api/linkedin?tz=' + mbxTz());
+  if (currentTab !== 'linkedin') return;
+  // An edit or the autopilot confirmation in progress is never re-rendered away.
+  if (_liEditing || _liArmed) { if (data && !data.error) _li = data; return; }
+  renderLinkedIn(data);
+}
+
+function liEl(id, html) { const el = document.getElementById(id); if (el) el.innerHTML = html; }
+
+function renderLinkedIn(data) {
+  if (!data) { liEl('li-summary', offlineState()); return; }
+  if (data.error) {
+    liEl('li-summary', emptyState(icon('alert'), 'Couldn’t read LinkedIn', escHtml(data.error)));
+    return;
+  }
+  _li = data;
+  navCount('nav-linkedin', data.drafts_waiting || 0);
+  const paused = data.pause;
+  liEl('li-actions',
+    (data.drafts_waiting ? '<button class="btn btn-primary btn-sm" onclick="liApproveAll(this)">' +
+      icon('check') + 'Approve all drafts</button>' : '') +
+    (paused
+      ? '<button class="btn btn-secondary btn-sm" onclick="liPause(\'resume\')">Resume LinkedIn</button>'
+      : '<button class="btn btn-danger btn-sm" onclick="liPause(\'pause\')">Pause LinkedIn</button>'));
+  liEl('li-banner', liBannerHtml(data));
+  liEl('li-summary', liSummaryHtml(data));
+  liEl('li-queue', liQueueHtml(data.queue || []));
+  liEl('li-convos', liConvosHtml(data.conversations || []));
+  liEl('li-due', liDueHtml(data.follow_ups_due || []));
+  liEl('li-chart', liChartHtml(data.chart || {}));
+  liEl('li-funnel', liFunnelHtml(data.funnel || {}));
+  liEl('li-limits', liLimitsHtml(data));
+  liEl('li-mode', liModeHtml(data));
+}
+
+function liBannerHtml(d) {
+  if (d.pause) {
+    const until = d.pause.until ? ' until ' + formatDate(d.pause.until) : ' until you resume it';
+    return '<div class="banner bad">' + icon('alert') + '<div><b>LinkedIn is paused' + escHtml(until) + '</b>' +
+      '<p>' + escHtml(d.pause.reason || '') + '. Nothing is read or sent on LinkedIn meanwhile. ' +
+      (d.pause.kind === 'signed_out' ? 'Run <code>harvey linkedin login</code> in a terminal and sign in.'
+        : 'Look at the LinkedIn window before you resume.') + '</p></div></div>';
+  }
+  if (!d.enabled) {
+    return '<div class="banner">' + icon('flag') + '<div><b>LinkedIn is off</b><p>Set ' +
+      '<code>channels.linkedin.enabled: true</code> in your config, sign the profile in with ' +
+      '<code>harvey linkedin login</code>, and Harvey runs LinkedIn ' + escHtml(d.hours) + '.</p></div></div>';
+  }
+  if (d.autopilot) {
+    return '<div class="banner wait">' + icon('alert') + '<div><b>LinkedIn autopilot is on</b>' +
+      '<p>Harvey sends what it writes on LinkedIn without asking. It still holds anything with a link that ' +
+      'isn’t yours, or a reply to someone asking whether this is automated.</p></div></div>';
+  }
+  return '';
+}
+
+function liSummaryHtml(d) {
+  const u = d.used || {}, c = d.caps || {};
+  const card = (label, value, note) => '<div class="kpi"><div class="kpi-label">' + label + '</div>' +
+    '<div class="kpi-main"><span class="kpi-value' + (String(value).startsWith('0') ? ' zero' : '') + '">' + value +
+    '</span></div><span class="kpi-note">' + note + '</span></div>';
+  const last = d.last_run || {};
+  return '<div class="kpis mbx-kpis">' +
+    card('Invites today', mbxNum(u.invites_today) + '<small> / ' + mbxNum(c.invites_today) + '</small>',
+      '<b>' + mbxNum(u.invites_week) + '</b> of ' + mbxNum(c.invites_week) + ' this week') +
+    card('Messages today', mbxNum(u.messages_today) + '<small> / ' + mbxNum(c.messages_today) + '</small>',
+      'first messages, follow-ups and replies') +
+    card('Waiting for you', mbxNum(d.drafts_waiting), 'drafts to approve, edit or skip') +
+    card('Last run', last.started ? relTime(last.started) : '&ndash;',
+      d.running ? 'running now' : escHtml(last.outcome || 'not run yet')) +
+  '</div>';
+}
+
+function liLeadLine(l) {
+  if (!l || !l.id) return '<span class="muted">unknown lead</span>';
+  const href = safeHref(l.profile_url);
+  const name = escHtml(l.name || l.first_name || 'Them');
+  return (href ? '<a href="' + href + '" target="_blank" rel="noopener noreferrer">' + name + '</a>' : name) +
+    (l.company ? ' <span class="muted">· ' + escHtml(l.company) + '</span>' : '') +
+    ' <span class="tag">' + escHtml(own(LI_STAGE, l.stage) || l.stage || '') + '</span>';
+}
+
+function liItemButtons(m) {
+  const id = jsq(m.id);
+  if (_liEditing === m.id) {
+    return '<button class="btn btn-primary btn-sm" onclick="liSave(' + id + ')">Save</button>' +
+      '<button class="btn btn-ghost btn-sm" onclick="liCancelEdit()">Cancel</button>';
+  }
+  if (m.status === 'draft') {
+    return '<button class="btn btn-primary btn-sm" onclick="liAct(' + id + ',\'approve\')">Approve</button>' +
+      '<button class="btn btn-secondary btn-sm" onclick="liEdit(' + id + ')">Edit</button>' +
+      '<button class="btn btn-ghost btn-sm" onclick="liAct(' + id + ',\'skip\')">Skip</button>';
+  }
+  if (m.status === 'failed') {
+    return (m.maybe_sent ? '' : '<button class="btn btn-secondary btn-sm" onclick="liAct(' + id + ',\'retry\')">Retry</button>') +
+      '<button class="btn btn-ghost btn-sm" onclick="liAct(' + id + ',\'skip\')">Skip</button>';
+  }
+  return '<button class="btn btn-ghost btn-sm" onclick="liAct(' + id + ',\'skip\')">Skip</button>';
+}
+
+function liBody(m) {
+  if (_liEditing === m.id) {
+    return '<textarea class="desk-edit-body li-edit" id="li-edit-' + escHtml(m.id) + '" rows="5">' +
+      escHtml(m.body) + '</textarea>';
+  }
+  if (!m.body) return '<p class="muted li-body">' + (m.kind === 'invite_note' ? 'No note: the invite goes on its own.' : '(empty)') + '</p>';
+  return '<div class="li-body">' + escHtml(m.body) + '</div>';
+}
+
+function liQueueHtml(queue) {
+  if (!queue.length) return '<div class="card muted">Nothing waiting. New drafts show up here after each LinkedIn run.</div>';
+  const label = {draft: 'Waiting for you', approved: 'Approved, sends next run', failed: 'Not sent'};
+  return queue.map(m => '<div class="convo-card li-item">' +
+    '<div class="convo-head"><div><h3>' + escHtml(own(LI_KIND, m.kind) || m.kind) + ' to ' + liLeadLine(m.lead) + '</h3>' +
+      '<div class="sub">' + escHtml(own(label, m.status) || m.status) + ' · ' + relTime(m.created_at) +
+      (m.approved_by ? ' · approved by ' + escHtml(m.approved_by) : '') + '</div></div></div>' +
+    (m.error ? '<p class="li-why' + (m.maybe_sent ? ' bad' : '') + '">' + escHtml(m.error) + '</p>' : '') +
+    liBody(m) +
+    '<div class="convo-actions">' + liItemButtons(m) + '</div></div>').join('');
+}
+
+function liConvosHtml(convos) {
+  if (!convos.length) return '<div class="card muted">No replies on LinkedIn yet.</div>';
+  return convos.map(c => {
+    const l = c.lead || {}, inbound = c.latest_in;
+    const thread = (c.thread || []).map(m => '<div class="thread-msg ' + (m.direction === 'out' ? 'sent' : 'received') +
+      '"><div class="sender">' + (m.direction === 'out' ? 'You' : escHtml(l.first_name || l.name || 'Them')) +
+      ' &middot; ' + relTime(m.at) + '</div>' + escHtml(m.body) + '</div>').join('');
+    const draft = c.draft ? '<div class="thread-draft"><div class="sender">' + icon('pen') + 'Reply ' +
+      (c.draft.status === 'approved' ? 'approved, sends next run' : 'drafted, waiting for you') + '</div>' +
+      liBody({...c.draft, kind: 'reply'}) + '<div class="convo-actions">' +
+      liItemButtons({...c.draft, kind: 'reply'}) + '</div></div>' : '';
+    const stageBtns = l.stage === 'declined' ? '<span class="muted">Declined. Harvey won’t contact them again.</span>'
+      : (l.stage !== 'meeting' ? '<button class="btn btn-secondary btn-sm" onclick="liStage(' + jsq(l.id) + ',\'meeting\')">Meeting booked</button>' : '') +
+        '<button class="btn btn-ghost btn-sm" onclick="liStage(' + jsq(l.id) + ',\'declined\')">They said no</button>';
+    return '<div class="convo-card"><div class="convo-head"><div><h3>' + liLeadLine(l) + '</h3>' +
+      '<div class="sub">' + escHtml(l.headline || '') + (inbound ? ' · wrote ' + relTime(inbound.at) : '') + '</div></div>' +
+      '<div class="tags">' + (inbound && inbound.intent ? badge(inbound.intent) : '') + '</div></div>' +
+      '<div class="thread">' + thread + draft + '</div><div class="convo-actions">' + stageBtns + '</div></div>';
+  }).join('');
+}
+
+function liDueHtml(due) {
+  if (!due.length) return '<div class="card muted">No first messages or follow-ups due.</div>';
+  return '<div class="card"><div class="figures">' + due.map(x => '<div class="figure"><span class="k">' +
+    liLeadLine(x.lead) + '</span><span class="v">' + escHtml(x.which) +
+    (x.due_at ? ' <small class="muted">due ' + relTime(x.due_at) + '</small>' : '') + '</span></div>').join('') +
+    '</div><p class="figure-note">Harvey drafts these on its next LinkedIn run, within the day’s message limit.</p></div>';
+}
+
+function liChartHtml(chart) {
+  const days = chart.days || [];
+  if (!days.length) return '<p class="muted">Nothing to chart yet.</p>';
+  const short = day => { const dt = new Date(day + 'T12:00:00');
+    return isNaN(dt) ? day : dt.toLocaleDateString('en-US', {month: 'short', day: 'numeric'}); };
+  const rows = [['Invites sent', chart.invites || [], 'c-accent'], ['Messages sent', chart.messages || [], 'c-accent'],
+    ['Replies', chart.replies || [], 'c-good']];
+  const max = Math.max(1, ...rows.flatMap(r => r[1]));
+  const sum = a => a.reduce((x, y) => x + (Number(y) || 0), 0);
+  return '<div class="mbx-chart" role="img" aria-label="LinkedIn invites, messages and replies per day over the last ' +
+      days.length + ' days">' +
+    rows.map(([name, vals, cls]) => '<div class="mbx-crow"><span class="mbx-cname">' + name + '</span>' +
+      '<span class="mbx-bars">' + vals.map((v, i) => '<i class="' + cls + (v ? '' : ' zero') + '" style="height:' +
+        (v ? Math.max(6, Math.round(100 * v / max)) : 0) + '%" title="' + escHtml(short(days[i]) + ': ' + v) + '"></i>').join('') +
+      '</span><span class="mbx-ctotal">' + mbxNum(sum(vals)) + '</span></div>').join('') +
+    '<div class="mbx-crow axis"><span class="mbx-cname"></span><span class="mbx-axis"><span>' + escHtml(short(days[0])) +
+      '</span><span>Today</span></span><span class="mbx-ctotal">total</span></div></div>';
+}
+
+function liFunnelHtml(f) {
+  const stages = [['Found', f.found], ['Invited', f.invited], ['Accepted', f.accepted, f.acceptance_rate, 'of invited'],
+    ['Messaged', f.messaged], ['Replied', f.replied, f.reply_rate, 'of messaged'],
+    ['Positive', f.positive, f.positive_rate, 'of replied'], ['Meetings', f.meetings]];
+  const max = Math.max(1, ...stages.map(s => Number(s[1] || 0)));
+  return '<div class="mbx-funnel">' + stages.map(s => {
+    const n = Number(s[1] || 0);
+    return '<div class="mbx-frow"><span class="k">' + s[0] + '</span><span class="v">' + mbxNum(n) + '</span>' +
+      '<span class="pct" title="' + escHtml(s[3] || '') + '">' + (s[2] !== undefined && s[2] !== null ? mbxPct(s[2]) : '') + '</span>' +
+      '<span class="bar"><span style="width:' + (n ? Math.max(1, 100 * n / max) : 0) + '%;background:var(--accent)"></span></span></div>';
+  }).join('') + '</div><p class="figure-note">Acceptance is of invited, reply of messaged, positive of replied. ' +
+    mbxNum(f.declined) + ' declined, ' + mbxNum(f.withdrawn) + ' invites withdrawn.</p>';
+}
+
+function liLimitsHtml(d) {
+  const u = d.used || {}, c = d.caps || {}, last = d.last_run || {};
+  const row = (k, v) => '<div class="figure"><span class="k">' + k + '</span><span class="v">' + v + '</span></div>';
+  return '<div class="figures">' +
+    row('Invites today', mbxNum(u.invites_today) + ' / ' + mbxNum(c.invites_today)) +
+    row('Invites this week', mbxNum(u.invites_week) + ' / ' + mbxNum(c.invites_week)) +
+    row('Messages today', mbxNum(u.messages_today) + ' / ' + mbxNum(c.messages_today)) +
+    row('Withdrawn today', mbxNum(u.withdrawals_today) + ' / ' + mbxNum(c.withdrawals_today)) +
+    row('Actions this hour', mbxNum(u.actions_hour) + ' / ' + mbxNum(c.actions_hour)) +
+    row('LinkedIn hours', escHtml(d.hours) + (d.in_hours ? '' : ' <small class="muted">(outside now)</small>')) +
+    row('Last run', last.started ? formatDate(last.started) : '&ndash;') +
+    (last.outcome ? row('Outcome', escHtml(last.outcome)) : '') +
+    (last.started ? row('Sent last run', mbxNum(last.sent_messages) + ' messages, ' + mbxNum(last.sent_invites) + ' invites') : '') +
+  '</div>';
+}
+
+function liModeHtml(d) {
+  let html = '<div class="card mode-card"><h3>' + (d.autopilot ? 'Autopilot' : 'Approval') + '</h3>' +
+    '<p><b>Approval</b> (the default): every invite, message and reply Harvey writes for LinkedIn waits here until you approve it.</p>' +
+    '<p><b>Autopilot</b>: Harvey sends them on its own, inside LinkedIn hours and the limits. It still holds a reply to ' +
+    'anyone asking whether this is automated, and anything linking to a site that isn’t yours.</p>';
+  if (d.autopilot) {
+    html += '<div class="convo-actions"><span class="muted">Turning it off works at once: what autopilot approved ' +
+      'that hasn’t gone out comes back here.</span><button class="btn btn-primary btn-sm" onclick="liSetMode(\'approval\')"' +
+      (_liBusy ? ' disabled' : '') + '>Turn off autopilot</button></div>';
+  } else if (_liArmed) {
+    html += '<div class="convo-actions mode-confirm"><span class="muted">Approve a few runs by hand first. Type ' +
+      '<b>autopilot</b> to turn it on.</span>' +
+      '<input class="form-input" id="li-autopilot-confirm" autocomplete="off" aria-label="Type autopilot to confirm" ' +
+        'oninput="document.getElementById(\'li-autopilot-go\').disabled = this.value.trim().toLowerCase() !== \'autopilot\'" ' +
+        'onkeydown="if (event.key === \'Enter\' && this.value.trim().toLowerCase() === \'autopilot\') liSetMode(\'autopilot\')">' +
+      '<button class="btn btn-primary btn-sm" id="li-autopilot-go" disabled onclick="liSetMode(\'autopilot\')">Turn on autopilot</button>' +
+      '<button class="btn btn-ghost btn-sm" onclick="_liArmed=false;renderLinkedIn(_li)">Cancel</button></div>';
+  } else {
+    html += '<div class="convo-actions"><button class="btn btn-secondary btn-sm" ' +
+      'onclick="_liArmed=true;renderLinkedIn(_li);const i=document.getElementById(\'li-autopilot-confirm\');if(i)i.focus()">' +
+      'Turn on autopilot…</button></div>';
+  }
+  return html + '</div>';
+}
+
+async function liPost(path, body) {
+  return api(path, {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body || {})});
+}
+
+async function liAct(id, action) {
+  const res = await liPost('/api/linkedin/messages/' + encodeURIComponent(id) + '/' + action);
+  if (res && res.success) {
+    showToast({approve: 'Approved. It goes on the next LinkedIn run.', skip: 'Skipped.',
+      retry: 'Back in the queue for the next run.'}[action] || 'Done.', 'success');
+  } else {
+    showToast(failMsg(res, 'Couldn’t do that.'), 'error');
+  }
+  loadLinkedIn();
+}
+
+async function liApproveAll(btn) {
+  if (btn) btn.disabled = true;
+  const res = await liPost('/api/linkedin/messages/approve-all');
+  if (res && res.success) {
+    showToast(res.approved + ' approved' + (res.held ? '; ' + res.held + ' held ones wait for you one by one.' : '.'), 'success');
+  } else {
+    showToast(failMsg(res, 'Couldn’t approve them.'), 'error');
+  }
+  loadLinkedIn();
+}
+
+function liEdit(id) {
+  _liEditing = id;
+  renderLinkedIn(_li);
+  const el = document.getElementById('li-edit-' + id);
+  if (el) el.focus();
+}
+
+function liCancelEdit() { _liEditing = null; renderLinkedIn(_li); }
+
+async function liSave(id) {
+  const el = document.getElementById('li-edit-' + id);
+  const res = await liPost('/api/linkedin/messages/' + encodeURIComponent(id) + '/edit', {body: el ? el.value : ''});
+  if (res && res.success) {
+    _liEditing = null;
+    showToast('Saved. Approve it when it reads right.', 'success');
+    loadLinkedIn();
+  } else {
+    showToast(failMsg(res, 'Couldn’t save it.'), 'error');
+  }
+}
+
+async function liStage(leadId, stage) {
+  if (stage === 'declined' && !confirm('Mark them as declined? Harvey never contacts them again, on LinkedIn or by email.')) return;
+  const res = await liPost('/api/linkedin/leads/' + encodeURIComponent(leadId) + '/stage', {stage});
+  if (res && res.success) showToast(stage === 'meeting' ? 'Marked: meeting booked.' : 'Marked as declined.', 'success');
+  else showToast(failMsg(res, 'Couldn’t change that.'), 'error');
+  loadLinkedIn();
+}
+
+async function liPause(action) {
+  const res = await liPost('/api/linkedin/' + action);
+  if (res && res.success) showToast(action === 'pause' ? 'LinkedIn paused. Nothing is read or sent until you resume.'
+    : 'LinkedIn resumed. The next run starts inside LinkedIn hours.', 'success');
+  else showToast(failMsg(res, 'Couldn’t change that.'), 'error');
+  loadLinkedIn();
+  loadToday();
+}
+
+async function liSetMode(mode) {
+  if (_liBusy) return;
+  const body = {mode};
+  if (mode === 'autopilot') {
+    const input = document.getElementById('li-autopilot-confirm');
+    body.confirm = input ? input.value.trim().toLowerCase() : '';
+  }
+  _liBusy = true;
+  try {
+    const res = await liPost('/api/linkedin/autopilot', body);
+    if (res && res.success) {
+      _liArmed = false;
+      showToast(mode === 'autopilot' ? 'LinkedIn autopilot is on from the next run.'
+        : 'LinkedIn autopilot is off' + (res.requeued ? '; ' + res.requeued + ' came back to the queue.' : '.'), 'success');
+    } else {
+      showToast(failMsg(res, 'Couldn’t change LinkedIn autopilot.'), 'error');
+    }
+  } finally {
+    _liBusy = false;
+  }
+  loadLinkedIn();
+}
+
 // ── Init & live refresh ──
 
 loadToday();
@@ -3018,6 +3339,7 @@ setInterval(() => {
     case 'campaigns': loadCampaigns(); break;
     case 'conversations': loadConversations(); break;
     case 'mailboxes': loadMailboxes(); break;
+    case 'linkedin': loadLinkedIn(); break;
     case 'activity': loadActivity(); break;
     case 'usage': loadUsage(); break;
     case 'controls': loadLogs(); break;

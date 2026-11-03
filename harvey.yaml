@@ -82,8 +82,12 @@ channels:
     #   recipient_timezone: true  # false: one zone for everyone (quiet_hours.timezone)
   linkedin:
     enabled: false             # explicit opt-in; credentials alone do not enable it
-    max_daily_connections: 20
-    max_daily_messages: 10
+    max_daily_connections: 15  # connection invites a day (75 a week: max_weekly_invites)
+    max_daily_messages: 25     # first messages, follow-ups and replies a day
+    autopilot: false           # drafts wait on the dashboard's LinkedIn tab until true
+    # Harvey acts on LinkedIn only in these hours, with 60-240 s between actions
+    # and at most 12 an hour. `harvey linkedin login` signs the profile in.
+    # hours: {start: "10:00", end: "19:00", timezone: "Asia/Kolkata", weekdays_only: true}
 
 usage:
   max_daily_claude_percent: 80

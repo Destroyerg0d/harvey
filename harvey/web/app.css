@@ -1115,3 +1115,15 @@ a.btn, a.btn:hover { text-decoration: none; }
 .mbx-frow .bar { grid-column: 1 / -1; height: 6px; }
 .mbx-after { margin-top: var(--sp-3); border-top: 1px solid var(--line); padding-top: 4px; }
 .mbx-after .v small { font-weight: 400; }
+
+/* ── LinkedIn: the queue, conversations and limits ───────────── */
+
+.li-item .convo-head { margin-bottom: var(--sp-3); }
+.li-item .convo-head h3 a { color: inherit; }
+.li-body { font-size: var(--fs-body); line-height: 1.6; white-space: pre-wrap; max-width: 66ch; overflow-wrap: anywhere; }
+.li-why { font-size: var(--fs-caption); color: var(--wait); margin: 0 0 var(--sp-2); overflow-wrap: anywhere; }
+.li-why.bad { color: var(--bad); }
+.li-edit { width: 100%; }
+#li-convos .convo-card, #li-queue .convo-card { margin-bottom: var(--sp-3); }
+#li-due .figure .k { min-width: 0; overflow-wrap: anywhere; }
+#li-limits .figure .v { text-align: right; }

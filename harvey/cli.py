@@ -1304,6 +1304,10 @@ def main():
                           "or show the status (default)")
     sub.set_defaults(func=cmd_trulyinbox)
 
+    # harvey linkedin login|import|status|pause|resume|run (harvey/linkedin/cli.py)
+    from harvey.linkedin.cli import add_parser as add_linkedin_parser
+    add_linkedin_parser(subparsers)
+
     # harvey usage
     sub = subparsers.add_parser("usage", help="Show brain usage and quota (Claude or Codex)")
     sub.add_argument("--days", type=int, default=30, help="Breakdown window (default: 30)")
