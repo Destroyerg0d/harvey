@@ -1127,3 +1127,27 @@ a.btn, a.btn:hover { text-decoration: none; }
 #li-convos .convo-card, #li-queue .convo-card { margin-bottom: var(--sp-3); }
 #li-due .figure .k { min-width: 0; overflow-wrap: anywhere; }
 #li-limits .figure .v { text-align: right; }
+
+/* ── Learning: lessons from results, outcomes, subject tests ─── */
+
+#lrn-proposals .sig-group-head, #lrn-active .sig-group-head { margin-bottom: var(--sp-2); }
+#lrn-proposals .sig-row .sig-label, #lrn-active .sig-row .sig-label { font-weight: 500; max-width: 72ch; text-wrap: pretty; }
+#lrn-proposals .card.flush, #lrn-active .card.flush { margin-bottom: var(--sp-5); }
+.lrn-note { font-size: var(--fs-ui); color: var(--text-2); margin-top: var(--sp-2); max-width: 72ch; text-wrap: pretty; }
+.lrn-empty { margin-bottom: var(--sp-5); }
+.lrn-decided { margin: 0 0 var(--sp-5); }
+.lrn-decided summary { font-size: var(--fs-ui); color: var(--text-2); font-weight: 500; cursor: pointer; padding: var(--sp-1) 0 var(--sp-2); }
+.lrn-decided .card.flush { margin-bottom: 0; }
+.lrn-filters { display: flex; gap: var(--sp-3); flex-wrap: wrap; margin-bottom: var(--sp-3); }
+.lrn-filter { display: flex; flex-direction: column; gap: 4px; font-size: var(--fs-caption); color: var(--text-3); min-width: 140px; }
+.lrn-filter .form-input { height: 32px; padding-top: 0; padding-bottom: 0; }
+.lrn-table td { white-space: nowrap; vertical-align: top; }
+.lrn-table th, .lrn-table td { padding-left: 12px; padding-right: 12px; }
+.lrn-table tfoot td { font-weight: 600; border-top: 1px solid var(--line-strong); }
+.lrn-variant { display: flex; flex-direction: column; gap: 4px; padding: 8px 0; }
+.lrn-variant + .lrn-variant { border-top: 1px solid var(--line); }
+.lrn-variant .k { font-size: var(--fs-ui); color: var(--text); font-weight: 500; overflow-wrap: anywhere; }
+.lrn-sides { display: flex; gap: var(--sp-4); flex-wrap: wrap; font-size: var(--fs-ui); color: var(--text-2); }
+.lrn-side b { color: var(--text); font-family: var(--mono); font-weight: 500; margin-right: 2px; }
+.lrn-variant .lrn-note { margin-top: 0; font-size: var(--fs-caption); color: var(--text-3); }
+@media (max-width: 640px) { .lrn-filter { min-width: 0; flex: 1 1 120px; } }

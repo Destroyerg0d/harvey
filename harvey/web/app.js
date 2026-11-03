@@ -420,6 +420,7 @@ function loadCurrentTab() {
     case 'conversations': loadConversations(); break;
     case 'mailboxes': loadMailboxes(); break;
     case 'linkedin': loadLinkedIn(); break;
+    case 'learning': loadLearning(); break;
     case 'activity': loadActivity(); break;
     case 'usage': loadUsage(); break;
     case 'settings': loadSettings(); loadSendingModeCard(); break;
@@ -444,6 +445,7 @@ async function loadToday() {
   navCount('nav-outbox', (data.stats || {}).outbox_pending || 0);
   navCount('nav-signals', (data.stats || {}).signals_proposed || 0);
   navCount('nav-conversations', (data.stats || {}).needs_human || 0);
+  navCount('nav-learning', (data.stats || {}).lessons_proposed || 0);
   _todayStats = data.stats || {};
   renderFigures(_todayStats);
 
@@ -3371,6 +3373,295 @@ async function liSetMode(mode) {
   loadLinkedIn();
 }
 
+// ── Learning: lessons from results, for you to approve (harvey/lessons.py) ──
+
+let _lrn = null, _lrnOut = null, _lrnBusy = false;
+const _lrnFilter = {channel: '', segment: '', step: ''};
+const LRN_KIND = {writing: 'Writing', subject: 'Subject lines', linkedin: 'LinkedIn',
+  targeting: 'Targeting', segment_mix: 'Segment mix'};
+const LRN_SEGMENT = {shopify: 'Shopify', wordpress: 'WordPress', custom: 'Custom', other: 'Other',
+  unknown: 'Unknown'};
+const LRN_SHOWN_ROWS = 200;
+
+async function loadLearning() {
+  const q = new URLSearchParams(Object.entries(_lrnFilter).filter(([, v]) => v)).toString();
+  const [lessons, outcomes] = await Promise.all([
+    api('/api/lessons'), api('/api/learning' + (q ? '?' + q : ''))]);
+  if (currentTab !== 'learning' || _lrnBusy) return;
+  renderLearning(lessons, outcomes);
+}
+
+function lrnEl(id, html) { const el = document.getElementById(id); if (el) el.innerHTML = html; }
+
+function renderLearning(lessons, outcomes) {
+  if (!lessons || lessons.error) {
+    ['lrn-banner', 'lrn-active', 'lrn-run'].forEach(id => lrnEl(id, ''));
+    lrnEl('lrn-proposals', !lessons ? offlineState()
+      : emptyState(icon('alert'), 'Couldn’t read the lessons', escHtml(lessons.error)));
+    return;
+  }
+  _lrn = lessons;
+  navCount('nav-learning', (lessons.summary || {}).proposed || 0);
+  lrnEl('lrn-banner', lrnBannerHtml(lessons));
+  lrnEl('lrn-proposals', lrnProposalsHtml(lessons));
+  lrnEl('lrn-active', lrnActiveHtml(lessons));
+  lrnEl('lrn-run', lrnRunHtml(lessons));
+  if (!outcomes || outcomes.error) {
+    lrnEl('lrn-outcomes', !outcomes ? offlineState()
+      : emptyState(icon('alert'), 'Couldn’t read the outcomes', escHtml(outcomes.error)));
+    return;
+  }
+  _lrnOut = outcomes;
+  lrnEl('lrn-filters', lrnFiltersHtml(outcomes));
+  lrnEl('lrn-outcomes', lrnOutcomesHtml(outcomes));
+  lrnEl('lrn-variants', lrnVariantsHtml(outcomes.subject_variants || []));
+  lrnEl('lrn-mix', lrnMixHtml(outcomes));
+  const when = document.getElementById('lrn-when');
+  if (when) when.textContent = 'last ' + (outcomes.days || 30) + ' days' +
+    (outcomes.generated_at ? ' · ' + (outcomes.source === 'analyst' ? 'from the Analyst ' : 'built ') +
+      relTime(outcomes.generated_at) : '');
+}
+
+function lrnMinimums(m) {
+  m = m || {};
+  return 'A lesson needs ' + (m.sends_per_side || 40) + ' sends on each side of a comparison and ' +
+    (m.human_replies || 3) + ' replies from people between them. Segment mix and targeting need ' +
+    (m.segment_sends || 100) + ' sends in each segment, and a lesson from your edits needs ' +
+    (m.owner_edits || 3) + ' of them. At most ' + (m.max_lessons || 5) + ' a day, from the last ' +
+    (m.window_days || 30) + ' days.';
+}
+
+function lrnBannerHtml(d) {
+  const n = (d.proposed || []).length;
+  if (!n) return '';
+  return '<div class="banner wait">' + icon('flag') + '<div><b>' + n + ' lesson' + (n === 1 ? '' : 's') +
+    ' waiting for you</b><p>Approving one adds it to every prompt it applies to, from the next draft on. ' +
+    'It never overrides the email rules or the verified-claims rule. Subject lessons are only ever ' +
+    'proposals: read their sample size before you approve one.</p></div></div>';
+}
+
+function lrnShare(v) { return Math.round(Number(v || 0) * 100) + '%'; }
+
+function lrnWeights(w) {
+  return Object.entries(w || {}).map(([k, v]) => escHtml(LRN_SEGMENT[k] || k) + ' ' + lrnShare(v)).join(', ');
+}
+
+function lrnEvidenceHtml(lesson, current) {
+  const e = lesson.evidence || {};
+  const chips = [];
+  if (e.source === 'owner_edits') {
+    chips.push('<span class="cost-chip">from ' + mbxNum(e.edits) + ' of your edits</span>');
+  }
+  (e.cells || []).forEach(c => {
+    const dim = String(c.dimension || '');
+    const value = dim === 'segment' ? (LRN_SEGMENT[c.value] || c.value) : c.value;
+    let label = String(c.response_label || 'replies');
+    if (Number(c.responses) === 1) label = label.replace(/^replies/, 'reply');
+    chips.push('<span class="cost-chip">' + escHtml((c.channel === 'linkedin' ? 'LinkedIn ' : '') + dim + ' ' +
+      value + ': ' + Number(c.sent || 0).toLocaleString() + ' sent, ' +
+      Number(c.responses || 0).toLocaleString() + ' ' + label +
+      (c.positive ? ', ' + Number(c.positive).toLocaleString() + ' positive' : '')) + '</span>');
+  });
+  if (e.weights && lesson.status === 'proposed') {
+    chips.push('<span class="cost-chip paid">proposed mix: ' + lrnWeights(e.weights) + '</span>');
+    chips.push('<span class="cost-chip">now: ' + (current ? lrnWeights(current) : 'the config’s mix') + '</span>');
+  } else if (e.weights) {
+    chips.push('<span class="cost-chip">mix: ' + lrnWeights(e.weights) + '</span>');
+  }
+  const note = e.note ? '<div class="lrn-note">' + escHtml(e.note) + '</div>' : '';
+  return (chips.length ? '<div class="sig-meta">' + chips.join('') + '</div>' : '') + note;
+}
+
+function lrnLessonRow(lesson, decide, current) {
+  const when = lesson.status === 'proposed'
+    ? 'proposed ' + relTime(lesson.created_at)
+    : (lesson.status === 'active' ? 'approved ' : lesson.status + ' ') + relTime(lesson.decided_at);
+  return '<div class="sig-row' + (lesson.status === 'rejected' || lesson.status === 'retired' ? ' rejected' : '') + '">' +
+    '<div class="sig-main">' +
+      '<div class="sig-label">' + escHtml(lesson.text) + '</div>' +
+      '<div class="sig-meta"><span class="tag accent">' + escHtml(LRN_KIND[lesson.kind] || lesson.kind) + '</span>' +
+        '<span class="cost-chip">' + escHtml(when) + '</span>' +
+        '<span class="sig-code">' + escHtml(lesson.id) + '</span></div>' +
+      lrnEvidenceHtml(lesson, current) +
+    '</div>' +
+    '<div class="sig-decide">' + decide + '</div>' +
+  '</div>';
+}
+
+function lrnProposalsHtml(d) {
+  const rows = d.proposed || [];
+  if (!rows.length) {
+    return '<div class="card">' + emptyState(icon('sparkle'), 'Nothing waiting for you',
+      'The learner proposes lessons once a day, when the results are big enough to mean something. ' +
+      escHtml(lrnMinimums(d.minimums))) + '</div>';
+  }
+  const ids = escHtml(JSON.stringify(rows.map(r => r.id)));
+  const head = rows.length > 1
+    ? '<div class="sig-group-head"><div><p>Approve or reject each one, or all ' + rows.length +
+        ' at once. Only undecided lessons are changed.</p></div>' +
+      '<div style="display:flex;gap:6px;flex-shrink:0">' +
+        '<button class="btn btn-primary btn-sm" onclick="setLessons(' + ids + ', \'active\', this)">Approve all ' +
+          rows.length + '</button>' +
+        '<button class="btn btn-secondary btn-sm" onclick="setLessons(' + ids + ', \'rejected\', this)">Reject all ' +
+          rows.length + '</button></div></div>'
+    : '';
+  return head + '<div class="card flush">' + rows.map(r => lrnLessonRow(r,
+    '<button class="btn btn-primary btn-sm" onclick="setLessons([' + jsq(r.id) + '], \'active\', this)">Approve</button>' +
+    '<button class="btn btn-secondary btn-sm" onclick="setLessons([' + jsq(r.id) + '], \'rejected\', this)">Reject</button>',
+    d.segment_weights)).join('') + '</div>';
+}
+
+function lrnActiveHtml(d) {
+  const rows = d.active || [];
+  const decided = d.decided || [];
+  const earlier = decided.length
+    ? '<details class="lrn-decided"><summary>Decided earlier (' + decided.length + ')</summary>' +
+        '<div class="card flush">' + decided.map(r => lrnLessonRow(r, badge(r.status), d.segment_weights)).join('') +
+      '</div></details>'
+    : '';
+  if (!rows.length) {
+    return '<div class="card muted lrn-empty">No active lessons. Harvey writes from its rules and playbook alone.</div>' + earlier;
+  }
+  return '<div class="card flush">' + rows.map(r => lrnLessonRow(r,
+    '<button class="btn btn-secondary btn-sm" onclick="setLessons([' + jsq(r.id) + '], \'retired\', this)">Retire</button>',
+    d.segment_weights)).join('') + '</div>' + earlier;
+}
+
+function lrnFiltersHtml(o) {
+  const opts = o.options || {};
+  const select = (key, label, values, name) => '<label class="lrn-filter"><span>' + label + '</span>' +
+    '<select class="form-input" onchange="lrnSetFilter(' + jsq(key) + ', this.value)">' +
+      '<option value="">All</option>' + (values || []).map(v => '<option value="' + escHtml(v) + '"' +
+        (_lrnFilter[key] === v ? ' selected' : '') + '>' + escHtml(name ? name(v) : v) + '</option>').join('') +
+    '</select></label>';
+  return '<div class="lrn-filters">' +
+    select('channel', 'Channel', opts.channels, v => v === 'linkedin' ? 'LinkedIn' : v === 'email' ? 'Email' : v) +
+    select('segment', 'Segment', opts.segments, v => LRN_SEGMENT[v] || v) +
+    select('step', 'Step', opts.steps, v => /^\d+$/.test(v) ? 'Step ' + v : v) +
+  '</div>';
+}
+
+function lrnSetFilter(key, value) {
+  _lrnFilter[key] = value || '';
+  loadLearning();
+}
+
+function lrnOutcomesHtml(o) {
+  const rows = (o.rows || []).slice().sort((a, b) => (b.sent || 0) - (a.sent || 0));
+  if (!rows.length) {
+    return '<div class="card">' + emptyState(icon('usage'), 'No results yet',
+      'Once emails and LinkedIn messages go out, what came back to each kind shows up here.') + '</div>';
+  }
+  const shown = rows.slice(0, LRN_SHOWN_ROWS);
+  const num = v => '<td class="num">' + mbxNum(v || 0) + '</td>';
+  const rate = (n, of) => of ? ' <span class="muted">· ' + mbxPct(n / of) + '</span>' : '';
+  const body = shown.map(r => {
+    const li = r.channel === 'linkedin';
+    return '<tr>' +
+      '<td>' + (li ? 'LinkedIn' : 'Email') + '</td>' +
+      '<td>' + escHtml(li ? '' : (LRN_SEGMENT[r.segment] || r.segment || '')) + '</td>' +
+      '<td>' + escHtml(r.angle || (li ? '' : 'none')) + '</td>' +
+      '<td>' + escHtml(String(r.step === undefined || r.step === null ? '' : r.step)) + '</td>' +
+      '<td>' + escHtml(r.mailbox || '') + '</td>' +
+      '<td>' + escHtml(r.country || '') + '</td>' +
+      num(r.sent) +
+      '<td class="num">' + mbxNum(r.human_replies || 0) + rate(r.human_replies || 0, r.sent) +
+        (li && r.accepted ? '<div class="cell-sub">' + mbxNum(r.accepted) + ' accepted</div>' : '') + '</td>' +
+      num(r.positive) + num(r.not_interested) + num(r.opt_outs) + num(r.bounces) +
+    '</tr>';
+  }).join('');
+  const t = o.totals || {};
+  return '<div class="table-card"><table class="lrn-table"><thead><tr>' +
+    '<th>Channel</th><th>Segment</th><th>Angle or kind</th><th>Step</th><th>Mailbox</th><th>Country</th>' +
+    '<th class="num">Sent</th><th class="num">Replies</th><th class="num">Positive</th>' +
+    '<th class="num">Not interested</th><th class="num">Opt-outs</th><th class="num">Bounces</th>' +
+    '</tr></thead><tbody>' + body + '</tbody><tfoot><tr><td colspan="6">All shown</td>' +
+    num(t.sent) + '<td class="num">' + mbxNum(t.human_replies || 0) + rate(t.human_replies || 0, t.sent) + '</td>' +
+    num(t.positive) + num(t.not_interested) + num(t.opt_outs) + num(t.bounces) +
+    '</tr></tfoot></table></div>' +
+    '<p class="table-foot">Replies are from people: out-of-office notes and helpdesk acknowledgements never count. ' +
+    'A reply counts for the email it answers. LinkedIn rows count invites by acceptance and messages by the reply ' +
+    'that answered them.' + (rows.length > shown.length ? ' Showing the ' + shown.length + ' most-sent of ' +
+      rows.length + ' rows; filter to see the rest.' : '') + '</p>';
+}
+
+function lrnVariantsHtml(variants) {
+  if (!variants.length) return '<p class="muted">No first emails with a subject variant sent yet.</p>';
+  return '<div class="figures">' + variants.slice(0, 6).map(v => {
+    const side = (k, s) => '<span class="lrn-side"><b>' + k + '</b> ' + mbxNum(s.sent) + ' sent, ' +
+      mbxNum(s.human_replies) + ' repl' + (s.human_replies === 1 ? 'y' : 'ies') + '</span>';
+    return '<div class="lrn-variant"><div class="k">' + escHtml(v.campaign || 'No campaign') + '</div>' +
+      '<div class="lrn-sides">' + side('a', v.a || {}) + side('b', v.b || {}) + '</div>' +
+      '<div class="lrn-note">' + escHtml((v.progress || {}).note || '') + '</div></div>';
+  }).join('') + '</div><p class="figure-note">A subject lesson is only ever a proposal: at about a reply a day, ' +
+    'a real winner takes thousands of sends per variant.</p>';
+}
+
+function lrnMixHtml(o) {
+  const sends = o.segment_sends || {};
+  const weights = o.segment_weights;
+  const total = Object.values(sends).reduce((a, b) => a + (Number(b) || 0), 0);
+  const keys = [...new Set([...Object.keys(sends), ...Object.keys(weights || {})])]
+    .sort((a, b) => (sends[b] || 0) - (sends[a] || 0));
+  if (!keys.length) return '<p class="muted">No first emails sent in the last ' + (o.days || 30) + ' days.</p>';
+  return '<div class="figures">' + keys.map(k => '<div class="figure"><span class="k">' +
+      escHtml(LRN_SEGMENT[k] || k) + '</span><span class="v">' + mbxNum(sends[k] || 0) +
+      ' <small class="muted">' + (total ? lrnShare((sends[k] || 0) / total) : '') +
+      (weights && weights[k] !== undefined ? ' · target ' + lrnShare(weights[k]) : '') + '</small></span></div>').join('') +
+    '</div><p class="figure-note">Emails sent per segment in the last ' + (o.days || 30) + ' days' +
+    (weights ? ', against the mix from the segment-mix lesson you approved.'
+      : '. The mix in force is the config’s; approving a segment-mix lesson replaces it.') + '</p>';
+}
+
+function lrnRunHtml(d) {
+  const run = d.last_run;
+  const status = {proposed: ['Proposed lessons', 'good'], nothing_new: ['Nothing new', 'idle'],
+    not_enough_data: ['Not enough data yet', 'waiting'], failed: ['Failed', 'bad']};
+  const s = run ? (status[run.status] || [run.status || 'unknown', 'idle']) : null;
+  return (run
+    ? '<div class="figures"><div class="figure"><span class="k">When</span><span class="v">' +
+        (run.at ? '<span title="' + escHtml(formatDate(run.at)) + '">' + relTime(run.at) + '</span>' : '&ndash;') +
+        '</span></div><div class="figure"><span class="k">Result</span><span class="v">' +
+        '<span class="badge t-' + s[1] + '">' + escHtml(s[0]) + '</span></span></div></div>' +
+      '<p class="lrn-note">' + escHtml(run.note || '') + '</p>' +
+      (run.model_note ? '<p class="figure-note">What it saw: ' + escHtml(run.model_note) + '</p>' : '')
+    : '<p class="muted">The learner hasn’t run yet. It runs once a day while Harvey runs; ' +
+      '<code>harvey lessons --run</code> runs it now.</p>') +
+    '<p class="figure-note">' + escHtml(lrnMinimums(d.minimums)) + '</p>';
+}
+
+async function setLessons(ids, status, btn) {
+  if (_lrnBusy) return;
+  _lrnBusy = true;
+  if (btn) btn.disabled = true;
+  try {
+    const res = await api('/api/lessons/status', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ids: ids, status: status}),
+    });
+    if (res && res.success) {
+      const n = (res.changed || []).length;
+      const refused = Object.values(res.refused || {});
+      const done = {active: n + ' approved. Harvey uses ' + (n === 1 ? 'it' : 'them') + ' from the next draft on.',
+        rejected: n + ' rejected.', retired: n + ' retired. ' + (n === 1 ? 'It leaves' : 'They leave') +
+          ' the prompts now.'}[status];
+      showToast((n ? done : 'Nothing changed.') +
+        (refused.length ? ' ' + refused.length + ' not changed: ' + refused[0] + '.' : ''),
+        n ? 'success' : 'error');
+    } else {
+      showToast(failMsg(res, 'Couldn’t change that lesson.'), 'error');
+    }
+  } finally {
+    _lrnBusy = false;
+  }
+  loadLearning();
+}
+
+// The Learning tab refreshes itself every 20 seconds while it is open.
+setInterval(() => {
+  if (!document.hidden && !_locked && currentTab === 'learning') loadLearning();
+}, 20000);
+
 // ── Init & live refresh ──
 
 loadToday();
@@ -3399,6 +3690,7 @@ setInterval(async () => {
   if (!data) return;
   navCount('nav-today', (data.items || []).filter(i => i.tone !== 'good').length);
   navCount('nav-outbox', (data.stats || {}).outbox_pending || 0);
+  navCount('nav-learning', (data.stats || {}).lessons_proposed || 0);
 }, 20000);
 
 // Data tabs: auto-refresh live views without clobbering anything in progress.

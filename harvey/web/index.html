@@ -77,6 +77,7 @@
       <button onclick="showTab('conversations', this)"><svg class="icon" aria-hidden="true"><use href="#i-conversations"/></svg><span class="label">Conversations</span><span class="nav-count" id="nav-conversations"></span></button>
       <button onclick="showTab('mailboxes', this)"><svg class="icon" aria-hidden="true"><use href="#i-mailboxes"/></svg><span class="label">Mailboxes</span></button>
       <button onclick="showTab('linkedin', this)"><svg class="icon" aria-hidden="true"><use href="#i-network"/></svg><span class="label">LinkedIn</span><span class="nav-count" id="nav-linkedin"></span></button>
+      <button onclick="showTab('learning', this)"><svg class="icon" aria-hidden="true"><use href="#i-sparkle"/></svg><span class="label">Learning</span><span class="nav-count" id="nav-learning"></span></button>
     </div>
     <div class="nav-group">
       <div class="nav-label">Pipeline</div>
@@ -343,6 +344,41 @@
       <div class="card" id="li-limits"></div>
       <div class="subhead">Autopilot</div>
       <div id="li-mode"></div>
+    </aside>
+  </div>
+</div>
+
+<!-- Learning: lessons from results, for you to approve (harvey/lessons.py) -->
+<div id="learning" class="section">
+  <div class="section-head">
+    <div>
+      <h2>Learning</h2>
+      <p>Once a day Harvey reads how its emails and LinkedIn messages did and proposes lessons for
+         future writing and targeting. Nothing changes until you approve a lesson, and an approved
+         one never overrides the email rules or the verified-claims rule.</p>
+    </div>
+  </div>
+  <div id="lrn-banner"></div>
+
+  <div class="subhead">Proposals <span class="hint">what the results suggest, with the evidence behind each</span></div>
+  <div id="lrn-proposals"></div>
+
+  <div class="subhead">Active lessons <span class="hint">in every prompt they apply to</span></div>
+  <div id="lrn-active"></div>
+
+  <div class="grid-main mbx-lower">
+    <div>
+      <div class="subhead">Outcomes <span class="hint" id="lrn-when"></span></div>
+      <div id="lrn-filters"></div>
+      <div id="lrn-outcomes"></div>
+    </div>
+    <aside>
+      <div class="subhead">Subject variants</div>
+      <div class="card" id="lrn-variants"></div>
+      <div class="subhead">Segment mix</div>
+      <div class="card" id="lrn-mix"></div>
+      <div class="subhead">Last learner run</div>
+      <div class="card" id="lrn-run"></div>
     </aside>
   </div>
 </div>

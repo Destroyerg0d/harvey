@@ -2388,6 +2388,11 @@ async def get_today():
         from harvey.linkedin.web import today_items as linkedin_today_items
         items.extend(await linkedin_today_items(state))
 
+        # Lessons from results waiting for you (harvey/lessons.py).
+        from harvey.lessons import count_lessons, today_items as lesson_today_items
+        items.extend(await lesson_today_items(state))
+        stats["lessons_proposed"] = await count_lessons(state, "proposed")
+
         return {"items": items, "stats": stats}
     except Exception as e:
         logger.exception("today load failed")
@@ -2689,6 +2694,138 @@ async def get_runs_api():
         return runs
     except Exception as e:
         return {"error": str(e)}
+
+
+# ── Learning: lessons from results; the owner decides each (harvey/lessons.py) ──
+
+LESSON_DECISIONS = ("active", "rejected", "retired")
+LINKEDIN_CELL_LABELS = {
+    "invite:note": ("invite with a note", "invite"), "invite:no_note": ("invite, no note", "invite"),
+    "message:first": ("first message", "1"), "message:follow_up": ("follow-up", "2"),
+    "message:reply": ("reply to them", "reply"),
+}
+
+
+@app.get("/api/lessons")
+async def get_lessons():
+    """Proposals waiting for you, active lessons and recent decisions, with
+    the learner's last run and its data minimums."""
+    try:
+        from harvey import lessons
+        from harvey.agents.learner import MINIMUMS, last_run
+        state = _state()
+        await state.init_db()
+        rows = await lessons.list_lessons(state, limit=500)
+        summary = dict.fromkeys(lessons.STATUSES, 0)
+        for r in rows:
+            summary[r["status"]] = summary.get(r["status"], 0) + 1
+        return {
+            "proposed": [r for r in rows if r["status"] == "proposed"],
+            "active": [r for r in rows if r["status"] == "active"],
+            "decided": [r for r in rows if r["status"] in ("rejected", "retired")][:20],
+            "summary": summary, "kinds": lessons.KIND_LABELS,
+            "last_run": await last_run(state), "minimums": MINIMUMS,
+            "segment_weights": await lessons.current_weights(state),
+        }
+    except Exception as e:
+        logger.exception("lessons load failed")
+        return {"error": str(e), "proposed": [], "active": [], "decided": [], "summary": {}}
+
+
+@app.post("/api/lessons/status")
+async def set_lessons_status(request: Request):
+    """Approve (active), reject or retire lessons: {ids, status}. Each moves
+    only along its lifecycle (proposed -> active | rejected, active ->
+    retired); the rest come back in ``refused`` with the reason."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    body = body if isinstance(body, dict) else {}
+    status = str(body.get("status") or "").strip()
+    ids = body.get("ids") or ([body["id"]] if body.get("id") else [])
+    if status not in LESSON_DECISIONS:
+        return JSONResponse({"success": False, "message": f"invalid status: {status!r}"},
+                            status_code=400)
+    if (not isinstance(ids, list) or not ids or len(ids) > 200
+            or any(not isinstance(i, str) or len(i) > 64 for i in ids)):
+        return JSONResponse({"success": False, "message": "give the lesson ids to change"},
+                            status_code=400)
+    try:
+        from harvey import lessons
+        state = _state()
+        await state.init_db()
+        result = await lessons.set_status(state, ids, status, by="you")
+        return {"success": True, "status": status, **result}
+    except Exception as e:
+        return JSONResponse({"success": False, "message": str(e)}, status_code=500)
+
+
+@app.get("/api/learning")
+async def get_learning(channel: str = "", segment: str = "", step: str = ""):
+    """The outcome table for the Learning tab, filterable by channel, segment
+    and step: data/outcomes.json when the Analyst has written it, else built
+    now, with LinkedIn's rows beside it. Plus subject variants per campaign
+    (and how far each test is from meaning anything), sends per segment
+    against the mix in force, and the learner's last run. Read-only."""
+    try:
+        from harvey import lessons
+        from harvey.agents import learner
+        from harvey.outcomes import COUNTS, OUTCOMES_FILE, build_outcomes
+        state = _state()
+        await state.init_db()
+        report = None
+        path = DB_PATH.parent / OUTCOMES_FILE
+        if path.exists():
+            try:
+                report = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                report = None
+        if isinstance(report, dict) and isinstance(report.get("rows"), list):
+            rows, generated, source = report["rows"], report.get("generated_at"), "analyst"
+        else:
+            rows = await build_outcomes(state, days=learner.WINDOW_DAYS)
+            generated, source = datetime.now(timezone.utc).replace(tzinfo=None).isoformat(), "live"
+        rows = [dict(r) for r in rows if isinstance(r, dict)]
+        li = await learner.linkedin_outcomes(state)
+        for cell in li.get("cells", []):
+            label, li_step = LINKEDIN_CELL_LABELS.get(f"{cell['dimension']}:{cell['value']}",
+                                                      (cell["value"], ""))
+            rows.append({"channel": "linkedin", "segment": "", "angle": label, "step": li_step,
+                         "mailbox": "", "country": "", **dict.fromkeys(COUNTS, 0),
+                         "sent": cell["sent"], "human_replies": cell["human_replies"],
+                         "positive": cell["positive"], "accepted": cell.get("accepted", 0)})
+        options = {
+            "channels": sorted({str(r.get("channel") or "") for r in rows} - {""}),
+            "segments": sorted({str(r.get("segment") or "") for r in rows} - {""}),
+            "steps": sorted({str(r.get("step")) for r in rows if r.get("step") not in (None, "")},
+                            key=lambda s: (not s.isdigit(), s.zfill(4))),
+        }
+        shown = [r for r in rows
+                 if (not channel or str(r.get("channel")) == channel)
+                 and (not segment or str(r.get("segment")) == segment)
+                 and (not step or str(r.get("step")) == step)]
+        totals = {k: sum(int(r.get(k) or 0) for r in shown) for k in (*COUNTS, "accepted")}
+        by_segment: dict[str, int] = {}
+        for r in rows:
+            if r.get("channel") == "email":
+                seg = str(r.get("segment") or "unknown")
+                by_segment[seg] = by_segment.get(seg, 0) + int(r.get("sent") or 0)
+        return {
+            "rows": shown, "totals": totals, "options": options,
+            "filters": {"channel": channel, "segment": segment, "step": step},
+            "generated_at": generated, "source": source,
+            "days": (report or {}).get("days", learner.WINDOW_DAYS) if source == "analyst"
+            else learner.WINDOW_DAYS,
+            "subject_variants": await learner.subject_variants(state),
+            "segment_sends": by_segment,
+            "segment_weights": await lessons.current_weights(state),
+            "linkedin_funnel": li.get("funnel") or {},
+            "last_run": await learner.last_run(state), "minimums": learner.MINIMUMS,
+        }
+    except Exception as e:
+        logger.exception("learning load failed")
+        return {"error": str(e), "rows": [], "options": {}}
 
 
 WEB_DIR = (Path(__file__).resolve().parent / "web")
