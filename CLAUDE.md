@@ -50,7 +50,7 @@ People will ask "how does this work?" — explain it simply:
 
 - **"Can it use ChatGPT / Codex instead of Claude?"** → Yes, opt-in. Install Codex CLI 0.159.3 (`npm install -g @openai/codex@0.159.3`; other versions are refused), run `codex login` with ChatGPT, and set `brain: { provider: codex, model: gpt-5.5 }` in harvey.yaml (or choose codex in `harvey setup`, which suggests gpt-5.5, or `harvey train <url> --provider codex --model gpt-5.5`). gpt-5.5 is the verified text-only model; a blank model fails on current accounts because the live catalog hides it, and code-mode models are refused. Claude stays the default; Harvey never switches providers on its own. Each Codex call runs isolated with no tools — see "Using a ChatGPT plan instead (Codex)" in the README. macOS and Linux only; on Windows, Codex is refused, so use Claude. Don't edit the user's own `~/.codex` config to make it work.
 
-- **"What's the dashboard?"** → Have the user run `harvey dashboard` in their own terminal and open the private link it prints (`http://127.0.0.1:5555/#token=…`; `harvey dashboard --url` prints it again). Don't read, print or repeat the token yourself: it unlocks the dashboard. It opens on **Today** — anything waiting on a decision, then the pipeline. Tabs for Signals, Companies, Contacts, Campaigns, Outbox, Conversations, Mailboxes (sending health and results per mailbox and domain), Activity, Usage, Settings.
+- **"What's the dashboard?"** → Have the user run `harvey dashboard` in their own terminal and open the private link it prints (`http://127.0.0.1:5555/#token=…`; `harvey dashboard --url` prints it again). Don't read, print or repeat the token yourself: it unlocks the dashboard. It opens on **Today** — anything waiting on a decision, then the pipeline. Tabs for Signals, Companies, Contacts, Campaigns, Outbox, Conversations, Mailboxes (sending health and results per mailbox, domain and segment), LinkedIn (funnel, drafts to approve, caps, pauses), Learning (lessons to approve, outcomes), Activity, Usage, Settings.
 
 - **"What are signals?"** → Signals are the facts Harvey collects about a business: who its current agency is, whether it's running ads, whether it has online booking, how it ranks. **Harvey proposes; you confirm.** Nothing is collected until the user says yes on the Signals tab (or `harvey signals --confirm ...`). That keeps spend intentional and makes every prospect list explainable — a cohort is a query over signals a human chose, not a black box.
 
@@ -326,6 +326,8 @@ Users will come back with questions and tasks. Common ones:
 - **Sender**: Native providers (gmail/smtp) render merge vars per prospect and STAGE each email into the `outbox` (pending_review → approved → sent) with a scheduled send time; each heartbeat drains due, approved items with human-like pacing, the daily cap, the deterministic pre-send gate, and stop-on-reply (a reply from anyone at a company stops the sequence to everyone there). Legacy Instantly path deploys campaigns via API. Enforces daily send limits either way.
 - **Handler**: Polls the provider (or Instantly) for replies, dedups them, classifies intent, advances conversation stage, and queues auto-responses through the same outbox approval ladder. On native providers it also detects bounces → marks the address invalid, cancels the prospect's queued sends, and trips a global kill switch past a bounce-rate threshold.
 - **Analyst**: Runs on idle cycles. Generates `data/analytics.json` with pipeline stats and insights, and `data/outcomes.json`: sent, human replies, positive, no's, opt-outs and bounces per segment, angle, step, mailbox and country (`harvey/outcomes.py`).
+- **Learner**: Once a day, proposes lessons from the outcome table, the user's edits to drafts and LinkedIn results (`harvey/agents/learner.py`). Nothing is proposed below its data minimum, and nothing is used until the user approves it on the Learning tab (or `harvey lessons --approve ID`). Don't approve lessons yourself.
+- **LinkedIn** (`harvey/linkedin/`, `channels.linkedin`, off by default): invites, messages, follow-ups and replies through a dedicated Chrome profile the user signs in to with `harvey linkedin login` (never handle their password or 2FA code). Automating an account is against LinkedIn's terms; say so, keep the low caps and the 48-hour pause on any warning, and leave LinkedIn autopilot off until the user turns it on.
 
 ### Conversation Stages
 `initial_outreach → engaged → qualifying → presenting → negotiating → closing → closed_won / closed_lost`
@@ -353,6 +355,8 @@ harvey sending pause|resume  # Kill switch for all outbound (--mailbox EMAIL: ju
 harvey replies requeue-auto-acks [--dry-run]  # Put back follow-ups that older auto-replies cancelled
 harvey warmup [domain]       # Sending-domain readiness: SPF/DKIM/DMARC, age, blocklists, ramp, TrulyInbox warmup
 harvey trulyinbox [connect|other]  # Warmup service: connect TrulyInbox, or record another service
+harvey linkedin login|run|status|pause|resume|import  # LinkedIn: the user signs in; run --once [--dry-run]
+harvey lessons [--approve|--reject|--retire ID] [--run]  # Lessons the learner proposed
 ```
 
 ### Common Issues

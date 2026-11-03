@@ -645,6 +645,10 @@ harvey retry-writes          # retry prospects the Writer gave up on
 harvey gmail auth            # one-time Gmail OAuth (--mailbox EMAIL: one of several)
 harvey gmail test            # check the Gmail sign-in (every mailbox, or --mailbox EMAIL)
 harvey microsoft auth|test  # one-time Microsoft 365 sign-in (docs/microsoft365.md)
+harvey linkedin login        # sign the dedicated Chrome profile in to LinkedIn yourself
+harvey linkedin run --once   # one LinkedIn session now (--dry-run: read and draft, send nothing)
+harvey linkedin status|pause|resume|import  # caps used, pauses, the kill switch, load a tracker
+harvey lessons               # lessons the learner proposed; --approve/--reject/--retire ID, --run
 ```
 
 ### Several mailboxes

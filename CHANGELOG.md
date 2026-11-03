@@ -9,6 +9,41 @@ minor versions can still change behaviour.
 
 ### Added
 
+- **LinkedIn run by Harvey** (`harvey/linkedin/`, `channels.linkedin`, off by
+  default). Invites, first messages, one follow-up and replies, through a
+  dedicated Chrome profile you sign in to yourself (`harvey linkedin login`;
+  Harvey never sees the password or a 2FA code). Automating an account is
+  against LinkedIn's terms, so the limits are low: 15 invites and 25 messages
+  a day, 75 invites a week, 12 actions an hour, weekdays 10:00 to 19:00 in
+  `channels.linkedin.hours`, 60 to 240 seconds between actions with longer
+  breaks. Any warning, captcha, sign-in challenge or limit notice pauses
+  LinkedIn for 48 hours and says so on the dashboard; invites pending 21 days
+  are withdrawn. Drafts wait for you on the new **LinkedIn** tab until you turn
+  on LinkedIn autopilot there. A no on LinkedIn or by email stops both.
+  `harvey linkedin import` loads an existing tracker (pipeline JSON and sends
+  workbook).
+- **Referrals from "wrong person" replies** (`harvey/referrals.py`). When a
+  reply names who to write to instead, an address at the company's own
+  domain becomes a contact (`source = referral`), graded like any address;
+  only a verified one, or a catch-all on the company's confirmed pattern, is
+  written to. Its first email says who pointed us there and always waits for
+  you in the Outbox, with a note when they are in Canada or Australia, where
+  being referred isn't consent. The company stop that follows leaves the
+  referral out (`stop_company(..., keep=)`). An address anywhere else, or
+  several, goes to you and nothing is sent; a name with no address gets a
+  thank-you asking for one.
+- **Lessons from results, which you approve** (`harvey/agents/learner.py`,
+  `harvey/lessons.py`). Once a day the learner reads the outcome table, your
+  edits to drafts and LinkedIn results and proposes lessons (writing,
+  targeting, segment mix, LinkedIn), each with the evidence recomputed from
+  the data. Nothing is proposed below its minimum (40 sends a side and 3
+  human replies for a comparison, 100 sends a segment for the mix, 3 edits),
+  and a lesson with numbers, links, addresses, names, quotes from replies or
+  new claims is refused. Approved writing lessons go into the Writer's,
+  Handler's and LinkedIn prompts and the leak guard; an approved segment mix
+  replaces `channels.email.segment_weights` until you retire it. New
+  **Learning** tab (proposals, active lessons, outcomes, segment mix) and
+  `harvey lessons [--approve|--reject|--retire ID] [--run]`.
 - **A mix of first emails by segment** (`harvey/segment_mix.py`). Set
   `channels.email.segment_weights` (e.g. `{custom: 0.40, wordpress: 0.35,
   shopify: 0.25}`; empty, the default, keeps queue order) and each drain sends
