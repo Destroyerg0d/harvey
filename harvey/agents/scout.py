@@ -26,6 +26,7 @@ Hardening notes:
 """
 
 import asyncio
+import base64
 import json
 import logging
 import random
@@ -124,6 +125,59 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) "
     "Gecko/20100101 Firefox/122.0",
 ]
+
+# Words too common to show a result is about the query ("Powered by X"
+# "United Kingdom": only X counts). A query of nothing else is checked on
+# all its words.
+_GENERIC_QUERY_WORDS = frozenset({
+    "powered", "created", "built", "made", "with", "from", "that", "this", "your",
+    "online", "shop", "shops", "store", "stores", "company", "companies", "website",
+    "site", "best", "near", "list", "directory", "united", "states", "kingdom",
+    "limited", "copyright", "and", "the", "for",
+})
+_QUERY_WORD_RE = re.compile(r"[a-z0-9][a-z0-9'\-]{2,}")
+
+
+def bing_target(href: str) -> str:
+    """The real URL behind a Bing result link. Bing wraps each result in
+    its own click-tracking link (bing.com/ck/a?...&u=a1<base64 of the URL>);
+    one that can't be read gives "" rather than bing.com."""
+    parsed = urlparse(href or "")
+    host = (parsed.hostname or "").lower()
+    if not (host == "bing.com" or host.endswith(".bing.com")):
+        return href or ""
+    target = (parse_qs(parsed.query).get("u") or [""])[0]
+    if not target.startswith("a1"):
+        return ""
+    encoded = target[2:] + "=" * (-len(target[2:]) % 4)
+    try:
+        url = base64.urlsafe_b64decode(encoded).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return ""
+    return url if url.startswith(("http://", "https://")) else ""
+
+
+def query_terms(query: str) -> set[str]:
+    """The words of a search that a result about it would mention:
+    operators (site:, -word) and generic words left out."""
+    words = set()
+    for token in (query or "").lower().replace('"', " ").split():
+        if ":" in token or token.startswith("-"):
+            continue
+        words.update(_QUERY_WORD_RE.findall(token))
+    distinctive = {w for w in words if w not in _GENERIC_QUERY_WORDS and len(w) >= 4}
+    return distinctive or words
+
+
+def about_the_query(query: str, *texts: str) -> bool:
+    """A result mentions at least one of the query's terms (title, snippet
+    or URL). A blocked search engine answers with unrelated pages."""
+    terms = query_terms(query)
+    if not terms:
+        return True
+    haystack = " ".join(texts).lower()
+    return any(term in haystack for term in terms)
+
 
 # Seniority / title vocabulary reused for ICP heuristics.
 _SENIOR_KEYWORDS = (
@@ -518,18 +572,27 @@ class Scout:
         if soup is None:
             return []
 
-        results = []
+        results, off_topic = [], 0
         for item in soup.select("li.b_algo"):
             link = item.select_one("h2 a")
             snippet_el = item.select_one(".b_caption p")
             if not (link and link.get("href")):
                 continue
-            href = self._attr_str(link.get("href"))
+            href = bing_target(self._attr_str(link.get("href")))
             snippet = snippet_el.get_text().strip() if snippet_el else ""
-            if href.startswith("http"):
-                results.append((href, snippet))
+            if not href.startswith("http"):
+                continue
+            # Bing answers an automated search it distrusts with unrelated
+            # pages: drop any that never mention the query, so they can't
+            # become companies (and the next backend gets its turn).
+            if not about_the_query(query, link.get_text(" "), snippet, href):
+                off_topic += 1
+                continue
+            results.append((href, snippet))
 
-        if results:
+        if off_topic and not results:
+            logger.debug(f"Bing: none of {off_topic} results were about the query")
+        elif results:
             logger.debug(f"Bing returned {len(results)} results")
         return results[:MAX_RESULTS_PER_QUERY]
 

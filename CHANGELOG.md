@@ -401,6 +401,14 @@ minor versions can still change behaviour.
 
 ### Fixed
 
+- **Bing search results are usable again, and junk is dropped.** Bing wraps
+  every result in its own click-tracking link (`bing.com/ck/a?...&u=a1...`),
+  so each hit read as bing.com and was thrown away, and a Bing page counted as
+  a search that worked, so Google was never tried. The real URL is now read
+  back from the link. Bing also answers an automated search it distrusts with
+  unrelated pages; any result that never mentions the query's own words is
+  dropped, so those pages can't become companies, and a page with nothing
+  left hands over to the next backend.
 - **OpenStreetMap discovery survives a bad afternoon** (from #125). A 500, 502 or
   503 from one Overpass mirror now moves on to the next instead of ending the
   search, Overpass gets enough time to get through its queue, and the mirror
