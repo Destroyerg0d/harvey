@@ -20,6 +20,13 @@ minor versions can still change behaviour.
   which custom bounces stayed under 2% with at least 40 sent; over 3% it
   steps back one level. While ramping its share is a ceiling. The level and
   its history are kept in the `segment_ramp` setting.
+- **Samples before a new segment sends** (`channels.email.review_segments`,
+  e.g. `[wordpress, custom]`; empty by default). On autopilot, the first
+  emails of a listed segment don't go straight out: up to three wait in the
+  Outbox as samples ("held for your review: a sample of the first Custom
+  emails") and the rest stay approved but move back six hours at a time. The
+  first one you approve marks the segment reviewed, and its first emails go
+  out on their own from then on.
 - **Segments on the Mailboxes tab**: cold email sent and bounced per segment
   (each bounce against the segment of the email it names), and the mix:
   target, today's share under the ramp, and today's first emails.

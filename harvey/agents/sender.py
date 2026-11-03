@@ -35,6 +35,7 @@ from harvey.mailboxes import (
 )
 from harvey.segment_mix import build_mix, queued_segments, update_ramp, weights_of
 from harvey.segment_stamp import segment_for_company, variant_for
+from harvey.segments import SEGMENT_LABELS
 from harvey.sending_mode import sync_sending_mode
 from harvey.state import (
     AUTOPILOT_OFF_REASON, COLLEAGUE_REPLIED, HAND_SENT_REASON, HELD_FOR_REVIEW,
@@ -76,6 +77,13 @@ SEND_JITTER_SECONDS = (4, 15)
 # pause. And no new check starts after this many seconds of checking in one
 # cycle.
 ADDRESS_RETRY_AFTER = timedelta(hours=6)
+# channels.email.review_segments: until you approve one of a listed
+# segment's first emails (setting SEGMENT_REVIEWED_KEY + segment), up to
+# REVIEW_SAMPLES wait in the Outbox as samples and the rest move back
+# REVIEW_RECHECK at a time, still approved.
+SEGMENT_REVIEWED_KEY = "segment_reviewed:"
+REVIEW_SAMPLES = 3
+REVIEW_RECHECK = timedelta(hours=6)
 DOMAINS_FAILING_TO_PAUSE = 2
 CHECK_SECONDS_PER_CYCLE = 90
 
@@ -946,6 +954,36 @@ class Sender:
             logger.debug(f"Sender: couldn't stamp the outcome fields: {e}")
         return stamp
 
+    async def _segment_sample(self, item: dict, prospect) -> tuple[str, str] | None:
+        """channels.email.review_segments: a first email of a listed segment
+        nobody has approved one of yet is held in the Outbox as a sample
+        (up to REVIEW_SAMPLES), or moves back REVIEW_RECHECK, still approved.
+        The first one you approve marks the segment reviewed."""
+        review = getattr(self.config.channels.email, "review_segments", None) or []
+        if not review or item["kind"] != "sequence" or int(item.get("step") or 0) != 1:
+            return None
+        segment = item.get("segment") or await segment_for_company(
+            self.state, getattr(prospect, "company_id", "") or "", prospect)
+        if segment not in review:
+            return None
+        key = SEGMENT_REVIEWED_KEY + segment
+        if await self.state.get_setting(key):
+            return None
+        label = SEGMENT_LABELS.get(segment, segment)
+        if item.get("approved_by") == "you":
+            await self.state.set_setting(key, _utcnow().isoformat())
+            logger.info(f"Sender: you approved a {label} email; {label} first emails "
+                        "now go out on their own.")
+            return None
+        reason = f"a sample of the first {label} emails"
+        if await self.state.count_held_for_review(reason) < REVIEW_SAMPLES:
+            return "pending_review", (f"{HELD_FOR_REVIEW}{reason}: approve one and the rest "
+                                      "go out on their own")[:300]
+        later = _utcnow() + REVIEW_RECHECK
+        await self.state.update_outbox_item(item["id"], send_at=later.isoformat())
+        return "approved", (f"waits until you approve one of the {label} samples in the "
+                            f"Outbox; next look {later:%Y-%m-%d %H:%M} UTC")[:300]
+
     def _with_footer(self, body: str) -> str:
         """A cold email as it leaves: the postal address and opt-out line
         underneath (CAN-SPAM). Added at send time, so a changed address
@@ -1055,6 +1093,9 @@ class Sender:
                 and getattr(self.config.channels.email, "require_approval", True)):
             # Autopilot approved it, and autopilot has since been turned off.
             return "pending_review", AUTOPILOT_OFF_REASON
+        sample = await self._segment_sample(item, prospect)
+        if sample:
+            return sample
         if item.get("approved_by") != "you":
             # Nobody approved this one (autopilot): what a planted
             # instruction would add sends it back to you instead.

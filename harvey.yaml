@@ -91,6 +91,9 @@ channels:
     # others). Custom (old shop software) ramps up from 15% while its bounces
     # stay low; see the Mailboxes tab. Blank: first emails in queue order.
     # segment_weights: {custom: 0.40, wordpress: 0.35, shopify: 0.25}
+    # See a segment's first emails before autopilot sends them: a few wait in
+    # the Outbox as samples, and approving one lets that segment go on its own.
+    # review_segments: [wordpress, custom]
   linkedin:
     enabled: false             # explicit opt-in; credentials alone do not enable it
     max_daily_connections: 15  # connection invites a day (75 a week: max_weekly_invites)

@@ -305,6 +305,29 @@ class EmailChannelConfig(BaseModel):
     # from 15% (harvey/segment_mix.py). Empty: first emails go in queue
     # order, as before.
     segment_weights: dict[str, float] = {}
+    # Segments whose first emails you see before they go out on autopilot,
+    # e.g. [wordpress, custom]: a few wait in the Outbox as samples and the
+    # rest wait in the queue; approve one sample and that segment sends on
+    # its own from then on. Empty: no samples.
+    review_segments: list[str] = []
+
+    @field_validator("review_segments", mode="before")
+    @classmethod
+    def _valid_review_segments(cls, v):
+        if v is None:
+            return []
+        if isinstance(v, str):
+            v = [v]
+        from harvey.segment_mix import MIX_SEGMENTS
+        out = []
+        for key in v:
+            name = str(key).strip().lower()
+            if name not in MIX_SEGMENTS:
+                raise ValueError(f"'{key}' in review_segments is not a segment; use "
+                                 + ", ".join(MIX_SEGMENTS) + ".")
+            if name not in out:
+                out.append(name)
+        return out
 
     @field_validator("segment_weights", mode="before")
     @classmethod

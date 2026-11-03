@@ -1562,12 +1562,13 @@ class StateManager(LinkedInStateMixin):
             await db.commit()
             return cursor.rowcount
 
-    async def count_held_for_review(self) -> int:
-        """Emails autopilot sent back for a human, still waiting."""
+    async def count_held_for_review(self, reason: str = "") -> int:
+        """Emails autopilot sent back for a human, still waiting (only those
+        held for ``reason``, when given)."""
         async with self._connect() as db:
             async with db.execute(
                 "SELECT COUNT(*) FROM outbox WHERE status = 'pending_review' AND error LIKE ?",
-                (HELD_FOR_REVIEW + "%",),
+                (HELD_FOR_REVIEW + ("%" + reason if reason else "") + "%",),
             ) as cursor:
                 return (await cursor.fetchone())[0]
 
