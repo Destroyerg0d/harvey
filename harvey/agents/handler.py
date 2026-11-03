@@ -31,6 +31,11 @@ from harvey.mailboxes import (
     is_multi, mailbox_for, normalize, paused_key, primary_mailbox, read_ok_key,
 )
 from harvey.models.conversation import Conversation, Message
+from harvey.referrals import (
+    ADDRESS, LINKEDIN, NAME, NONE, OUTSIDE, SENDABLE_GRADES, SEVERAL, company_domains,
+    find_referral, prepare_referral, registrable_domain, reply_guidance, store_referral,
+    their_own_words,
+)
 from harvey.state import (
     AUTO_CONVERSATION, AUTOMATIC_INTENTS, COLLEAGUE_REPLIED, FREE_MAIL_DOMAINS, LEFT_THE_COMPANY,
     POLICY_AUTO_REPLY, REVIEW_NEXT_REPLY_KEY, STOP_ON_REPLY, StateManager,
@@ -618,6 +623,7 @@ class Handler:
         self.brain = brain
         self.state = state
         self.config = config
+        self.env = env        # verifier keys, for grading a referral's address
         self.instantly = InstantlyClient(env.instantly_api_key)
         self.provider = get_mail_provider(config, env)
         # With several mailboxes, each one's own provider (main.py shares
@@ -842,6 +848,81 @@ class Handler:
             addresses.add(persona)
         return addresses, {a.rsplit("@", 1)[-1] for a in addresses if "@" in a}
 
+    # ── Referrals (harvey/referrals.py) ──
+
+    async def _company_record(self, prospect):
+        """The prospect's company, or a stand-in from their own fields."""
+        if getattr(prospect, "company_id", ""):
+            try:
+                company = await self.state.get_company(prospect.company_id)
+            except Exception:
+                company = None
+            if company is not None:
+                return company
+        from types import SimpleNamespace
+        return SimpleNamespace(id="", name=prospect.company or "", domain="", location="",
+                               description="", industry=prospect.industry or "")
+
+    async def _read_referral(self, reply_text: str, prospect, sender_email: str,
+                             other_sender: str):
+        """Who a "wrong person" reply names, and for an address at their
+        company, the grade and first email (harvey/referrals.py). Makes the
+        model and verifier calls and stores nothing. (referral, plan or
+        None, company)."""
+        company = await self._company_record(prospect)
+        mine, my_domains = self._own_addresses()
+        link_domains = getattr(self.config.channels.email, "link_domains", None) or []
+        own_domains = {d for d in (*my_domains, *link_domains) if d}
+        own_domains |= {registrable_domain(d) for d in own_domains}
+        referral = await find_referral(
+            self.brain, reply_text,
+            domains=company_domains(prospect.email, getattr(company, "domain", "")),
+            exclude={*mine, prospect.email, sender_email}, own_domains=own_domains,
+            company=getattr(company, "name", "") or prospect.company,
+            exclude_names={prospect.full_name()})
+        if referral.kind == LINKEDIN:
+            # A profile named in an email: nothing here invites them, so the
+            # thank-you mustn't promise it.
+            referral.kind = NAME if referral.first_name else NONE
+        plan = None
+        if referral.kind == ADDRESS and do_not_contact_match(
+                referral.email, live_do_not_contact(self.config)):
+            referral.kind = OUTSIDE
+            referral.why = f"they named {referral.email}, which is on your do-not-contact list"
+        if referral.kind == ADDRESS:
+            # Their first name only when they're the person Harvey emailed:
+            # a helpdesk or another address doesn't say who wrote.
+            first = ("" if other_sender or prospect.is_company_inbox
+                     else (prospect.first_name or "").strip())
+            skills = ""
+            if hasattr(self.brain, "load_skills_for_agent"):
+                skills = self.brain.load_skills_for_agent("writer") or ""
+            plan = await prepare_referral(
+                self.state, self.brain, self.config, self.env, referral=referral,
+                company=company, referrer_first=first,
+                referrer_label=prospect.full_name() or prospect.email,
+                their_words=their_own_words(reply_text), skills=skills,
+                multi=is_multi(self.config))
+        return referral, plan, company
+
+    async def _store_referral(self, plan, prospect, company, convo) -> dict:
+        """Store a referral (store_referral). A sendable one Harvey couldn't
+        write a first email for is handed to you."""
+        result = await store_referral(
+            self.state, plan, referrer=prospect, company=company,
+            mailbox=convo.mailbox or prospect.mailbox,
+            provider=self.provider.name if self.provider else "", agent="handler",
+            source_note=f"in conversation {convo.id}")
+        if plan.fresh and plan.grade in SENDABLE_GRADES and not result["first_email"]:
+            await self.state.update_conversation(convo.id, status="needs_human")
+            await self.state.log_action(
+                action_type="escalation", agent="handler",
+                details={"prospect_email": prospect.email,
+                         "reason": f"they named {plan.referral.email} (saved as a contact), but "
+                                   "Harvey couldn't write a first email to them: yours to write",
+                         "conversation_id": convo.id})
+        return result
+
     async def _match_sender(self, msg):
         """Who a message is from: the prospect at its address; else the one
         sent the email it answers (In-Reply-To, then References); else the
@@ -1062,10 +1143,21 @@ class Handler:
         # spend a model call drafting; they go to you instead (step 3).
         listed = do_not_contact_match(prospect.email or lead_email,
                                       live_do_not_contact(self.config))
+        # A "wrong person" reply may name who to write to instead: read it,
+        # grade the address and write their first email now, while nothing
+        # about this reply is stored (harvey/referrals.py).
+        referral, plan, company = None, None, None
+        if (intent == "wrong_person" and not automatic and self.is_native
+                and not listed and not handed_off):
+            referral, plan, company = await self._read_referral(
+                reply_text, prospect, sender_email, other_sender)
+        # Someone outside the company, or several addresses: yours to decide.
+        referral_for_you = referral is not None and referral.kind in (OUTSIDE, SEVERAL)
         response = ""
         if (not automatic and intent in AUTO_REPLY_INTENTS and not held and not listed
-                and not handed_off and not other_sender):
-            response = await self._generate_response(intent, reply_text, prospect, convo)
+                and not handed_off and not other_sender and not referral_for_you):
+            response = await self._generate_response(intent, reply_text, prospect, convo,
+                                                     referral=referral, plan=plan)
 
         # 2c. Store the conversation in one write.
         if stored is None:
@@ -1140,6 +1232,21 @@ class Handler:
             logger.info(f"Handler: {lead_email} wrote back but is on the do-not-contact list. "
                         "Handed to you; Harvey won't answer.")
             return
+
+        if referral_for_you:
+            # An agency, a freelancer, a personal address: nothing is sent
+            # and nobody is added; you decide.
+            await self.state.update_conversation(convo.id, status="needs_human")
+            await self.state.log_action(
+                action_type="escalation", agent="handler",
+                details={"prospect_email": prospect.email, "reason": referral.why,
+                         "conversation_id": convo.id, "reply_preview": reply_text[:200]},
+            )
+            logger.info(f"Handler: {lead_email} pointed elsewhere ({referral.why}). "
+                        "Handed to you; nothing sent.")
+            return
+        if plan is not None:
+            await self._store_referral(plan, prospect, company, convo)
 
         if intent == "not_interested":
             await self.state.update_conversation(convo.id, status="closed", stage="closed_lost")
@@ -1761,7 +1868,8 @@ Respond with ONLY the category label, nothing else."""
         return current_stage
 
     async def _generate_response(
-        self, intent: str, reply_text: str, prospect, convo: Conversation
+        self, intent: str, reply_text: str, prospect, convo: Conversation,
+        referral=None, plan=None,
     ) -> str:
         """Generate an appropriate response based on intent."""
         if convo.status == AUTO_CONVERSATION:
@@ -1843,7 +1951,10 @@ Write a reply that:"""
 - Ends with a soft CTA
 - Under 100 words"""
         elif intent == "wrong_person":
-            prompt += """
+            # They named someone (harvey/referrals.py): thanks, and what
+            # happens next. Otherwise ask who the right person is.
+            guidance = reply_guidance(referral, plan)
+            prompt += ("\n" + guidance) if guidance else """
 - Thanks them politely
 - Asks who the right person would be
 - Makes it easy for them to refer (one-line ask)

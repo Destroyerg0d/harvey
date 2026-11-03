@@ -114,10 +114,11 @@ def fit_note(text: str, limit: int) -> str:
 
 class LinkedInAgent:
     def __init__(self, brain, state, config, *, driver_factory=None, pacing=None,
-                 now=None, sleep=None, rng=None):
+                 now=None, sleep=None, rng=None, env=None):
         self.brain = brain
         self.state = state
         self.config = config
+        self.env = env        # verifier keys for a referral's address (loaded when needed)
         self.cfg = config.channels.linkedin
         self.rng = rng or random.Random()
         self._now = now or (lambda: datetime.now(timezone.utc))
@@ -382,6 +383,16 @@ class LinkedInAgent:
                     return
                 logger.warning(f"LinkedIn: couldn't classify a reply ({e}); it waits for you.")
                 intent = "escalate"
+            # A "wrong person" that names someone: the referral (before the
+            # message counts as read, so an outage leaves it for next time).
+            referred = {"note": "", "for_you": False, "keep": set()}
+            if intent == "wrong_person" and lead["stage"] != "declined" and not self.dry_run:
+                try:
+                    referred = await self.referral_from(lead, message["body"])
+                except Exception as e:
+                    if self._brain_paused():
+                        return
+                    logger.warning(f"LinkedIn: couldn't read who they pointed to ({e}).")
             await self.state.li_update_message(message["id"], intent=intent)
             if intent in DECLINE_INTENTS:
                 await self.decline(lead, message["body"], intent)
@@ -392,18 +403,22 @@ class LinkedInAgent:
             if intent == "interested":
                 await self.state.li_set_stage(lead["id"], "warm")
             if intent in REPLY_INTENTS or intent == "escalate":
-                await self.stop_email_pitch(lead)
-            latest[lead["id"]] = {**message, "intent": intent}
+                await self.stop_email_pitch(lead, keep=referred["keep"])
+            latest[lead["id"]] = {**message, "intent": intent, "referral_note": referred["note"],
+                                  "for_you": referred["for_you"]}
         for lead_id, message in latest.items():
             if message["intent"] not in REPLY_INTENTS or not self._time_left():
                 continue
+            if message.get("for_you"):
+                continue          # they pointed outside the company: yours to answer
             lead = await self.state.li_get_lead(lead_id)
             history = await self.state.li_messages(lead_id=lead_id)
             if not history or history[-1]["direction"] != "in":
                 continue          # answered already (by you, on LinkedIn)
             if await self.state.li_pending_for(lead_id, kinds=("reply",)):
                 continue
-            body = await self.draft(lead, "reply", intent=message["intent"], history=history)
+            body = await self.draft(lead, "reply", intent=message["intent"], history=history,
+                                    note=message.get("referral_note") or "")
             if body:
                 hold = []
                 if asks_if_automated(message["body"]):
@@ -428,8 +443,10 @@ class LinkedInAgent:
                 "why": "They said no on LinkedIn.", "message": (text or "")[:1000],
                 "linkedin_lead_id": lead["id"]})
 
-    async def stop_email_pitch(self, lead: dict):
-        """They're talking on LinkedIn: no cold email pitch on top of it."""
+    async def stop_email_pitch(self, lead: dict, keep=()):
+        """They're talking on LinkedIn: no cold email pitch on top of it.
+        ``keep``: the colleague they named (a referral), whom the company
+        stop leaves alone."""
         prospect_id = lead.get("prospect_id") or ""
         if not prospect_id:
             return
@@ -438,7 +455,106 @@ class LinkedInAgent:
             return
         await self.state.update_prospect_status(prospect_id, "replied")
         await self.state.cancel_pending_outbox_for_prospect(prospect_id, "talking on LinkedIn")
-        await self.state.stop_company(prospect_id)
+        await self.state.stop_company(prospect_id, keep=keep)
+
+    async def referral_from(self, lead: dict, text: str) -> dict:
+        """A "wrong person" reply on LinkedIn that names someone
+        (harvey/referrals.py). An address at the company's own domain becomes
+        the same email referral as one by email (first email held for you); a
+        LinkedIn profile becomes a lead at stage found whose invite waits for
+        your approval; anyone outside the company is yours to answer.
+        Returns {"note": what the thank-you says, "for_you": no reply drafted,
+        "keep": the referral's prospect id, for the company stop}."""
+        from harvey.config import live_do_not_contact
+        from harvey.gate import do_not_contact_match
+        from harvey.integrations.mail_provider import NATIVE_PROVIDERS
+        from harvey.linkedin.pages import profile_url
+        from harvey.mailboxes import configured_mailboxes, is_multi
+        from harvey import referrals as ref
+
+        out = {"note": "", "for_you": False, "keep": set()}
+        prospect = (await self.state.get_prospect(lead["prospect_id"])
+                    if lead.get("prospect_id") else None)
+        company_id = lead.get("company_id") or (prospect.company_id if prospect else "")
+        company = await self.state.get_company(company_id) if company_id else None
+        if company is None:
+            company = SimpleNamespace(id=company_id or "", name=lead.get("company") or "",
+                                      domain="", location="", description="", industry="")
+        mine = {m.email for m in configured_mailboxes(self.config) if m.email}
+        if getattr(self.config.persona, "email", ""):
+            mine.add(self.config.persona.email.strip().lower())
+        own = {a.rsplit("@", 1)[-1] for a in mine if "@" in a}
+        own |= set(getattr(self.config.channels.email, "link_domains", None) or [])
+        own |= {ref.registrable_domain(d) for d in own}
+        referrer_name = lead.get("name") or ""
+        referral = await ref.find_referral(
+            self.brain, text,
+            domains=ref.company_domains(prospect.email if prospect else "", company.domain or ""),
+            exclude={*mine, prospect.email if prospect else ""}, own_domains=own,
+            company=company.name or "", linkedin_exclude={lead.get("slug") or ""},
+            exclude_names={referrer_name})
+        email = self.config.channels.email
+        email_native = bool(getattr(email, "enabled", True)) and email.provider in NATIVE_PROVIDERS
+        first = (lead.get("first_name") or referrer_name.split(" ")[0]).strip()
+
+        if referral.kind == ref.ADDRESS and email_native:
+            if do_not_contact_match(referral.email, live_do_not_contact(self.config)):
+                referral.kind, referral.why = ref.OUTSIDE, f"{referral.email} is on your do-not-contact list"
+            else:
+                skills = (self.brain.load_skills_for_agent("writer") or ""
+                          if hasattr(self.brain, "load_skills_for_agent") else "")
+                plan = await ref.prepare_referral(
+                    self.state, self.brain, self.config, self.env or self._load_env(),
+                    referral=referral, company=company, referrer_first=first,
+                    referrer_label=referrer_name or "their contact", skills=skills,
+                    their_words=ref.their_own_words(text), multi=is_multi(self.config))
+                result = await ref.store_referral(
+                    self.state, plan, referrer=prospect, company=company,
+                    mailbox=prospect.mailbox if prospect else "", provider=email.provider,
+                    agent="linkedin", referrer_name=referrer_name,
+                    source_note=f"on LinkedIn (lead {lead['id']})")
+                out["keep"] = {result["referral_prospect_id"]}
+                out["note"] = ref.reply_guidance(referral, plan)
+                return out
+        if referral.kind in (ref.OUTSIDE, ref.SEVERAL) or referral.kind == ref.ADDRESS:
+            why = referral.why or f"they named {referral.email}, and email isn't set up to write to them"
+            out["for_you"] = True
+            await self.state.li_update_lead(lead["id"], note=("Pointed elsewhere: " + why)[:300])
+            await self.state.log_action("escalation", "linkedin", {
+                "linkedin_lead_id": lead["id"], "reason": why, "reply_preview": (text or "")[:200]})
+            return out
+        if referral.kind == ref.LINKEDIN:
+            slug = referral.linkedin_slug
+            name = referral.name or " ".join(p.title() for p in slug.split("-") if p.isalpha())
+            today = self.now().date().isoformat()
+            lead_id, created = await self.state.li_upsert_lead(
+                slug, stage="found", name=name, first_name=referral.first_name or name.split(" ")[0],
+                headline=referral.role, company=company.name or lead.get("company") or "",
+                profile_url=profile_url(slug), company_id=company.id or "", source=ref.REFERRAL_SOURCE,
+                note=f"Referred on {today} by {referrer_name or 'a contact'} on LinkedIn")
+            new_lead = await self.state.li_get_lead(lead_id)
+            if new_lead and new_lead["stage"] == "found" and not await self.state.li_pending_for(lead_id):
+                note = ""
+                if first and await self.notes_allowed():
+                    note = fit_note(ref.NAMED_OPENING.format(first=first) + ".",
+                                    self.cfg.invite_note_max_chars)
+                await self.state.li_add_message(
+                    lead_id, direction="out", kind="invite_note", body=note, status="draft",
+                    error=(HELD_FOR_REVIEW + f"a referral: {referrer_name or 'a contact'} named them; "
+                           "invite them only if you want to"))
+                self.report["invite_drafts"] = self.report.get("invite_drafts", 0) + 1
+            await self.state.log_action("referral", "linkedin", {
+                "linkedin_lead_id": lead_id, "referred_by_lead": lead["id"], "created": created})
+        out["note"] = ref.reply_guidance(referral)
+        return out
+
+    @staticmethod
+    def _load_env():
+        try:
+            from harvey.config import load_env
+            return load_env()
+        except Exception:
+            return None
 
     async def email_block(self, lead: dict) -> str:
         """Why no LinkedIn pitch may go to this lead because of email, or ""."""
@@ -586,6 +702,8 @@ class LinkedInAgent:
             prospect = await self.state.get_prospect(lead["prospect_id"])
             if prospect and prospect.personalization_notes:
                 lines.append(f"Research notes: {prospect.personalization_notes}")
+        if lead.get("source") == "referral" and lead.get("note"):
+            lines.append(f"How we came to them: {lead['note']}")
         return "\n".join(line for line in lines if not line.endswith(": "))
 
     def _history(self, history) -> str:
@@ -597,8 +715,10 @@ class LinkedInAgent:
                 out.append(f"{who}{kind}: {m['body']}")
         return "\n\n".join(out)
 
-    async def draft(self, lead: dict, which: str, intent: str = "", history=None) -> str:
-        """One message by the brain: which = invite | first | follow_up | reply."""
+    async def draft(self, lead: dict, which: str, intent: str = "", history=None,
+                    note: str = "") -> str:
+        """One message by the brain: which = invite | first | follow_up | reply.
+        ``note``: what a reply must say (a referral's thank-you)."""
         persona, product = self.config.persona, self.config.product
         prompt = self.brain.load_prompt(
             "linkedin", persona_name=persona.name, persona_role=persona.role,
@@ -635,6 +755,8 @@ FACTS about them:
 """
         if history:
             prompt += f"\nTHE CONVERSATION SO FAR:\n{fence(self._history(history), 'the conversation')}\n"
+        if note:
+            task += "\nThe reply:\n" + note
         prompt += f"\nTASK: {task}\n\nOutput ONLY the message text."
         for _ in range(MAX_DRAFT_ATTEMPTS):
             text = await self.brain.think(prompt, session_id="harvey-linkedin",

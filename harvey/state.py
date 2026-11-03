@@ -59,6 +59,10 @@ COLLEAGUE_REPLIED = "a colleague replied"
 # Setting set (to their name) when someone's reply stops their company.
 # An out-of-office or a "wrong person" doesn't set it.
 COMPANY_STOP_KEY = "company_stop:"
+# Setting COMPANY_STOP_KEEP_KEY + kept id + ":" + stopper id: that one
+# company stop (stop_company's ``keep``) doesn't hold back this colleague,
+# the person a "wrong person" reply named (harvey/referrals.py).
+COMPANY_STOP_KEEP_KEY = "company_stop_keep:"
 # Conversation status of a thread only machines have written in (a helpdesk
 # acknowledgement, an out-of-office): never a reply in the counts, never
 # answered, and the prospect's sequence carries on. A person writing in it
@@ -114,10 +118,18 @@ def _colleagues(p: str, c: str) -> str:
     )
 
 
+def _kept(p: str, c: str) -> str:
+    """SQL: prospect ``c``'s company stop was told to leave ``p`` out."""
+    return (f"EXISTS (SELECT 1 FROM settings k "
+            f"WHERE k.key = '{COMPANY_STOP_KEEP_KEY}' || {p}.id || ':' || {c}.id)")
+
+
 def _company_answered(p: str) -> str:
-    """SQL: someone at prospect ``p``'s company has replied."""
+    """SQL: someone at prospect ``p``'s company has replied (and their stop
+    didn't keep ``p``)."""
     return (f"EXISTS (SELECT 1 FROM prospects c, settings s "
-            f"WHERE s.key = '{COMPANY_STOP_KEY}' || c.id AND {_colleagues(p, 'c')})")
+            f"WHERE s.key = '{COMPANY_STOP_KEY}' || c.id AND {_colleagues(p, 'c')} "
+            f"AND NOT {_kept(p, 'c')})")
 # Outbox error on what autopilot had approved when it was turned off.
 AUTOPILOT_OFF_REASON = "waiting for you: autopilot was turned off before it went out"
 # Outbox error on an approved cold email the compliance check couldn't answer
@@ -1572,10 +1584,16 @@ class StateManager(LinkedInStateMixin):
             await db.commit()
             return cursor.rowcount
 
-    async def stop_company(self, prospect_id: str) -> int:
+    async def stop_company(self, prospect_id: str, keep=()) -> int:
         """Someone replied: mark their company as answered and cancel the
         sequence emails queued for everyone else there. Replies Harvey owes
-        a colleague who wrote in themselves are not touched."""
+        a colleague who wrote in themselves are not touched.
+
+        ``keep``: colleagues' ids this stop leaves alone (the person a
+        "wrong person" reply named, harvey/referrals.py). Recorded, so every
+        reader of the stop (colleague_who_replied, _company_answered) leaves
+        them alone too, now and when this person replies again later."""
+        keep = sorted({k for k in (keep or ()) if k and k != prospect_id})
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
@@ -1586,28 +1604,35 @@ class StateManager(LinkedInStateMixin):
             if row is None:
                 return 0
             who = " ".join(x for x in (row["first_name"], row["last_name"]) if x) or row["email"]
+            now = _utcnow().isoformat()
+            for kept in keep:
+                await db.execute(
+                    "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
+                    (f"{COMPANY_STOP_KEEP_KEY}{kept}:{prospect_id}", who, now),
+                )
             await db.execute(
                 "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
-                (COMPANY_STOP_KEY + prospect_id, who, _utcnow().isoformat()),
+                (COMPANY_STOP_KEY + prospect_id, who, now),
             )
             cursor = await db.execute(
                 "UPDATE outbox SET status = 'cancelled', error = ?, updated_at = ? "
                 "WHERE kind = 'sequence' AND status IN ('pending_review', 'approved') "
                 "AND prospect_id IN (SELECT c.id FROM prospects c, prospects p "
-                f"WHERE p.id = ? AND {_colleagues('p', 'c')})",
-                (f"{COLLEAGUE_REPLIED} ({who})", _utcnow().isoformat(), prospect_id),
+                f"WHERE p.id = ? AND {_colleagues('p', 'c')} AND NOT {_kept('c', 'p')})",
+                (f"{COLLEAGUE_REPLIED} ({who})", now, prospect_id),
             )
             await db.commit()
             return cursor.rowcount
 
     async def colleague_who_replied(self, prospect_id: str) -> str | None:
         """The name of someone at this prospect's company who has replied,
-        or None. A cold email to them is no longer cold: the company answered."""
+        or None. A cold email to them is no longer cold: the company answered.
+        A stop that kept this prospect (stop_company's ``keep``) doesn't count."""
         async with self._connect() as db:
             async with db.execute(
                 "SELECT s.value FROM prospects p, prospects c, settings s "
                 f"WHERE p.id = ? AND s.key = '{COMPANY_STOP_KEY}' || c.id "
-                f"AND {_colleagues('p', 'c')} LIMIT 1",
+                f"AND {_colleagues('p', 'c')} AND NOT {_kept('p', 'c')} LIMIT 1",
                 (prospect_id,),
             ) as cursor:
                 row = await cursor.fetchone()
