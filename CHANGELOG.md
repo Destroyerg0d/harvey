@@ -39,6 +39,37 @@ minor versions can still change behaviour.
   a `max_words` so an approved estimate isn't failed for its length.
 - **Reply drafting reads what Harvey knew beforehand.** The Handler's prompt now
   carries the prospect's `personalization_notes`, fenced as untrusted text.
+- **WhatsApp run by Harvey, through WhatsApp Web** (`harvey/whatsapp/`,
+  `harvey/agents/whatsapp_agent.py`, `channels.whatsapp`, off by default).
+  Automating WhatsApp breaks its terms and can get the number banned, so use a
+  separate number you can afford to lose. Only people who gave you their number
+  themselves: `queue_contact`, or `harvey whatsapp add PHONE --source S`, one at
+  a time, with a source required and no bulk import. A number goes to E.164 or
+  waits for you as `needs_review` when its country code can't be established;
+  it is never guessed. Anyone opted out or declined on any channel, on the
+  do-not-contact list (`channels.whatsapp.do_not_contact` for numbers), or in a
+  live email conversation is refused, and that is checked again before every
+  draft and send. The limits are low because a new number is the riskiest
+  pattern: 5 first messages a day for 14 days after linking, then 10; 30
+  messages a day and 8 an hour; 45 to 180 seconds apart; weekdays 10:00 to 19:00
+  by the recipient's own clock when known (a +1 number with no state needs both
+  coasts open), else `channels.whatsapp.hours`. One follow-up 3 to 5 days later,
+  never more than 3 messages without a reply. First messages are under 60 words,
+  follow-ups under 35, replies under 80; no links in a first message, no prices
+  ever, no emojis, dashes or markdown; a first message says how you got the
+  number and ends with an easy way out, checked in code as well as asked for.
+  Everything waits on the new **WhatsApp** tab until you approve it, or until
+  you turn on WhatsApp autopilot there. The send opens the chat by number with
+  no prefilled text, checks it is theirs, types at a person's pace, checks the
+  composer, presses Enter and checks the bubble. Unsure of the chat or the
+  composer means nothing is typed, and a send that can't be confirmed is
+  `maybe_sent`, held for you and never retried. Only unread chats of known
+  numbers are opened; nothing else on the account is opened, read or stored. A
+  no on WhatsApp stops email too. Any ban, spam, restriction or unusual-activity
+  notice pauses for 48 hours, the QR code until you link again, "phone not
+  connected" for 30 minutes, three failed sends in a row until you resume.
+  Approved WhatsApp lessons (a new lesson kind) reach its drafting prompt.
+  WhatsApp Web's selectors are in one file and haven't been checked live yet.
 - **LinkedIn run by Harvey** (`harvey/linkedin/`, `channels.linkedin`, off by
   default). Invites, first messages, one follow-up and replies, through a
   dedicated Chrome profile you sign in to yourself (`harvey linkedin login`;
