@@ -37,7 +37,8 @@ async def _login(args, config, state):
     from harvey.linkedin.session import ChromeNotFound, login_interactive
     await state.init_db()
     try:
-        ok = await login_interactive(config.channels.linkedin)
+        ok = await login_interactive(config.channels.linkedin,
+                                     timeout_minutes=config.channels.linkedin.login_timeout_minutes)
     except ChromeNotFound as e:
         print(f"\n  {e}\n")
         return

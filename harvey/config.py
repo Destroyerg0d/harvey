@@ -571,6 +571,7 @@ class LinkedInChannelConfig(BaseModel):
     # The dedicated Chrome profile (relative to the project), and Chrome itself
     # ("" finds the installed Google Chrome).
     profile_dir: str = "data/linkedin-profile"
+    login_timeout_minutes: int = 30
     chrome_path: str = ""
     headless: bool = False
 
