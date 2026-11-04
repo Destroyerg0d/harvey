@@ -420,6 +420,7 @@ function loadCurrentTab() {
     case 'conversations': loadConversations(); break;
     case 'mailboxes': loadMailboxes(); break;
     case 'linkedin': loadLinkedIn(); break;
+    case 'whatsapp': loadWhatsApp(); break;
     case 'learning': loadLearning(); break;
     case 'activity': loadActivity(); break;
     case 'usage': loadUsage(); break;
@@ -3373,11 +3374,363 @@ async function liSetMode(mode) {
   loadLinkedIn();
 }
 
+// ── WhatsApp: first messages, one follow-up and replies (harvey/whatsapp/) ──
+
+let _wa = null, _waEditing = null, _waFixing = null, _waArmed = false, _waBusy = false;
+const WA_KIND = {first: 'First message', follow_up: 'Follow-up', reply: 'Reply'};
+const WA_STAGE = {queued: 'Queued', messaged: 'Messaged', replied: 'Replied', warm: 'Warm', meeting: 'Meeting',
+  declined: 'Declined', no_whatsapp: 'Not on WhatsApp', needs_review: 'Check number'};
+
+async function loadWhatsApp() {
+  const data = await api('/api/whatsapp');
+  if (currentTab !== 'whatsapp') return;
+  // An edit, a number being fixed or the autopilot confirmation is never re-rendered away.
+  if (_waEditing || _waFixing || _waArmed) { if (data && !data.error) _wa = data; return; }
+  renderWhatsApp(data);
+}
+
+function renderWhatsApp(data) {
+  if (!data) { liEl('wa-summary', offlineState()); return; }
+  if (data.error) {
+    liEl('wa-summary', emptyState(icon('alert'), 'Couldn’t read WhatsApp', escHtml(data.error)));
+    return;
+  }
+  _wa = data;
+  navCount('nav-whatsapp', (data.drafts_waiting || 0) + (data.maybe_sent || 0));
+  liEl('wa-actions',
+    (data.drafts_waiting ? '<button class="btn btn-primary btn-sm" onclick="waApproveAll(this)">' +
+      icon('check') + 'Approve all drafts</button>' : '') +
+    (data.pause
+      ? '<button class="btn btn-secondary btn-sm" onclick="waPause(\'resume\')">Resume WhatsApp</button>'
+      : '<button class="btn btn-danger btn-sm" onclick="waPause(\'pause\')">Stop WhatsApp now</button>'));
+  liEl('wa-banner', waBannerHtml(data));
+  liEl('wa-summary', waSummaryHtml(data));
+  liEl('wa-queue', waQueueHtml(data.queue || []));
+  liEl('wa-review-wrap', waReviewHtml(data.review || [], data.stopped || []));
+  liEl('wa-convos', waConvosHtml(data.conversations || []));
+  liEl('wa-funnel', waFunnelHtml(data.funnel || {}));
+  liEl('wa-limits', waLimitsHtml(data));
+  liEl('wa-mode', waModeHtml(data));
+}
+
+function waBannerHtml(d) {
+  if (d.pause) {
+    const until = d.pause.until ? ' until ' + formatDate(d.pause.until) : ' until you resume it';
+    return '<div class="banner bad">' + icon('alert') + '<div><b>WhatsApp is paused' + escHtml(until) + '</b>' +
+      '<p>' + escHtml(d.pause.reason || '') + '. Nothing is read or sent on WhatsApp meanwhile. ' +
+      (d.pause.kind === 'signed_out' ? 'Run <code>harvey whatsapp login</code> in a terminal and scan the QR code.'
+        : 'Look at the WhatsApp window and your phone before you resume.') + '</p></div></div>';
+  }
+  if (!d.enabled) {
+    return '<div class="banner">' + icon('flag') + '<div><b>WhatsApp is off</b><p>Set ' +
+      '<code>channels.whatsapp.enabled: true</code> in your config and link a separate number with ' +
+      '<code>harvey whatsapp login</code>. Automating WhatsApp breaks its terms and can get the number ' +
+      'banned.</p></div></div>';
+  }
+  if (!d.linked) {
+    return '<div class="banner wait">' + icon('alert') + '<div><b>No phone is linked</b><p>Run ' +
+      '<code>harvey whatsapp login</code> in a terminal and scan the QR code with the separate number.</p></div></div>';
+  }
+  if (d.autopilot) {
+    return '<div class="banner wait">' + icon('alert') + '<div><b>WhatsApp autopilot is on</b>' +
+      '<p>Harvey sends what it writes on WhatsApp without asking, replies to real people included. It still ' +
+      'holds anything with a link that isn’t yours, or a reply to someone asking whether this is automated.</p></div></div>';
+  }
+  return '';
+}
+
+function waSummaryHtml(d) {
+  const u = d.used || {}, c = d.caps || {};
+  const card = (label, value, note) => '<div class="kpi"><div class="kpi-label">' + label + '</div>' +
+    '<div class="kpi-main"><span class="kpi-value' + (String(value).startsWith('0') ? ' zero' : '') + '">' + value +
+    '</span></div><span class="kpi-note">' + note + '</span></div>';
+  const last = d.last_run || {};
+  return '<div class="kpis mbx-kpis">' +
+    card('Phone', d.linked ? 'Linked' : 'Not linked',
+      (d.number ? '<b>' + escHtml(d.number) + '</b>' : 'no number set') +
+      (d.linked ? ' since ' + relTime(d.linked_at) : '')) +
+    card('First messages today', mbxNum(u.first_today) + '<small> / ' + mbxNum(c.first_today) + '</small>',
+      d.new_number ? 'new number: the low limit for ' + mbxNum(d.new_number_days) + ' days' : 'after the ramp') +
+    card('All messages today', mbxNum(u.messages_today) + '<small> / ' + mbxNum(c.messages_today) + '</small>',
+      '<b>' + mbxNum(u.messages_hour) + '</b> of ' + mbxNum(c.messages_hour) + ' this hour') +
+    card('Waiting for you', mbxNum((d.drafts_waiting || 0) + (d.maybe_sent || 0)),
+      d.maybe_sent ? mbxNum(d.maybe_sent) + ' may have gone out' : 'drafts to approve, edit or skip') +
+    card('Last run', last.started ? relTime(last.started) : '&ndash;',
+      d.running ? 'running now' : escHtml(last.outcome || 'not run yet')) +
+  '</div>';
+}
+
+function waContactLine(c) {
+  if (!c || !c.id) return '<span class="muted">unknown contact</span>';
+  return escHtml(c.name || c.phone || c.raw_phone || 'Them') +
+    (c.name && c.phone ? ' <span class="muted">· ' + escHtml(c.phone) + '</span>' : '') +
+    ' <span class="tag">' + escHtml(own(WA_STAGE, c.stage) || c.stage || '') + '</span>';
+}
+
+function waItemButtons(m) {
+  const id = jsq(m.id);
+  if (_waEditing === m.id) {
+    return '<button class="btn btn-primary btn-sm" onclick="waSave(' + id + ',this)">Save</button>' +
+      '<button class="btn btn-ghost btn-sm" onclick="waCancelEdit()">Cancel</button>';
+  }
+  if (m.status === 'draft') {
+    return '<button class="btn btn-primary btn-sm" onclick="waAct(' + id + ',\'approve\')">Approve</button>' +
+      '<button class="btn btn-secondary btn-sm" onclick="waEdit(' + id + ')">Edit</button>' +
+      '<button class="btn btn-ghost btn-sm" onclick="waAct(' + id + ',\'skip\')">Skip</button>';
+  }
+  if (m.status === 'maybe_sent') {
+    return '<button class="btn btn-secondary btn-sm" onclick="waAct(' + id + ',\'went\')">It went out</button>' +
+      '<button class="btn btn-ghost btn-sm" onclick="waAct(' + id + ',\'not_sent\')">It didn’t go</button>';
+  }
+  if (m.status === 'failed') {
+    return '<button class="btn btn-secondary btn-sm" onclick="waAct(' + id + ',\'retry\')">Retry</button>' +
+      '<button class="btn btn-ghost btn-sm" onclick="waAct(' + id + ',\'skip\')">Skip</button>';
+  }
+  return '<button class="btn btn-ghost btn-sm" onclick="waAct(' + id + ',\'skip\')">Skip</button>';
+}
+
+function waBody(m) {
+  if (_waEditing === m.id) {
+    return '<textarea class="desk-edit-body li-edit" id="wa-edit-' + escHtml(m.id) + '" rows="4">' +
+      escHtml(m.body) + '</textarea>';
+  }
+  return m.body ? '<div class="li-body">' + escHtml(m.body) + '</div>' : '<p class="muted li-body">(empty)</p>';
+}
+
+function waQueueHtml(queue) {
+  if (!queue.length) return '<div class="card muted">Nothing waiting. New drafts show up here after each WhatsApp run.</div>';
+  const label = {draft: 'Waiting for you', approved: 'Approved, sends inside their hours', failed: 'Not sent',
+    maybe_sent: 'May have gone out: check the chat on your phone'};
+  return queue.map(m => '<div class="convo-card li-item">' +
+    '<div class="convo-head"><div><h3>' + escHtml(own(WA_KIND, m.kind) || m.kind) + ' to ' + waContactLine(m.contact) + '</h3>' +
+      '<div class="sub">' + escHtml(own(label, m.status) || m.status) + ' · ' + relTime(m.created_at) +
+      (m.approved_by ? ' · approved by ' + escHtml(m.approved_by) : '') +
+      (m.contact && m.contact.source ? ' · they gave it: ' + escHtml(m.contact.source) : '') + '</div></div></div>' +
+    (m.error ? '<p class="li-why' + (m.status === 'maybe_sent' ? ' bad' : '') + '">' + escHtml(m.error) + '</p>' : '') +
+    waBody(m) +
+    '<div class="convo-actions">' + waItemButtons(m) + '</div></div>').join('');
+}
+
+function waReviewHtml(review, stopped) {
+  let html = '';
+  if (review.length) {
+    html += '<div class="subhead">Numbers to check <span class="hint">the country code couldn’t be established, ' +
+      'and Harvey never guesses: a wrong guess messages a stranger</span></div>' +
+      review.map(c => {
+        const id = jsq(c.id);
+        const fixing = _waFixing === c.id;
+        return '<div class="convo-card li-item"><div class="convo-head"><div><h3>' + escHtml(c.name || 'No name') +
+          ' <span class="muted">· ' + escHtml(c.raw_phone || '') + '</span></h3><div class="sub">They gave it: ' +
+          escHtml(c.source || '') + '</div></div></div>' +
+          '<p class="li-why">' + escHtml(c.review_reason || '') + '</p>' +
+          (fixing ? '<div class="convo-actions mode-confirm"><input class="form-input" id="wa-fix-' + escHtml(c.id) +
+              '" placeholder="The number with its + country code" autocomplete="off">' +
+              '<button class="btn btn-primary btn-sm" onclick="waFixSave(' + id + ')">Save</button>' +
+              '<button class="btn btn-ghost btn-sm" onclick="waFixCancel()">Cancel</button></div>'
+            : '<div class="convo-actions"><button class="btn btn-secondary btn-sm" onclick="waFix(' + id + ')">Fix the number</button>' +
+              '<button class="btn btn-ghost btn-sm" onclick="waStage(' + id + ',\'declined\',true)">Drop it</button></div>') +
+          '</div>';
+      }).join('');
+  }
+  if (stopped.length) {
+    html += '<div class="subhead">Held by another channel <span class="hint">Harvey won’t message these while this stands</span></div>' +
+      '<div class="card"><div class="figures">' + stopped.map(c => '<div class="figure"><span class="k">' +
+        waContactLine(c) + '</span><span class="v">' + escHtml(c.no_message_reason || '') + '</span></div>').join('') +
+      '</div></div>';
+  }
+  return html;
+}
+
+function waConvosHtml(convos) {
+  if (!convos.length) return '<div class="card muted">No replies on WhatsApp yet.</div>';
+  return convos.map(c => {
+    const l = c.contact || {}, inbound = c.latest_in;
+    const first = (l.name || '').split(' ')[0];
+    const thread = (c.thread || []).map(m => '<div class="thread-msg ' + (m.direction === 'out' ? 'sent' : 'received') +
+      '"><div class="sender">' + (m.direction === 'out' ? 'You' : escHtml(first || 'Them')) +
+      ' &middot; ' + relTime(m.at) + '</div>' + escHtml(m.body) + '</div>').join('');
+    const draft = c.draft ? '<div class="thread-draft"><div class="sender">' + icon('pen') + 'Reply ' +
+      (c.draft.status === 'approved' ? 'approved, sends inside their hours' : 'drafted, waiting for you') + '</div>' +
+      waBody({...c.draft, kind: 'reply'}) + '<div class="convo-actions">' +
+      waItemButtons({...c.draft, kind: 'reply'}) + '</div></div>' : '';
+    const stageBtns = l.stage === 'declined' ? '<span class="muted">Declined. Harvey won’t contact them again.</span>'
+      : (l.stage !== 'meeting' ? '<button class="btn btn-secondary btn-sm" onclick="waStage(' + jsq(l.id) + ',\'meeting\')">Meeting booked</button>' : '') +
+        '<button class="btn btn-ghost btn-sm" onclick="waStage(' + jsq(l.id) + ',\'declined\')">They said no</button>';
+    return '<div class="convo-card"><div class="convo-head"><div><h3>' + waContactLine(l) + '</h3>' +
+      '<div class="sub">' + escHtml(l.source || '') + (inbound ? ' · wrote ' + relTime(inbound.at) : '') + '</div></div>' +
+      '<div class="tags">' + (inbound && inbound.intent ? badge(inbound.intent) : '') + '</div></div>' +
+      '<div class="thread">' + thread + draft + '</div><div class="convo-actions">' + stageBtns + '</div></div>';
+  }).join('');
+}
+
+function waFunnelHtml(f) {
+  const stages = [['Contacts', f.contacts], ['Messaged', f.messaged], ['Replied', f.replied, f.reply_rate, 'of messaged'],
+    ['Positive', f.positive, f.positive_rate, 'of replied'], ['Meetings', f.meetings]];
+  const max = Math.max(1, ...stages.map(s => Number(s[1] || 0)));
+  return '<div class="mbx-funnel">' + stages.map(s => {
+    const n = Number(s[1] || 0);
+    return '<div class="mbx-frow"><span class="k">' + s[0] + '</span><span class="v">' + mbxNum(n) + '</span>' +
+      '<span class="pct" title="' + escHtml(s[3] || '') + '">' + (s[2] !== undefined && s[2] !== null ? mbxPct(s[2]) : '') + '</span>' +
+      '<span class="bar"><span style="width:' + (n ? Math.max(1, 100 * n / max) : 0) + '%;background:var(--accent)"></span></span></div>';
+  }).join('') + '</div><p class="figure-note">Reply is of messaged, positive of replied. ' +
+    mbxNum(f.declined) + ' declined, ' + mbxNum(f.no_whatsapp) + ' not on WhatsApp, ' +
+    'numbers to check: ' + mbxNum(f.needs_review) + '.</p>';
+}
+
+function waLimitsHtml(d) {
+  const u = d.used || {}, c = d.caps || {}, last = d.last_run || {};
+  const row = (k, v) => '<div class="figure"><span class="k">' + k + '</span><span class="v">' + v + '</span></div>';
+  return '<div class="figures">' +
+    row('First messages today', mbxNum(u.first_today) + ' / ' + mbxNum(c.first_today)) +
+    row('All messages today', mbxNum(u.messages_today) + ' / ' + mbxNum(c.messages_today)) +
+    row('Messages this hour', mbxNum(u.messages_hour) + ' / ' + mbxNum(c.messages_hour)) +
+    row('When they go', 'their own daytime; unknown: ' + escHtml(d.hours) +
+      (d.in_hours ? '' : ' <small class="muted">(outside now)</small>')) +
+    row('Last run', last.started ? formatDate(last.started) : '&ndash;') +
+    (last.outcome ? row('Outcome', escHtml(last.outcome)) : '') +
+    (last.started ? row('Sent last run', mbxNum(last.sent)) : '') +
+  '</div>';
+}
+
+function waModeHtml(d) {
+  let html = '<div class="card mode-card"><h3>' + (d.autopilot ? 'Autopilot' : 'Approval') + '</h3>' +
+    '<p><b>Approval</b> (the default): every message Harvey writes for WhatsApp waits here until you approve it.</p>' +
+    '<p><b>Autopilot</b>: Harvey sends them on its own, inside their hours and the limits, replies to real people ' +
+    'included. It still holds a reply to anyone asking whether this is automated, and anything linking to a site ' +
+    'that isn’t yours.</p>';
+  if (d.autopilot) {
+    html += '<div class="convo-actions"><span class="muted">Turning it off works at once: what autopilot approved ' +
+      'that hasn’t gone out comes back here.</span><button class="btn btn-primary btn-sm" onclick="waSetMode(\'approval\')"' +
+      (_waBusy ? ' disabled' : '') + '>Turn off autopilot</button></div>';
+  } else if (_waArmed) {
+    html += '<div class="convo-actions mode-confirm"><span class="muted">Approve a few runs by hand first. Type ' +
+      '<b>autopilot</b> to turn it on.</span>' +
+      '<input class="form-input" id="wa-autopilot-confirm" autocomplete="off" aria-label="Type autopilot to confirm" ' +
+        'oninput="document.getElementById(\'wa-autopilot-go\').disabled = this.value.trim().toLowerCase() !== \'autopilot\'" ' +
+        'onkeydown="if (event.key === \'Enter\' && this.value.trim().toLowerCase() === \'autopilot\') waSetMode(\'autopilot\')">' +
+      '<button class="btn btn-primary btn-sm" id="wa-autopilot-go" disabled onclick="waSetMode(\'autopilot\')">Turn on autopilot</button>' +
+      '<button class="btn btn-ghost btn-sm" onclick="_waArmed=false;renderWhatsApp(_wa)">Cancel</button></div>';
+  } else {
+    html += '<div class="convo-actions"><button class="btn btn-secondary btn-sm" ' +
+      'onclick="_waArmed=true;renderWhatsApp(_wa);const i=document.getElementById(\'wa-autopilot-confirm\');if(i)i.focus()">' +
+      'Turn on autopilot…</button></div>';
+  }
+  return html + '</div>';
+}
+
+async function waAct(id, action) {
+  const res = await liPost('/api/whatsapp/messages/' + encodeURIComponent(id) + '/' + action);
+  if (res && res.success) {
+    showToast({approve: 'Approved. It goes on the next WhatsApp run, inside their hours.', skip: 'Skipped.',
+      retry: 'Back in the queue for the next run.', went: 'Marked as sent.',
+      not_sent: 'Closed. Harvey won’t send it again.'}[action] || 'Done.', 'success');
+  } else {
+    showToast(failMsg(res, 'Couldn’t do that.'), 'error');
+  }
+  loadWhatsApp();
+}
+
+async function waApproveAll(btn) {
+  if (btn) btn.disabled = true;
+  const res = await liPost('/api/whatsapp/messages/approve-all');
+  if (res && res.success) {
+    showToast(res.approved + ' approved' + (res.held ? '; ' + res.held + ' held ones wait for you one by one.' : '.'), 'success');
+  } else {
+    showToast(failMsg(res, 'Couldn’t approve them.'), 'error');
+  }
+  loadWhatsApp();
+}
+
+function waEdit(id) {
+  _waEditing = id;
+  renderWhatsApp(_wa);
+  const el = document.getElementById('wa-edit-' + id);
+  if (el) el.focus();
+}
+
+function waCancelEdit() { _waEditing = null; renderWhatsApp(_wa); }
+
+async function waSave(id, btn) {
+  const near = btn && btn.closest('.thread-draft, .convo-card');
+  const el = (near && near.querySelector('textarea')) || document.getElementById('wa-edit-' + id);
+  const res = await liPost('/api/whatsapp/messages/' + encodeURIComponent(id) + '/edit', {body: el ? el.value : ''});
+  if (res && res.success) {
+    _waEditing = null;
+    showToast('Saved. Approve it when it reads right.', 'success');
+    loadWhatsApp();
+  } else {
+    showToast(failMsg(res, 'Couldn’t save it.'), 'error');
+  }
+}
+
+function waFix(id) {
+  _waFixing = id;
+  renderWhatsApp(_wa);
+  const el = document.getElementById('wa-fix-' + id);
+  if (el) el.focus();
+}
+
+function waFixCancel() { _waFixing = null; renderWhatsApp(_wa); }
+
+async function waFixSave(id) {
+  const el = document.getElementById('wa-fix-' + id);
+  const res = await liPost('/api/whatsapp/contacts/' + encodeURIComponent(id) + '/number', {phone: el ? el.value : ''});
+  if (res && res.success) {
+    _waFixing = null;
+    showToast('Saved. They’re queued.', 'success');
+    loadWhatsApp();
+  } else {
+    showToast(failMsg(res, 'Couldn’t save that number.'), 'error');
+  }
+}
+
+async function waStage(contactId, stage, dropping) {
+  const ask = dropping ? 'Drop this number? Harvey won’t message it.'
+    : 'Mark them as declined? Harvey never contacts them again, on WhatsApp or by email.';
+  if (stage === 'declined' && !confirm(ask)) return;
+  const res = await liPost('/api/whatsapp/contacts/' + encodeURIComponent(contactId) + '/stage', {stage});
+  if (res && res.success) showToast(stage === 'meeting' ? 'Marked: meeting booked.' : 'Done.', 'success');
+  else showToast(failMsg(res, 'Couldn’t change that.'), 'error');
+  loadWhatsApp();
+}
+
+async function waPause(action) {
+  const res = await liPost('/api/whatsapp/' + action);
+  if (res && res.success) showToast(action === 'pause' ? 'WhatsApp stopped. Nothing is read or sent until you resume.'
+    : 'WhatsApp resumed.', 'success');
+  else showToast(failMsg(res, 'Couldn’t change that.'), 'error');
+  loadWhatsApp();
+  loadToday();
+}
+
+async function waSetMode(mode) {
+  if (_waBusy) return;
+  const body = {mode};
+  if (mode === 'autopilot') {
+    const input = document.getElementById('wa-autopilot-confirm');
+    body.confirm = input ? input.value.trim().toLowerCase() : '';
+  }
+  _waBusy = true;
+  try {
+    const res = await liPost('/api/whatsapp/autopilot', body);
+    if (res && res.success) {
+      _waArmed = false;
+      showToast(mode === 'autopilot' ? 'WhatsApp autopilot is on from the next run.'
+        : 'WhatsApp autopilot is off' + (res.requeued ? '; ' + res.requeued + ' came back to the queue.' : '.'), 'success');
+    } else {
+      showToast(failMsg(res, 'Couldn’t change WhatsApp autopilot.'), 'error');
+    }
+  } finally {
+    _waBusy = false;
+  }
+  loadWhatsApp();
+}
+
 // ── Learning: lessons from results, for you to approve (harvey/lessons.py) ──
 
 let _lrn = null, _lrnOut = null, _lrnBusy = false;
 const _lrnFilter = {channel: '', segment: '', step: ''};
-const LRN_KIND = {writing: 'Writing', subject: 'Subject lines', linkedin: 'LinkedIn',
+const LRN_KIND = {writing: 'Writing', subject: 'Subject lines', linkedin: 'LinkedIn', whatsapp: 'WhatsApp',
   targeting: 'Targeting', segment_mix: 'Segment mix'};
 const LRN_SEGMENT = {shopify: 'Shopify', wordpress: 'WordPress', custom: 'Custom', other: 'Other',
   unknown: 'Unknown'};
@@ -3706,6 +4059,7 @@ setInterval(() => {
     case 'conversations': loadConversations(); break;
     case 'mailboxes': loadMailboxes(); break;
     case 'linkedin': loadLinkedIn(); break;
+    case 'whatsapp': loadWhatsApp(); break;
     case 'activity': loadActivity(); break;
     case 'usage': loadUsage(); break;
     case 'controls': loadLogs(); break;

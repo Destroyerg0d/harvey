@@ -64,6 +64,9 @@ app.add_middleware(auth.DashboardGuard, store=token_store)
 # The LinkedIn tab's routes (/api/linkedin...), behind the same guard.
 from harvey.linkedin.web import router as linkedin_router  # noqa: E402
 app.include_router(linkedin_router)
+# The WhatsApp tab's routes (/api/whatsapp...), behind the same guard.
+from harvey.whatsapp.web import router as whatsapp_router  # noqa: E402
+app.include_router(whatsapp_router)
 
 # Harvey process tracking
 _harvey_process: subprocess.Popen | None = None
@@ -2387,6 +2390,10 @@ async def get_today():
         # LinkedIn: drafts waiting for approval, and a pause (harvey/linkedin/web.py).
         from harvey.linkedin.web import today_items as linkedin_today_items
         items.extend(await linkedin_today_items(state))
+
+        # WhatsApp: drafts waiting, a pause, sends that may have gone (harvey/whatsapp/web.py).
+        from harvey.whatsapp.web import today_items as whatsapp_today_items
+        items.extend(await whatsapp_today_items(state))
 
         # Lessons from results waiting for you (harvey/lessons.py).
         from harvey.lessons import count_lessons, today_items as lesson_today_items

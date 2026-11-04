@@ -77,6 +77,7 @@
       <button onclick="showTab('conversations', this)"><svg class="icon" aria-hidden="true"><use href="#i-conversations"/></svg><span class="label">Conversations</span><span class="nav-count" id="nav-conversations"></span></button>
       <button onclick="showTab('mailboxes', this)"><svg class="icon" aria-hidden="true"><use href="#i-mailboxes"/></svg><span class="label">Mailboxes</span></button>
       <button onclick="showTab('linkedin', this)"><svg class="icon" aria-hidden="true"><use href="#i-network"/></svg><span class="label">LinkedIn</span><span class="nav-count" id="nav-linkedin"></span></button>
+      <button onclick="showTab('whatsapp', this)"><svg class="icon" aria-hidden="true"><use href="#i-message"/></svg><span class="label">WhatsApp</span><span class="nav-count" id="nav-whatsapp"></span></button>
       <button onclick="showTab('learning', this)"><svg class="icon" aria-hidden="true"><use href="#i-sparkle"/></svg><span class="label">Learning</span><span class="nav-count" id="nav-learning"></span></button>
     </div>
     <div class="nav-group">
@@ -344,6 +345,41 @@
       <div class="card" id="li-limits"></div>
       <div class="subhead">Autopilot</div>
       <div id="li-mode"></div>
+    </aside>
+  </div>
+</div>
+
+<!-- WhatsApp: first messages, one follow-up and replies (harvey/whatsapp/) -->
+<div id="whatsapp" class="section">
+  <div class="section-head">
+    <div>
+      <h2>WhatsApp</h2>
+      <p>First messages, one follow-up and replies through WhatsApp Web, only to people who gave you
+         their number themselves. Automating WhatsApp breaks its terms and can get the number banned,
+         so use a separate number. Nothing goes out until you approve it, unless WhatsApp autopilot is on.</p>
+    </div>
+    <div class="page-actions" id="wa-actions"></div>
+  </div>
+  <div id="wa-banner"></div>
+  <div id="wa-summary"></div>
+
+  <div class="subhead">Queue <span class="hint">drafts to approve, approved items waiting to send, and sends that need you</span></div>
+  <div id="wa-queue"></div>
+
+  <div id="wa-review-wrap"></div>
+
+  <div class="grid-main mbx-lower">
+    <div>
+      <div class="subhead">Conversations <span class="hint">their latest message, and the reply drafted for it</span></div>
+      <div id="wa-convos"></div>
+    </div>
+    <aside>
+      <div class="subhead">Funnel</div>
+      <div class="card" id="wa-funnel"></div>
+      <div class="subhead">Limits and runs</div>
+      <div class="card" id="wa-limits"></div>
+      <div class="subhead">Autopilot</div>
+      <div id="wa-mode"></div>
     </aside>
   </div>
 </div>
