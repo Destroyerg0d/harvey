@@ -70,6 +70,7 @@ KIND_GROUPS = {
     "writing": ("email.",),
     "subject": ("subject.",),
     "linkedin": ("linkedin.",),
+    "whatsapp": ("whatsapp.",),
     "targeting": ("email.segment",),
     "segment_mix": ("email.segment",),
 }
@@ -332,6 +333,40 @@ async def linkedin_outcomes(state, days: int = WINDOW_DAYS, now: datetime | None
     return {"funnel": funnel, "cells": cells}
 
 
+async def whatsapp_cells(state, days: int = WINDOW_DAYS, now: datetime | None = None) -> dict[str, dict]:
+    """Per kind of WhatsApp message sent in the window, what came back. A reply
+    from them counts for the message it answers: the last one sent before it."""
+    now = now or _utcnow()
+    since = (now - timedelta(days=days)).isoformat()
+    stages = {r["id"]: r["stage"] for r in await _rows(state, "SELECT id, stage FROM whatsapp_contacts")}
+    inbound: dict[str, list[str]] = {}
+    outbound: dict[str, list[dict]] = {}
+    for m in await _rows(state, (
+            "SELECT contact_id, direction, kind, COALESCE(sent_at, created_at) AS at "
+            "FROM whatsapp_messages WHERE status = 'sent' ORDER BY at")):
+        at = str(m.get("at") or "").replace(" ", "T")
+        if m["direction"] == "in":
+            inbound.setdefault(m["contact_id"], []).append(at)
+        else:
+            outbound.setdefault(m["contact_id"], []).append({**m, "at": at})
+    counts = {k: {"sent": 0, "human_replies": 0, "positive": 0} for k in ("first", "follow_up", "reply")}
+    for contact_id, sent in outbound.items():
+        positive = stages.get(contact_id) in POSITIVE_STAGES
+        replies_in = sorted(inbound.get(contact_id, []))
+        before = [m for m in sent if m["kind"] != "reply" and replies_in and m["at"] <= replies_in[0]]
+        credited = before[-1] if before else None
+        for m in sent:
+            if m["at"] < since or m["kind"] not in counts:
+                continue
+            cell = counts[m["kind"]]
+            cell["sent"] += 1
+            if m is credited or (m["kind"] == "reply" and any(t > m["at"] for t in replies_in)):
+                cell["human_replies"] += 1
+                cell["positive"] += positive
+    cells = [_cell("whatsapp.message", kind, **c) for kind, c in counts.items() if c["sent"]]
+    return {c["key"]: c for c in cells}
+
+
 async def owner_edits(state, days: int = WINDOW_DAYS, now: datetime | None = None,
                       limit: int = 40) -> list[dict]:
     """Drafts the owner changed in the Outbox: what Harvey wrote, what they sent."""
@@ -387,7 +422,8 @@ async def gather(state, now: datetime | None = None, days: int = WINDOW_DAYS) ->
             if not is_inbound(r.get("angle"))]
     variants = await subject_variants(state, days, now)
     li = await linkedin_outcomes(state, days, now)
-    cells = {**email_cells(rows), **subject_cells(variants), **linkedin_cells(li)}
+    cells = {**email_cells(rows), **subject_cells(variants), **linkedin_cells(li),
+             **await whatsapp_cells(state, days, now)}
     return {
         "rows": rows, "variants": variants, "linkedin": li, "cells": cells,
         "groups": comparable_groups(cells), "segments": big_segments(cells),

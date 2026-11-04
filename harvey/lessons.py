@@ -14,6 +14,7 @@ Kinds:
   its honest sample size: at about a reply a day a real subject winner needs
   thousands of sends per variant.
 - ``linkedin``: how LinkedIn messages are written. The LinkedIn drafting prompt.
+- ``whatsapp``: how WhatsApp messages are written. The WhatsApp drafting prompt.
 - ``targeting``: who to write to. Shown to the owner, injected nowhere.
 - ``segment_mix``: a proposed share of first emails per segment. Its evidence
   carries ``weights``; approving it writes them to the ``segment_weights``
@@ -46,19 +47,20 @@ from pathlib import Path
 
 import aiosqlite
 
-KINDS = ("writing", "subject", "linkedin", "targeting", "segment_mix")
+KINDS = ("writing", "subject", "linkedin", "whatsapp", "targeting", "segment_mix")
 STATUSES = ("proposed", "active", "rejected", "retired")
 # Where each status may go. Nothing comes back from rejected or retired: a
 # lesson worth having again is proposed again by the Learner.
 TRANSITIONS = {"proposed": ("active", "rejected"), "active": ("retired",)}
 KIND_LABELS = {"writing": "Writing", "subject": "Subject lines", "linkedin": "LinkedIn",
-               "targeting": "Targeting", "segment_mix": "Segment mix"}
+               "whatsapp": "WhatsApp", "targeting": "Targeting", "segment_mix": "Segment mix"}
 
 # Which active lessons each prompt carries.
 PROMPT_KINDS = {
     "writer": ("writing", "subject"),
     "handler": ("writing",),
     "linkedin": ("linkedin",),
+    "whatsapp": ("whatsapp",),
 }
 
 SEGMENT_WEIGHTS_KEY = "segment_weights"
@@ -136,7 +138,7 @@ _TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z'\-]*")
 ALLOWED_PROPER = frozenset("""
 shopify wordpress woocommerce magento oscommerce zen cart opencart prestashop virtuemart joomla
 cubecart x-cart ecwid bigcommerce shopfactory sellerdeck actinic wix squarespace webflow php
-custom other linkedin gmail outlook google email i ok
+custom other linkedin whatsapp gmail outlook google email i ok
 monday tuesday wednesday thursday friday saturday sunday january february march april may june
 july august september october november december
 """.split())
@@ -295,6 +297,8 @@ async def filter_context(state, days: int = 120) -> dict:
             person(name)
             person(first)
             firm(company)
+        for (name,) in await rows("SELECT name FROM whatsapp_contacts"):
+            person(name)
         for (thread,) in await rows(
                 "SELECT thread_json FROM conversations WHERE updated_at >= ? "
                 "ORDER BY updated_at DESC LIMIT 2000", (since,)):
@@ -307,6 +311,10 @@ async def filter_context(state, days: int = 120) -> dict:
                     excerpts.update(_runs(_words(str(m.get("content") or "")), EXCERPT_RUN_WORDS))
         for (body,) in await rows(
                 "SELECT body FROM linkedin_messages WHERE direction = 'in' "
+                "AND COALESCE(sent_at, created_at) >= ? LIMIT 4000", (since,)):
+            excerpts.update(_runs(_words(body or ""), EXCERPT_RUN_WORDS))
+        for (body,) in await rows(
+                "SELECT body FROM whatsapp_messages WHERE direction = 'in' "
                 "AND COALESCE(sent_at, created_at) >= ? LIMIT 4000", (since,)):
             excerpts.update(_runs(_words(body or ""), EXCERPT_RUN_WORDS))
     # A one-word phrase is matched as a token above; only multi-word ones here.
@@ -534,7 +542,7 @@ def render_block(lessons: list[dict], cap: int = BLOCK_CHARS) -> str:
 
 
 async def lessons_block(state, which: str) -> str:
-    """The active lessons for one prompt ("writer", "handler", "linkedin") as
+    """The active lessons for one prompt ("writer", "handler", "linkedin", "whatsapp") as
     prompt text, or "". Never stops a draft: a failed read is ""."""
     kinds = PROMPT_KINDS.get(which, ())
     if not kinds:
