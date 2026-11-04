@@ -41,6 +41,8 @@ MESSAGE_COLUMNS = "thread_id,sender_type,is_ai,content,created_at,meta,message_t
 
 # Not part of the conversation: greetings and buttons the widget draws, the
 # contact card, and the transcript-by-email note.
+# Whose address isn't a lead: our staff and the clients we already have.
+KNOWN_PEOPLE_TABLES = ("profiles", "clients", "client_accounts")
 DROPPED_KINDS = frozenset({"greeting", "selector", "contact_channels", "email_transcript"})
 DIRECTORIES = ("clutch", "themanifest", "designrush", "goodfirms", "sortlist", "selectedfirms",
                "upcity", "topdevelopers", "softwareworld", "techbehemoths", "itfirms", "appfutura")
@@ -394,6 +396,23 @@ class ERPChatClient:
                 "select": MESSAGE_COLUMNS, "thread_id": _in_list(chunk),
                 "order": "thread_id.asc,created_at.asc"})
         return out
+
+    async def known_people(self) -> set[str]:
+        """Lowercased addresses of our staff and existing clients: a chat from
+        one of them is not a new lead. A table that can't be read is skipped."""
+        if not self.configured:
+            return set()
+        people: set[str] = set()
+        async with self._client() as client:
+            for table in KNOWN_PEOPLE_TABLES:
+                try:
+                    rows = await self._rows(client, table, {"select": "email", "email": "not.is.null"})
+                except (ERPChatError, httpx.HTTPError) as e:
+                    logger.warning(f"ERP: couldn't read {table}: {e}")
+                    continue
+                people.update(str(r.get("email") or "").strip().lower() for r in rows)
+        people.discard("")
+        return people
 
     async def read_leads(self, since: str = "") -> list[InboundLead]:
         """Everyone with an address, deduped by lowercased email. ``since``

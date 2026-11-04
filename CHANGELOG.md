@@ -9,6 +9,14 @@ minor versions can still change behaviour.
 
 ### Added
 
+- **Export everything to a spreadsheet** (`harvey export --everything`, and a button on the
+  Contacts tab). One .xlsx with a sheet each for contacts, companies, emails, conversations,
+  website leads, LinkedIn, WhatsApp, facts, campaigns, lessons, feedback and activity. Settings
+  are left out, columns naming a secret are dropped, a secret in a link is masked, and every
+  value is stored as text so nothing in it runs as a formula.
+- **Website chat follow-ups skip our own people.** Each run reads the staff and client lists
+  from the chat's database, so a chat from a teammate or an existing client never becomes a
+  sales email.
 - **Follow-ups to website chat leads** (`harvey/inbound.py`,
   `harvey/collectors/erp_chat.py`, `channels.email.inbound`, off by default).
   Someone who gave their email in the website's live chat gets one personal email

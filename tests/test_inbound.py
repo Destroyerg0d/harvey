@@ -1380,3 +1380,26 @@ async def test_a_whatsapp_failure_never_stops_the_email(state, queued):
 async def test_a_dry_run_queues_nothing_for_whatsapp(state, verified, queued):
     await pipeline(state, [lead(phone="+1 555 0100")], cfg=whatsapp_config()).run(dry_run=True)
     assert queued == []
+
+
+@pytest.mark.asyncio
+async def test_a_chat_from_our_staff_or_a_client_gets_nothing(state):
+    class Known(Reader):
+        async def known_people(self):
+            return {BUSINESS}
+
+    brain = Brain()
+    pipe = I.InboundPipeline(brain, state, config(), None, reader=Known([lead()]), now=lambda: NOW)
+    report = await pipe.run()
+    assert report["drafted"] == 0 and brain.calls("inbound_email") == 0
+    assert report["reasons"].get("one of our staff or an existing client") == 1
+
+
+@pytest.mark.asyncio
+async def test_if_the_staff_list_cant_be_read_the_run_carries_on(state):
+    class Broken(Reader):
+        async def known_people(self):
+            raise RuntimeError("no")
+
+    pipe = I.InboundPipeline(Brain(), state, config(), None, reader=Broken([lead()]), now=lambda: NOW)
+    assert (await pipe.run())["drafted"] == 1

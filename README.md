@@ -637,6 +637,7 @@ harvey status                # pipeline summary
 harvey usage                 # active provider's quota + per-agent tokens
 harvey outbox                # review queued email
 harvey export                # deliverable prospects → CSV
+harvey export --everything   # everything Harvey holds → one .xlsx, a sheet per kind of data
 harvey sending pause|resume  # kill switch (--mailbox EMAIL: just that mailbox)
 harvey replies requeue-auto-acks  # put back follow-ups older auto-replies cancelled (--dry-run)
 harvey warmup [domain]       # is the sending domain ready? (SPF/DKIM/DMARC, age, blocklists, warmup)

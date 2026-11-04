@@ -839,6 +839,7 @@ class InboundPipeline:
         self._now = now
         self.providers = MailboxProviders(config, env) if is_multi(config) else None
         self._skills: str | None = None
+        self._known_people: set[str] = set()
 
     def now(self) -> datetime:
         value = self._now() if self._now else _utcnow()
@@ -848,7 +849,20 @@ class InboundPipeline:
         last = parse_time(lead.last_message_at)
         return last is None or self.now() - last >= timedelta(minutes=self.settings.idle_minutes)
 
+    async def _read_known_people(self) -> None:
+        """Our staff and existing clients, read once per run. On a failure the
+        last list stands."""
+        reader = getattr(self.reader, "known_people", None)
+        if reader is None:
+            return
+        try:
+            self._known_people = await reader()
+        except Exception as e:
+            logger.warning(f"Inbound: couldn't read our staff and clients: {e}")
+
     def _prefilter(self, lead: InboundLead) -> str:
+        if lead.email.strip().lower() in self._known_people:
+            return "one of our staff or an existing client"
         return prefilter(lead, own_domains=allowed_link_domains(self.config),
                          do_not_contact=live_do_not_contact(self.config),
                          rep_active_days=self.settings.rep_active_days, now=self.now())
@@ -1073,6 +1087,7 @@ class InboundPipeline:
         for the cursor. A stop part-way (the provider going down) loses nothing:
         what was decided is stored, and the rest is read again next time."""
         report = _new_report(len(leads))
+        await self._read_known_people()
         decided: set[str] = set()
         waiting: list[InboundLead] = []
         records: dict[str, dict | None] = {}

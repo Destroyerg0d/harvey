@@ -1511,6 +1511,23 @@ async def export_prospects(all: bool = False, min_score: int = 0, email_status: 
     )
 
 
+@app.get("/api/export/everything.xlsx")
+async def export_everything():
+    """Everything Harvey holds, one sheet per kind of data (harvey/export_all.py)."""
+    from fastapi.responses import Response
+    from harvey.export_all import MEDIA_TYPE, default_name, workbook_bytes
+
+    try:
+        state = _state()
+        await state.init_db()
+        body = await asyncio.to_thread(workbook_bytes, str(DB_PATH))
+    except Exception as e:
+        logger.warning("Full export failed: %s", e)
+        return JSONResponse({"success": False, "message": "The export failed."}, status_code=500)
+    return Response(body, media_type=MEDIA_TYPE,
+                    headers={"Content-Disposition": f'attachment; filename="{default_name()}"'})
+
+
 @app.get("/api/campaigns")
 async def get_campaigns():
     rows = await query_db("SELECT * FROM campaigns ORDER BY created_at DESC LIMIT 100")

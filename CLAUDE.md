@@ -349,6 +349,7 @@ harvey status                # Pipeline summary
 harvey usage                 # Claude quota gauges + per-agent token usage (no dollar costs — subscription plans aren't billed per token)
 harvey export                # Deliverable prospects → sequencer-ready CSV (prospects.csv)
 harvey export --all          # Full raw list, no filters
+harvey export --everything   # Everything Harvey holds → one .xlsx (also a button on the Contacts tab)
 harvey gmail auth            # One-time Gmail OAuth (when provider: gmail); --mailbox EMAIL for one of several
 harvey gmail test            # Verify the Gmail connection (every mailbox, or --mailbox EMAIL)
 harvey outbox                # Review queued emails; --approve <id> / --approve-all / --reject <id>

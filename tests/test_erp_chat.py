@@ -370,3 +370,20 @@ def test_a_card_without_a_real_number_or_for_another_channel_sets_no_phone():
     assert no_number.has_whatsapp is True and no_number.phone == ""
     other = {"kind": "contact_channels", "channels": [{"id": "telegram", "value": "+1 555 0100"}]}
     assert _lead_from(message("t1", "system", "", "2026-10-02T09:00:00+00:00", meta=other)).phone == ""
+
+
+def test_known_people_reads_staff_and_clients_and_skips_a_table_it_cant_read(monkeypatch):
+    import asyncio
+    seen = []
+
+    def handler(request):
+        table = request.url.path.rsplit("/", 1)[-1]
+        seen.append((request.method, table))
+        if table == "clients":
+            return httpx.Response(500, json={"message": "no"})
+        return httpx.Response(200, json=[{"email": " Staff@Ours.example "}, {"email": None}])
+
+    client = client_for(handler)
+    assert asyncio.run(client.known_people()) == {"staff@ours.example"}
+    assert {table for _, table in seen} == {"profiles", "clients", "client_accounts"}
+    assert {method for method, _ in seen} == {"GET"}

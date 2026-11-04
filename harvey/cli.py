@@ -447,9 +447,27 @@ def cmd_usage(args):
 
 
 def cmd_export(args):
-    """Export the prospect list as a sequencer-ready CSV."""
+    """Export the prospect list as a sequencer-ready CSV, or everything to a spreadsheet."""
     from harvey.state import StateManager
     from harvey.export import export_prospects_csv
+
+    if getattr(args, "everything", False):
+        from pathlib import Path
+
+        from harvey.export_all import default_name, write_workbook
+        from harvey.paths import PROJECT_ROOT
+
+        state = StateManager()
+        asyncio.run(state.init_db())
+        out = (PROJECT_ROOT / "data" / "exports" / default_name() if args.out == "prospects.csv"
+               else Path(args.out))
+        out.parent.mkdir(parents=True, exist_ok=True)
+        counts = write_workbook(str(state.db_path), str(out))
+        print(f"\n  Exported everything to {out}\n")
+        for sheet, rows in counts.items():
+            print(f"  {rows:>7}  {sheet}")
+        print()
+        return
 
     async def _export():
         state = StateManager()
@@ -1232,6 +1250,9 @@ def main():
         "--email-status", default="",
         help="Comma-separated statuses to include (default: verified,risky)",
     )
+    sub.add_argument("--everything", action="store_true",
+                     help="Everything Harvey holds, one sheet per kind of data, as an .xlsx "
+                          "(default file: data/exports/harvey-export-DATE.xlsx)")
     sub.add_argument("--min-score", type=int, default=0, help="Minimum ICP score")
     sub.add_argument("--status", default="", help="Comma-separated pipeline statuses (e.g. new,queued); opted-out contacts stay excluded")
     sub.add_argument("--all", action="store_true", help="Export the raw list without filters, including opted-out contacts (not for outreach)")
