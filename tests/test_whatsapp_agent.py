@@ -476,7 +476,8 @@ def test_a_brain_outage_leaves_their_message_to_read_later(tmp_path):
 def test_they_wrote_again_so_the_old_draft_is_dropped(tmp_path):
     w = World(tmp_path, [jane(unread=True, thread=[("in", "One more thing")])])
     c = w.contact(stage="replied")
-    old = run(w.state.wa_add_message(c, kind="reply", body="An older answer"))
+    # Older than the frozen clock: the test must not depend on what time it really is.
+    old = run(w.state.wa_add_message(c, kind="reply", body="An older answer", created_at=OPEN - timedelta(hours=1)))
     w.go()
     assert w.get(old)["status"] == "skipped"
     assert [d["body"] for d in w.msgs(c, statuses=("draft",))] == [REPLY]
