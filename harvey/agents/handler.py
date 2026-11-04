@@ -1916,6 +1916,11 @@ Product: {self.config.product.name} — {self.config.product.description}"""
                 f"{sender.email}. This reply goes out from that mailbox, so write it as "
                 f"{sender.first_name}: never as anyone else on the team, and invent nothing "
                 f"about {sender.first_name} (no background, location or personal details).")
+        # What Harvey knew about them before this thread: the research behind
+        # a cold email, or what they asked in the website chat (harvey/inbound.py).
+        notes = (getattr(prospect, "personalization_notes", "") or "").strip()
+        if notes:
+            prompt += f"\n\nWhat we knew about them before this conversation:\n{fence(notes, 'notes on them')}"
 
         prompt += f"""
 

@@ -13,7 +13,7 @@ from harvey.brain import Brain
 from harvey.sending_mode import sync_sending_mode
 from harvey.config import (
     ConfigError, load_config, load_env, HarveyConfig, legacy_sending_held, sending_notice,
-    compliance_notice, send_window_of,
+    compliance_notice, inbound_of, send_window_of,
 )
 from harvey.integrations.mail_provider import NATIVE_PROVIDERS
 from harvey.pidfile import (
@@ -107,6 +107,16 @@ def sends_through_quiet_hours(config: HarveyConfig) -> bool:
     window = send_window_of(config)
     return bool(window is not None and window.recipient_timezone
                 and email.enabled and email.provider in NATIVE_PROVIDERS)
+
+
+def inbound_wakes_quiet_hours(config: HarveyConfig) -> bool:
+    """True when quiet hours still let a follow-up to a chat that just ended
+    go out (channels.email.inbound on, angle inbound_fresh). Without send
+    windows in recipients' zones that is all the Sender sends in them
+    (Sender.inbound_only); everything else waits for the operator's hours."""
+    email = config.channels.email
+    return bool(inbound_of(config).enabled and email.enabled
+                and email.provider in NATIVE_PROVIDERS)
 
 
 def seconds_until_quiet_hours_end(config: HarveyConfig) -> int:
@@ -421,6 +431,11 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
     # The learner: once a day, lessons from results for you to approve.
     from harvey.agents.learner import LearnerRunner
     learner = LearnerRunner(brain, state, config)
+    # Website chat leads (channels.email.inbound.enabled): its own timer in the
+    # background, so quiet hours, a paused brain or a long cycle never hold it up.
+    from harvey.inbound import InboundRunner
+    inbound = InboundRunner(brain, state, config, env)
+    inbound.start()
 
     interval = config.usage.heartbeat_interval_minutes * 60
     max_calls = max(int(200 * (config.usage.max_daily_claude_percent / 100)), 1)
@@ -437,7 +452,9 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
             # zones, quiet hours only stop prospecting and writing: a cycle
             # still reads replies and sends what's due (sends_through_quiet_hours).
             quiet = in_quiet_hours(config)
-            send_only = quiet and sender.is_native and sends_through_quiet_hours(config)
+            wakes = quiet and sender.is_native
+            in_their_zones = wakes and sends_through_quiet_hours(config)
+            send_only = in_their_zones or (wakes and inbound_wakes_quiet_hours(config))
             if quiet and not send_only:
                 sleep_for = seconds_until_quiet_hours_end(config)
                 logger.info(f"Quiet hours. Sleeping for {sleep_for // 60} minutes.")
@@ -461,6 +478,7 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
             # inside its recipient's window, not held by a cap or a pause.
             # Replies wait for the operator's hours, as they always have.
             sender.cold_only = send_only
+            sender.inbound_only = send_only and not in_their_zones
             # What an unread inbox holds back is decided afresh every cycle.
             sender.hold_prospects, sender.hold_mailboxes = set(), set()
             if send_only and not await sender.cold_due_in_window():
@@ -636,6 +654,7 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
 
     await linkedin.shutdown()
     await learner.shutdown()
+    await inbound.shutdown()
     logger.info("Harvey shutting down. Deals don't close themselves, but I need a break.")
 
 

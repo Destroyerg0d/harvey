@@ -35,7 +35,7 @@ from datetime import datetime, timedelta, timezone
 
 import aiosqlite
 
-from harvey.segment_stamp import segment_from_facts
+from harvey.segment_stamp import INBOUND_ANGLES, is_inbound, segment_from_facts
 
 logger = logging.getLogger("harvey.segment_mix")
 
@@ -222,17 +222,23 @@ async def update_ramp(state, weights: dict[str, float], now: datetime | None = N
 
 
 async def first_emails_since(db_path: str, since: str) -> dict[str, int]:
-    """First emails (sequence step 1) sent since ``since``, by stamped segment."""
+    """First emails (sequence step 1) sent since ``since``, by stamped segment.
+    Follow-ups to our own chat's leads have no share to count against."""
+    marks = ", ".join("?" for _ in INBOUND_ANGLES)
     async with aiosqlite.connect(db_path, timeout=30) as db:
         async with db.execute(
                 "SELECT COALESCE(NULLIF(segment, ''), 'unknown'), COUNT(*) FROM outbox "
                 "WHERE kind = 'sequence' AND step = 1 AND status = 'sent' "
-                "AND sent_at >= ? GROUP BY 1", (since,)) as cursor:
+                f"AND COALESCE(angle, '') NOT IN ({marks}) "
+                "AND sent_at >= ? GROUP BY 1", (*INBOUND_ANGLES, since)) as cursor:
             return {str(seg): int(n) for seg, n in await cursor.fetchall()}
 
 
 def is_first_email(row: dict) -> bool:
-    return row.get("kind") == "sequence" and int(row.get("step") or 0) == 1
+    """A cold first email. A follow-up to someone who gave us their address in
+    our chat isn't cold: it drains ahead of the mix (harvey/inbound.py)."""
+    return (row.get("kind") == "sequence" and int(row.get("step") or 0) == 1
+            and not is_inbound(row.get("angle")))
 
 
 async def queued_segments(db_path: str, rows: list[dict]) -> dict[str, str]:

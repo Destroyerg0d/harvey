@@ -238,13 +238,13 @@ def clean_role(value) -> str:
     return role[:80]
 
 
-async def _ask_json(brain, prompt: str, task: str):
+async def _ask_json(brain, prompt: str, task: str, agent: str = "handler"):
     """One JSON answer from the brain (think_json when it has one)."""
+    session = f"harvey-{agent}"
     if hasattr(brain, "think_json"):
-        result = await brain.think_json(prompt, session_id="harvey-handler", agent="handler",
-                                        task=task)
+        result = await brain.think_json(prompt, session_id=session, agent=agent, task=task)
     else:
-        raw = await brain.think(prompt, session_id="harvey-handler", agent="handler", task=task)
+        raw = await brain.think(prompt, session_id=session, agent=agent, task=task)
         try:
             result = json.loads(raw) if raw else None
         except (TypeError, ValueError):

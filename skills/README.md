@@ -25,6 +25,8 @@ When an agent runs, it calls `brain.load_skills_for_agent("agent_name")` which c
 
 \* Only for prospects whose company is a startup by its own site's account (the `YC_BACKED` or `ACCELERATOR` signal, or a `FUNDING_ROUND` from the last 18 months), not loaded for everyone.
 
+Two optional private skills, gitignored because they hold your own rules and prices: `inbound_followup.md` shapes follow-ups to website chat leads, and `estimate_rules.md` says how written estimates are scoped and priced (`harvey/inbound.py`). Neither ships with Harvey, and nothing happens if they don't exist.
+
 ## Built-in Skills
 
 - **`prospecting_tactics.md`** — Google dorking queries, company website scraping, trigger events, referral mining

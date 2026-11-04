@@ -14,6 +14,7 @@ from pydantic import (
     BaseModel, PrivateAttr, TypeAdapter, ValidationError, field_validator, model_validator,
 )
 
+from harvey.money import parse_price_entry
 from harvey.paths import PROJECT_ROOT
 
 logger = logging.getLogger("harvey.config")
@@ -265,6 +266,66 @@ class MailboxConfig(BaseModel):
         return v
 
 
+class InboundConfig(BaseModel):
+    """Follow-ups to people who gave their address in the website's live chat
+    (channels.email.inbound, harvey/inbound.py).
+
+    ``enabled`` turns on the background poll; `harvey inbound run` works
+    either way. Each draft waits for you, held for review, unless ``autopilot``
+    (its own switch: channels.email.require_approval doesn't change it, and
+    `harvey sending pause` stops it like everything else). A written estimate
+    waits for you whatever this says."""
+
+    enabled: bool = False
+    # A chat counts as finished once its last message is this old.
+    idle_minutes: int = 30
+    poll_minutes: int = 5
+    autopilot: bool = False
+    # A person on our side wrote in the chat this recently: it's theirs.
+    rep_active_days: int = 14
+    # The only amounts a written estimate may name, each with its currency
+    # (harvey/money.py reads any common format). Empty: no estimates, and leads
+    # ready for one get an ordinary email instead.
+    price_list: list[str] = []
+
+    @field_validator("price_list", mode="before")
+    @classmethod
+    def _valid_price_list(cls, v):
+        """A typo here must stop Harvey, not quietly refuse every estimate."""
+        if v is None:
+            return []
+        if isinstance(v, str):
+            v = [v]
+        if not isinstance(v, (list, tuple)):
+            raise ValueError('price_list must be a list of amounts, e.g. ["$1,200", "EUR 2,400"]')
+        for item in v:
+            if parse_price_entry(item) is None:
+                raise ValueError(f"'{item}' in price_list isn't one amount with its currency, "
+                                 'e.g. "$1,200". Quote each one.')
+        return list(v)
+
+    @field_validator("idle_minutes", "rep_active_days")
+    @classmethod
+    def _not_negative(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("must be 0 or more")
+        return v
+
+    @field_validator("poll_minutes")
+    @classmethod
+    def _at_least_a_minute(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("poll_minutes must be at least 1")
+        return v
+
+
+def inbound_of(config) -> InboundConfig:
+    """channels.email.inbound, or the defaults (off) when a config has none."""
+    email = getattr(getattr(config, "channels", None), "email", None)
+    found = getattr(email, "inbound", None)
+    return found if isinstance(found, InboundConfig) else InboundConfig()
+
+
 class EmailChannelConfig(BaseModel):
     enabled: bool = True
     # "instantly" (legacy), "gmail" (Gmail/Workspace via API — recommended),
@@ -310,6 +371,13 @@ class EmailChannelConfig(BaseModel):
     # rest wait in the queue; approve one sample and that segment sends on
     # its own from then on. Empty: no samples.
     review_segments: list[str] = []
+    # Follow-ups to people who gave their address in the website chat.
+    inbound: InboundConfig = InboundConfig()
+
+    @field_validator("inbound", mode="before")
+    @classmethod
+    def _blank_inbound(cls, v):
+        return InboundConfig() if v is None else v
 
     @field_validator("review_segments", mode="before")
     @classmethod
@@ -1010,6 +1078,9 @@ class EnvConfig(BaseModel):
     m365_tenant_id: str = ""
     # Optional: only used when compliance.precleared.enabled is true.
     precleared_api_key: str = ""
+    # Optional: the website chat's Supabase, read-only (harvey/collectors/erp_chat.py).
+    erp_supabase_url: str = ""
+    erp_supabase_key: str = ""
 
 
 def _format_validation_error(e: ValidationError) -> str:
@@ -1134,6 +1205,8 @@ def load_env() -> EnvConfig:
         m365_client_id=os.getenv("M365_CLIENT_ID", "").strip(),
         m365_tenant_id=os.getenv("M365_TENANT_ID", "").strip(),
         precleared_api_key=os.getenv("PRECLEARED_API_KEY", "").strip(),
+        erp_supabase_url=os.getenv("ERP_SUPABASE_URL", "").strip(),
+        erp_supabase_key=os.getenv("ERP_SUPABASE_KEY", "").strip(),
     )
     return env
 

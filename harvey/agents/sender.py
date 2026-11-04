@@ -21,9 +21,12 @@ from datetime import date, datetime, timedelta, timezone
 from harvey.brain import Brain
 from harvey.config import (
     HarveyConfig, EnvConfig, WarmupConfig, cold_daily_cap, compliance_footer_lines,
-    compliance_notice, compliance_of, live_do_not_contact, operator_timezone, send_window_of,
+    compliance_notice, compliance_of, inbound_of, live_do_not_contact, operator_timezone,
+    send_window_of,
 )
-from harvey.gate import autopilot_review, do_not_contact_match, pre_send_check
+from harvey.gate import (
+    MAX_BODY_WORDS, MAX_ESTIMATE_BODY_WORDS, autopilot_review, do_not_contact_match, pre_send_check,
+)
 from harvey.send_window import in_window, next_send_time, recipient_country, recipient_zone
 from harvey.integrations.instantly import InstantlyClient
 from harvey.integrations.mail_provider import NATIVE_PROVIDERS, get_mail_provider
@@ -34,7 +37,11 @@ from harvey.mailboxes import (
     primary_mailbox, render_sender, takes_new_prospects,
 )
 from harvey.segment_mix import LEARNED_KEY, build_mix, queued_segments, update_ramp, weights_of
-from harvey.segment_stamp import segment_for_company, variant_for
+from harvey.segment_stamp import (
+    ESTIMATE_HELD_REASON, INBOUND_ANGLES, INBOUND_AUTOPILOT, INBOUND_ESTIMATE_ANGLE,
+    is_fresh_inbound_row, is_inbound, segment_for_company,
+    variant_for,
+)
 from harvey.segments import SEGMENT_LABELS
 from harvey.sending_mode import sync_sending_mode
 from harvey.state import (
@@ -175,6 +182,9 @@ class Sender:
         # zones): only cold email goes, inside its window; replies wait for
         # the operator's own hours, as they always have.
         self.cold_only = False
+        # Set with cold_only in quiet hours without send windows in recipients'
+        # zones: only a follow-up to a chat that just ended goes (harvey/inbound.py).
+        self.inbound_only = False
         # The last drain couldn't ask Precleared: quiet hours wake only for
         # cold email it has already cleared until a drain outside them has run.
         self.compliance_held = False
@@ -261,6 +271,8 @@ class Sender:
 
     async def _has_cached_verdict(self, item: dict) -> bool:
         """Use the send loop's recipient facts when counting held email."""
+        if is_inbound(item.get("angle")):
+            return True    # they gave us the address: never waits on the check
         prospect = await self.state.get_prospect(item["prospect_id"])
         country = await self._recipient_country(prospect)
         company, name = await self._recipient_names(prospect)
@@ -272,9 +284,10 @@ class Sender:
         send window and free to go now (sending not paused, under the daily
         and warmup caps, and after a compliance hold only to someone
         Precleared has already cleared). Only then is it worth waking to read
-        replies and send."""
+        replies and send. A follow-up to a chat that just ended has no window;
+        with ``inbound_only`` it is the only thing that counts."""
         window = send_window_of(self.config)
-        if window is None or not self.is_native:
+        if not self.is_native or (window is None and not self.inbound_only):
             return False
         due_before = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
         if is_multi(self.config):
@@ -302,10 +315,14 @@ class Sender:
         for item in due:
             if item["kind"] != "sequence":
                 continue
+            if is_fresh_inbound_row(item, now):
+                return True
+            if self.inbound_only:
+                continue
             prospect = await self.state.get_prospect(item["prospect_id"])
             country = await self._recipient_country(prospect) if self.precleared is not None else ""
             names = await self._recipient_names(prospect) if self.precleared is not None else ("", "")
-            if self.compliance_held and self.precleared is not None:
+            if self.compliance_held and self.precleared is not None and not is_inbound(item.get("angle")):
                 # New addresses wait for a drain outside quiet hours; a
                 # stored verdict still lets email go, as in the drain.
                 clearance = await self.precleared.cached(
@@ -325,6 +342,13 @@ class Sender:
             status="approved", due_before=due_before,
             limit=QUIET_HOURS_SCAN, skip_unready_follow_ups=True, kind="sequence", **where,
         )
+        # Cold email outside its window could fill the page and hide them.
+        seen = {item["id"] for item in due}
+        inbound = await self.state.get_outbox(
+            status="approved", due_before=due_before, limit=QUIET_HOURS_SCAN, kind="sequence",
+            angles=INBOUND_ANGLES, **where,
+        )
+        due = [item for item in inbound if item["id"] not in seen] + due
         if self.compliance_held and self.precleared is not None:
             # Match the drain's separate follow-up scan: waiting first emails
             # must not hide a cleared follow-up and prevent the loop waking.
@@ -948,7 +972,7 @@ class Sender:
                 stamp["segment"] = await segment_for_company(
                     self.state, getattr(prospect, "company_id", "") or "", prospect)
             if (item.get("kind") == "sequence" and int(item.get("step") or 0) == 1
-                    and not item.get("variant")):
+                    and not item.get("variant") and not is_inbound(item.get("angle"))):
                 stamp["variant"] = variant_for(item.get("prospect_id") or "")
         except Exception as e:
             logger.debug(f"Sender: couldn't stamp the outcome fields: {e}")
@@ -960,7 +984,8 @@ class Sender:
         (up to REVIEW_SAMPLES), or moves back REVIEW_RECHECK, still approved.
         The first one you approve marks the segment reviewed."""
         review = getattr(self.config.channels.email, "review_segments", None) or []
-        if not review or item["kind"] != "sequence" or int(item.get("step") or 0) != 1:
+        if (not review or item["kind"] != "sequence" or int(item.get("step") or 0) != 1
+                or is_inbound(item.get("angle"))):
             return None
         segment = item.get("segment") or await segment_for_company(
             self.state, getattr(prospect, "company_id", "") or "", prospect)
@@ -1082,6 +1107,8 @@ class Sender:
             prospect=prospect, allow_risky=allow_risky, kind=item["kind"],
             postal_address=compliance_of(self.config).postal_address,
             do_not_contact=live_do_not_contact(self.config),
+            max_words=(MAX_ESTIMATE_BODY_WORDS if item.get("angle") == INBOUND_ESTIMATE_ANGLE
+                       else MAX_BODY_WORDS),
         )
         if not gate:
             logger.warning(
@@ -1093,6 +1120,13 @@ class Sender:
                 and getattr(self.config.channels.email, "require_approval", True)):
             # Autopilot approved it, and autopilot has since been turned off.
             return "pending_review", AUTOPILOT_OFF_REASON
+        # A written estimate goes only once a person approved that one, however
+        # it came to be marked approved: it quotes a price.
+        if item.get("angle") == INBOUND_ESTIMATE_ANGLE and item.get("approved_by") != "you":
+            return "pending_review", HELD_FOR_REVIEW + ESTIMATE_HELD_REASON
+        if item.get("approved_by") == INBOUND_AUTOPILOT and not inbound_of(self.config).autopilot:
+            return "pending_review", (HELD_FOR_REVIEW + "channels.email.inbound.autopilot was "
+                                      "turned off before it went out")
         sample = await self._segment_sample(item, prospect)
         if sample:
             return sample
@@ -1148,11 +1182,24 @@ class Sender:
                 skip_unready_follow_ups=True, follow_ups_only=True, **where,
             )
             extra += [item for item in follow_ups if item["id"] not in seen]
+        if cold:
+            # Someone who asked us first doesn't wait behind the cold backlog.
+            seen.update(item["id"] for item in extra)
+            inbound = await self.state.get_outbox(
+                status="approved", due_before=now, limit=page, kind="sequence",
+                angles=INBOUND_ANGLES, **where,
+            )
+            extra += [item for item in inbound if item["id"] not in seen]
         if extra:
             due = sorted(
                 due + extra,
                 key=lambda i: (i.get("send_at") or "", i.get("created_at") or ""),
             )
+        if any(is_inbound(item.get("angle")) for item in due):
+            # Replies, then them, then the rest, each in the order it had. A
+            # backlog of them spends the cycle's cold budget, never a reply's.
+            due = sorted(due, key=lambda i: (
+                0 if i["kind"] != "sequence" else 1 if is_inbound(i.get("angle")) else 2))
         return due
 
     async def _segment_mix(self):
@@ -1278,6 +1325,9 @@ class Sender:
                 break
             if self.cold_only and item["kind"] != "sequence":
                 continue  # quiet hours: replies wait for the operator's hours
+            fresh = is_fresh_inbound_row(item, _utcnow())
+            if self.inbound_only and not fresh:
+                continue  # quiet hours with no send windows: only a chat that just ended
             is_cold = item["kind"] == "sequence"
             lane = None
             if multi:
@@ -1301,7 +1351,8 @@ class Sender:
             if mix is not None and not mix.allows(item):
                 mix.held += 1     # its segment is at its ramp's ceiling today
                 continue
-            needs_check = self.precleared is not None and is_cold
+            # They gave us the address themselves: there is nothing to clear.
+            needs_check = self.precleared is not None and is_cold and not is_inbound(item.get("angle"))
             mailbox = lane.mailbox if lane is not None else None
             provider = lane.provider if lane is not None else self.provider
 
@@ -1324,8 +1375,9 @@ class Sender:
             country = await self._recipient_country(prospect) if needs_check else ""
             names = await self._recipient_names(prospect) if needs_check else ("", "")
             # Cold email waits for the recipient's send window, however
-            # late it was approved; replies don't.
-            if (window is not None and is_cold
+            # late it was approved; replies don't, nor does a follow-up to a
+            # chat that just ended.
+            if (window is not None and is_cold and not fresh
                     and await self._outside_window(
                         item, await self._zone_or_default(prospect, given=country, names=names),
                         window)):

@@ -29,6 +29,8 @@ BANNED_PHRASES = (
 
 MAX_SUBJECT_LEN = 90
 MAX_BODY_WORDS = 220        # hard ceiling; sequences aim far lower
+# A written estimate (harvey/inbound.py), held for a person: its 300 words and the footer.
+MAX_ESTIMATE_BODY_WORDS = 360
 MAX_LINKS = 1
 
 EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
@@ -176,11 +178,13 @@ def pre_send_check(
     kind: str = "sequence",
     postal_address: str = "",
     do_not_contact=(),
+    max_words: int = MAX_BODY_WORDS,
 ) -> GateResult:
     """Run every deterministic check. Returns ok=False with reasons on any hit.
 
     postal_address: when set, a cold (sequence) email must carry it (CAN-SPAM).
     do_not_contact: addresses and domains that must never be emailed at all.
+    max_words: the body's ceiling (a written estimate has its own).
     """
     reasons: list[str] = []
     subject = (subject or "").strip()
@@ -214,8 +218,8 @@ def pre_send_check(
     if len(subject) > MAX_SUBJECT_LEN:
         reasons.append(f"subject too long ({len(subject)} > {MAX_SUBJECT_LEN})")
     word_count = len(body.split())
-    if word_count > MAX_BODY_WORDS:
-        reasons.append(f"body too long ({word_count} words > {MAX_BODY_WORDS})")
+    if word_count > max_words:
+        reasons.append(f"body too long ({word_count} words > {max_words})")
 
     # Unrendered merge tags — the classic mass-mail embarrassment
     leftover = MERGE_TAG_RE.findall(subject + " " + body)
@@ -406,7 +410,7 @@ def _shown(host: str, link: str, prefix: str) -> str:
 # them in an outgoing email means a reply quoted Harvey's playbook back.
 # These are written to be said to prospects, so echoing them is fine.
 _SAY_ALOUD_FILES = frozenset({"email_frameworks.md", "product_knowledge.md",
-                              "objection_handling.md", "README.md"})
+                              "objection_handling.md", "README.md", "estimate_rules.md"})
 LEAK_RUN_WORDS = 12       # this many words in a row, copied, is a quote
 _WORD_RE = re.compile(r"[a-z0-9']+")
 # Lines the playbooks quote as scripts to use ("Would Thursday at 2pm work

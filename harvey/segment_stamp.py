@@ -12,6 +12,7 @@ Read-only and never raises: a stamp that can't be worked out is "unknown" or
 
 import hashlib
 import re
+from datetime import datetime, timedelta, timezone
 
 SEGMENTS = ("shopify", "wordpress", "custom", "other", "unknown")
 
@@ -28,6 +29,41 @@ _UNKNOWN = frozenset({"", "unknown", "none", "notfound"})
 
 _ANGLE_RE = re.compile(r"[^a-z0-9]+")
 ANGLE_MAX = 40
+
+# The angle of a follow-up to someone who gave us their address in our own
+# website chat (harvey/inbound.py). They aren't cold: they drain first, skip the
+# compliance check and the segment mix. inbound_fresh: the chat ended in the last
+# day, so it also ignores the recipient's send window for INBOUND_FRESH_FOR after
+# it was queued; held longer than that, it keeps the window like any other.
+# inbound_estimate: a written estimate, which a person always approves first
+# (never autopilot, never "Approve all"), and which keeps the window.
+INBOUND_ANGLE = "inbound"
+INBOUND_FRESH_ANGLE = "inbound_fresh"
+INBOUND_ESTIMATE_ANGLE = "inbound_estimate"
+INBOUND_ANGLES = (INBOUND_ANGLE, INBOUND_FRESH_ANGLE, INBOUND_ESTIMATE_ANGLE)
+INBOUND_FRESH_FOR = timedelta(hours=24)
+# approved_by on what channels.email.inbound.autopilot approved: its own switch,
+# so channels.email.require_approval doesn't send it back to the Outbox.
+INBOUND_AUTOPILOT = "inbound_autopilot"
+# Why an estimate waits, after HELD_FOR_REVIEW.
+ESTIMATE_HELD_REASON = "a written estimate: check the price before approving"
+
+
+def is_inbound(angle) -> bool:
+    """The one check for "this is a follow-up to someone who wrote to us"."""
+    return (angle or "") in INBOUND_ANGLES
+
+
+def is_fresh_inbound_row(row: dict, now: datetime) -> bool:
+    """A follow-up to a chat that just ended, still inside INBOUND_FRESH_FOR."""
+    if (row.get("angle") or "") != INBOUND_FRESH_ANGLE:
+        return False
+    try:
+        queued = datetime.fromisoformat(str(row.get("created_at") or ""))
+    except ValueError:
+        return True
+    queued = queued.astimezone(timezone.utc).replace(tzinfo=None) if queued.tzinfo else queued
+    return now - queued < INBOUND_FRESH_FOR
 
 
 def _platform_segment(value: str) -> str:

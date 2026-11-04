@@ -9,6 +9,36 @@ minor versions can still change behaviour.
 
 ### Added
 
+- **Follow-ups to website chat leads** (`harvey/inbound.py`,
+  `harvey/collectors/erp_chat.py`, `channels.email.inbound`, off by default).
+  Someone who gave their email in the website's live chat gets one personal email
+  that says it follows on from the chat and picks up where it stopped. The chat's
+  Supabase is read with GET requests only (`ERP_SUPABASE_URL`, `ERP_SUPABASE_KEY`),
+  and a session token is never logged or stored. `harvey inbound run` takes the
+  backlog and resumes where it stopped; with `enabled: true` a background poll,
+  quiet hours included, reaches a new lead within the hour of its chat ending. A
+  deterministic prefilter and one model call decide who gets one (only a `project`;
+  `client` and `support` are escalated to you), and a draft naming a price, over 110
+  words or linking outside your domains is refused. Each waits in the Outbox unless
+  `inbound.autopilot`, which is its own switch. If they write again, or a person on
+  your side does, the unsent draft is cancelled. These rows aren't cold: they skip
+  Precleared, go ahead of the cold queue and stay out of the segment mix and the
+  learner's comparisons, and one from a chat that ended in the last 24 hours ignores
+  the recipient's send window. The footer, opt-out, caps, pauses, gate and
+  stop-on-reply all still apply. `harvey inbound import FILE` does the same from a CSV
+  or XLSX with flexible headers, and `harvey inbound status` gives counts only.
+- **Written estimates for those leads, with a price guard.** When the chat says
+  enough to scope the work, Harvey drafts the estimate the chat promised
+  (`prompts/inbound_estimate.md`, and a private `skills/estimate_rules.md` when it
+  exists). Every money figure must be in `channels.email.inbound.price_list`, in any
+  common format (`harvey/money.py`). Any other figure, no price at all, or an empty
+  list (the default) refuses it, and the lead gets an ordinary email asking for the
+  one missing detail, with the reason recorded in `inbound_leads`. An estimate
+  (`angle=inbound_estimate`) always waits for a person, on autopilot too, "Approve
+  all" doesn't release it, and the Sender refuses one nobody approved. The gate takes
+  a `max_words` so an approved estimate isn't failed for its length.
+- **Reply drafting reads what Harvey knew beforehand.** The Handler's prompt now
+  carries the prospect's `personalization_notes`, fenced as untrusted text.
 - **LinkedIn run by Harvey** (`harvey/linkedin/`, `channels.linkedin`, off by
   default). Invites, first messages, one follow-up and replies, through a
   dedicated Chrome profile you sign in to yourself (`harvey linkedin login`;

@@ -112,6 +112,7 @@ CLOUDFLARE_ACCOUNT_ID=  CLOUDFLARE_API_TOKEN=   # deep JS crawling for training
 SERPER_API_KEY=            # web search + discovery (2,500 free, then a $50 prepaid pack)
 PRECLEARED_API_KEY=        # cold-email check before first sends (see Step 7)
 TRULYINBOX_API_KEY=        # warmup: set by 'harvey trulyinbox connect' (see Step 2b)
+ERP_SUPABASE_URL=  ERP_SUPABASE_KEY=   # website chat leads, read-only (harvey inbound)
 ```
 
 **Recommended provider — Gmail:** for <50 cold emails/day, a real Google Workspace mailbox on a *dedicated secondary domain* (never the main one) is the most deliverable, cheapest (~$7/mo) option. Set `channels.email.provider: gmail` in harvey.yaml, put the OAuth client id/secret in `.env`, then run `harvey gmail auth` (one-time browser login). SMTP works with any mailbox (AgentMail, Fastmail). Instantly still works as a legacy option.
@@ -327,6 +328,7 @@ Users will come back with questions and tasks. Common ones:
 - **Handler**: Polls the provider (or Instantly) for replies, dedups them, classifies intent, advances conversation stage, and queues auto-responses through the same outbox approval ladder. On native providers it also detects bounces → marks the address invalid, cancels the prospect's queued sends, and trips a global kill switch past a bounce-rate threshold.
 - **Analyst**: Runs on idle cycles. Generates `data/analytics.json` with pipeline stats and insights, and `data/outcomes.json`: sent, human replies, positive, no's, opt-outs and bounces per segment, angle, step, mailbox and country (`harvey/outcomes.py`).
 - **Learner**: Once a day, proposes lessons from the outcome table, the user's edits to drafts and LinkedIn results (`harvey/agents/learner.py`). Nothing is proposed below its data minimum, and nothing is used until the user approves it on the Learning tab (or `harvey lessons --approve ID`). Don't approve lessons yourself.
+- **Inbound** (`harvey/inbound.py`, `channels.email.inbound`, off by default): people who gave their email in the website's live chat get one personal follow-up that picks up where the chat stopped, or a written estimate when the chat said enough to scope one. It reads the chat's Supabase read-only (`harvey/collectors/erp_chat.py`) or a sheet (`harvey inbound import`). Every draft waits in the Outbox unless `inbound.autopilot`. A written estimate always waits, on autopilot too, and "Approve all" doesn't release it: every figure in it must be in `inbound.price_list` (`harvey/money.py`), and anything else falls back to an ordinary email. Don't turn its autopilot on or edit the price list without the user asking. Never commit `skills/inbound_followup.md` or `skills/estimate_rules.md`: they're private and gitignored.
 - **LinkedIn** (`harvey/linkedin/`, `channels.linkedin`, off by default): invites, messages, follow-ups and replies through a dedicated Chrome profile the user signs in to with `harvey linkedin login` (never handle their password or 2FA code). Automating an account is against LinkedIn's terms; say so, keep the low caps and the 48-hour pause on any warning, and leave LinkedIn autopilot off until the user turns it on.
 
 ### Conversation Stages
@@ -357,6 +359,9 @@ harvey warmup [domain]       # Sending-domain readiness: SPF/DKIM/DMARC, age, bl
 harvey trulyinbox [connect|other]  # Warmup service: connect TrulyInbox, or record another service
 harvey linkedin login|run|status|pause|resume|import  # LinkedIn: the user signs in; run --once [--dry-run]
 harvey lessons [--approve|--reject|--retire ID] [--run]  # Lessons the learner proposed
+harvey inbound status        # Website chat follow-ups: counts only
+harvey inbound run [--limit N] [--dry-run]  # The backlog, resumable; --dry-run prints a few drafts and stores nothing
+harvey inbound import FILE [--source NAME]  # The same from a CSV or XLSX of leads (--limit, --dry-run too)
 ```
 
 ### Common Issues

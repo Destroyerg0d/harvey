@@ -94,6 +94,24 @@ channels:
     # See a segment's first emails before autopilot sends them: a few wait in
     # the Outbox as samples, and approving one lets that segment go on its own.
     # review_segments: [wordpress, custom]
+    # Follow up with people who gave their email in your website's live chat
+    # (harvey/inbound.py). Needs ERP_SUPABASE_URL and ERP_SUPABASE_KEY in .env.
+    # `harvey inbound run` works whether or not this is enabled; enabled adds a
+    # background poll, quiet hours included, that reaches a new lead within the
+    # hour of its chat ending. Remove the # marks to switch it on.
+    # inbound:
+    #   enabled: true
+    #   idle_minutes: 30         # a chat counts as finished once it's this quiet
+    #   poll_minutes: 5
+    #   rep_active_days: 14      # leave a chat alone this long after a person on your side wrote
+    #   autopilot: false         # false: every draft waits in the Outbox for you. true: they send
+    #                            # on their own, whatever require_approval says (written
+    #                            # estimates still wait for you, always)
+    #   # The only amounts a written estimate may name, each with its currency. Any other
+    #   # figure refuses the estimate, and so does an empty list: that lead gets an ordinary
+    #   # email asking for the one missing detail instead. These two are placeholders. Put
+    #   # your real ones in harvey.local.yaml, never in this tracked file.
+    #   price_list: ["$1,111", "$2,222"]
   linkedin:
     enabled: false             # explicit opt-in; credentials alone do not enable it
     max_daily_connections: 15  # connection invites a day (75 a week: max_weekly_invites)

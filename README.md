@@ -649,7 +649,54 @@ harvey linkedin login        # sign the dedicated Chrome profile in to LinkedIn 
 harvey linkedin run --once   # one LinkedIn session now (--dry-run: read and draft, send nothing)
 harvey linkedin status|pause|resume|import  # caps used, pauses, the kill switch, load a tracker
 harvey lessons               # lessons the learner proposed; --approve/--reject/--retire ID, --run
+harvey inbound status        # website chat follow-ups: counts only
+harvey inbound run           # the backlog, resumable (--limit N; --dry-run prints a few drafts, stores nothing)
+harvey inbound import FILE   # the same from a CSV or XLSX of leads (--source NAME)
 ```
+
+### Website chat leads
+
+If your website has a live chat that keeps its leads in Supabase, Harvey can follow
+up with everyone who gave their email there: one personal email that says plainly
+it follows on from their chat and picks up where it stopped. Set `ERP_SUPABASE_URL`
+and `ERP_SUPABASE_KEY` in `.env` (Harvey only ever issues GET requests against the
+three chat tables, and never logs or stores a session token), then:
+
+```bash
+harvey inbound run --dry-run --limit 5   # read it, draft five, print them, store nothing
+harvey inbound run                       # the backlog; safe to run again, it resumes
+```
+
+To reach new leads within the hour of a chat ending, set
+`channels.email.inbound.enabled: true`. A background poll then runs every
+`poll_minutes`, quiet hours included, and never holds up sending. A chat counts as
+finished once its last message is `idle_minutes` old; if they write again, or a
+person on your side does, the unsent draft is cancelled, and for new messages it is
+redone once the chat goes quiet. The first poll looks back one day, so the older
+backlog is only ever taken on by `harvey inbound run`.
+
+Who gets one: anyone but your own domains and do-not-contact, job seekers, people
+who wrote under four words, customers already converted, and chats a person on your
+side wrote in during the last `rep_active_days`. A model call then sorts the rest,
+and only a `project` goes on (`client` and `support` go to you as an escalation).
+Anyone already contacted, replied or opted out, or whose company answered, is left
+alone. A directory lead (Clutch, The Manifest, GoodFirms...) goes first, then large
+projects from a business address, then large, medium and small. No draft may name a
+price, run over 110 words, or link outside your domains. Each waits in the Outbox
+unless `inbound.autopilot` is on. They aren't cold email, since they gave you the
+address, so they skip Precleared, go first and stay out of the segment mix. A chat
+that ended in the last 24 hours also ignores the recipient's send window. The footer,
+opt-out, caps, pauses, gate and stop-on-reply all still apply.
+
+**Written estimates.** When the chat says enough to scope the work, Harvey drafts the
+written estimate instead (under 300 words). Every money figure in it must be in
+`channels.email.inbound.price_list`, in any common format, or it is refused. So is an
+estimate with no price, and an empty list refuses them all. That lead gets an ordinary
+email asking for the one missing detail, with the reason recorded. An estimate always
+waits for you with a note to check the price, on autopilot too, and "Approve all"
+doesn't release it. Put your prices in `harvey.local.yaml`, and how you scope and price
+work in `skills/estimate_rules.md` (and any follow-up rules in
+`skills/inbound_followup.md`). All of these are gitignored, so they stay private.
 
 ### Several mailboxes
 

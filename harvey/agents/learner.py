@@ -39,6 +39,7 @@ import aiosqlite
 
 from harvey import lessons as store
 from harvey.outcomes import build_outcomes
+from harvey.segment_stamp import is_inbound
 from harvey.state import AUTO_CONVERSATION, AUTOMATIC_INTENTS
 from harvey.untrusted import UNTRUSTED_RULE, fence
 
@@ -381,7 +382,9 @@ async def reply_kinds(state, days: int = WINDOW_DAYS, now: datetime | None = Non
 async def gather(state, now: datetime | None = None, days: int = WINDOW_DAYS) -> dict:
     """Everything a run reads, with its cells and minimums worked out."""
     now = now or _utcnow()
-    rows = await build_outcomes(state, days=days, now=now)
+    # How cold email did: someone who asked us first would flatter any comparison.
+    rows = [r for r in await build_outcomes(state, days=days, now=now)
+            if not is_inbound(r.get("angle"))]
     variants = await subject_variants(state, days, now)
     li = await linkedin_outcomes(state, days, now)
     cells = {**email_cells(rows), **subject_cells(variants), **linkedin_cells(li)}

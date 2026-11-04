@@ -164,6 +164,13 @@ def _text_of(el) -> str:
     return "".join(t.text or "" for t in el.iter() if _tag(t) == "t")
 
 
+def xlsx_sheet_names(path) -> list[str]:
+    """The workbook's sheets, in order."""
+    with zipfile.ZipFile(path) as z:
+        book = ElementTree.fromstring(z.read("xl/workbook.xml"))
+    return [el.get("name") or "" for el in book.iter() if _tag(el) == "sheet"]
+
+
 def read_xlsx_sheet(path, sheet_name: str = SENDS_SHEET) -> list[list]:
     """The rows of one sheet as lists of cell values (strings or numbers),
     read with the standard library only."""

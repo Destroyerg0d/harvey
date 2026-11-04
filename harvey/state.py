@@ -24,6 +24,7 @@ from harvey.models.campaign import Campaign, EmailStep  # noqa: F401 (EmailStep 
 from harvey.models.conversation import Conversation, Message  # noqa: F401
 
 from harvey.paths import PROJECT_ROOT
+from harvey.segment_stamp import INBOUND_ESTIMATE_ANGLE
 from harvey.startups import parse_funding
 # LinkedIn (harvey/linkedin/): its tables are created in init_db, its state
 # methods live in harvey/linkedin/store.py.
@@ -705,6 +706,9 @@ class StateManager(LinkedInStateMixin):
             # The Learner's lessons (harvey/lessons.py), the same way.
             from harvey.lessons import LESSONS_SCHEMA
             await db.executescript(LESSONS_SCHEMA)
+            # Website chat leads (harvey/inbound.py), the same way.
+            from harvey.inbound import INBOUND_SCHEMA
+            await db.executescript(INBOUND_SCHEMA)
             await db.commit()
 
     @staticmethod
@@ -1213,13 +1217,15 @@ class StateManager(LinkedInStateMixin):
         follow_ups_only: bool = False,
         mailboxes: list[str] | None = None,
         primary: str = "",
+        angles: tuple[str, ...] | None = None,
     ) -> list[dict]:
         """skip_unready_follow_ups: leave out sequence follow-ups whose
         previous step hasn't gone out yet, so they can't fill the page.
         kind: only that kind ("sequence" for cold email).
         follow_ups_only: only sequence emails after the first step.
         mailboxes: only rows going out from one of these (a row's "" is
-        ``primary``); None: every mailbox."""
+        ``primary``); None: every mailbox.
+        angles: only rows with one of these angles."""
         if mailboxes is not None and not mailboxes:
             return []
         where, params = [], []
@@ -1227,6 +1233,10 @@ class StateManager(LinkedInStateMixin):
             sql, mailbox_params = _mailbox_filter("o", mailboxes, primary)
             where.append(sql)
             params += mailbox_params
+        if angles:
+            marks = ", ".join("?" for _ in angles)
+            where.append(f"COALESCE(o.angle, '') IN ({marks})")
+            params += list(angles)
         if kind:
             where.append("kind = ?")
             params.append(kind)
@@ -1343,7 +1353,7 @@ class StateManager(LinkedInStateMixin):
         async with self._connect() as db:
             if has_cached_verdict is not None:
                 db.row_factory = aiosqlite.Row
-                sql = sql.replace("SELECT COUNT(*)", "SELECT o.prospect_id, o.to_email", 1)
+                sql = sql.replace("SELECT COUNT(*)", "SELECT o.prospect_id, o.to_email, o.angle", 1)
                 async with db.execute(sql, params) as cursor:
                     items = [dict(row) for row in await cursor.fetchall()]
             else:
@@ -1516,12 +1526,13 @@ class StateManager(LinkedInStateMixin):
                 )
             else:
                 # Not the ones autopilot held for a look (possible planted
-                # links or a leak): those are approved one at a time.
+                # links or a leak): those are approved one at a time. Nor a
+                # written estimate, whatever its note says: it quotes a price.
                 cursor = await db.execute(
                     "UPDATE outbox SET status = 'approved', approved_by = 'you', error = '', "
                     "updated_at = ? WHERE status = 'pending_review' "
-                    "AND COALESCE(error, '') NOT LIKE ?",
-                    (_utcnow().isoformat(), HELD_FOR_REVIEW + "%"),
+                    "AND COALESCE(error, '') NOT LIKE ? AND COALESCE(angle, '') != ?",
+                    (_utcnow().isoformat(), HELD_FOR_REVIEW + "%", INBOUND_ESTIMATE_ANGLE),
                 )
             await db.commit()
             return cursor.rowcount
