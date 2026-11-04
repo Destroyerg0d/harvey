@@ -648,6 +648,10 @@ harvey microsoft auth|test  # one-time Microsoft 365 sign-in (docs/microsoft365.
 harvey linkedin login        # sign the dedicated Chrome profile in to LinkedIn yourself
 harvey linkedin run --once   # one LinkedIn session now (--dry-run: read and draft, send nothing)
 harvey linkedin status|pause|resume|import  # caps used, pauses, the kill switch, load a tracker
+harvey whatsapp login        # link a separate number to its own Chrome profile by QR code, yourself
+harvey whatsapp add PHONE --source S  # queue one person who gave you their number (--name, --email, --context, --country)
+harvey whatsapp run --once   # one WhatsApp session now (--dry-run: read and draft, send nothing)
+harvey whatsapp status|pause|resume|approve|skip  # caps used, pauses, the kill switch, the queue
 harvey lessons               # lessons the learner proposed; --approve/--reject/--retire ID, --run
 harvey inbound status        # website chat follow-ups: counts only
 harvey inbound run           # the backlog, resumable (--limit N; --dry-run prints a few drafts, stores nothing)
@@ -809,6 +813,8 @@ Harvey automates outreach, but **you are the sender.** Cold email is legal in mo
 LinkedIn requires both `channels.linkedin.enabled: true` and configured
 credentials. Training a product does not enable it; the setup wizard records
 your explicit choice.
+
+**WhatsApp.** Automating WhatsApp through WhatsApp Web breaks its terms and can get the number banned, with no appeal worth counting on. Off by default (`channels.whatsapp`). If you turn it on, use a separate number you can afford to lose, never your main one. Harvey only messages people who gave you their number themselves: `harvey whatsapp add` takes one person at a time and needs a source, there is no bulk import, a number whose country code can't be established waits for you instead of being guessed, and anyone who said no on any channel, is on a do-not-contact list or is in a live email conversation is refused. A new number is the riskiest pattern there is, so the limits are low: 5 first messages a day for the first 14 days after linking, then 10; 30 messages a day and 8 an hour in total; 45 to 180 seconds apart; 10:00 to 19:00 on weekdays by each recipient's own clock when Harvey knows it. Everything waits as a draft on the **WhatsApp** tab until you approve it. A first message says how you got the number and ends with an easy way out, and a no stops their email too. Any ban, restriction, spam or unusual-activity notice stops it for 48 hours and says so on the dashboard. A send that can't be confirmed is held for you and never retried. The page's selectors live in one file (`harvey/whatsapp/pages.py`) and WhatsApp changes its page without notice: when they stop matching, nothing is sent.
 
 **Deliverability — warm up or burn out.** Sending cold email from your main domain, or at volume on day one, lands you in spam permanently.
 
