@@ -353,3 +353,20 @@ async def test_no_keys_says_so():
 def test_the_url_is_taken_with_or_without_the_rest_path():
     assert ERPChatClient("https://erp.example/rest/v1/", "k").url == "https://erp.example"
     assert ERPChatClient("https://erp.example/", "k").url == "https://erp.example"
+
+
+def _card(value):
+    return {"kind": "contact_channels",
+            "channels": [{"id": "whatsapp", "label": "WhatsApp", "value": value, "url": "https://wa.example"}]}
+
+
+def test_the_number_typed_into_the_card_becomes_the_phone():
+    lead = _lead_from(message("t1", "system", "", "2026-10-02T09:00:00+00:00", meta=_card("+1 555 0100")))
+    assert lead.has_whatsapp is True and lead.phone == "+1 555 0100"
+
+
+def test_a_card_without_a_real_number_or_for_another_channel_sets_no_phone():
+    no_number = _lead_from(message("t1", "system", "", "2026-10-02T09:00:00+00:00", meta=_card("soon")))
+    assert no_number.has_whatsapp is True and no_number.phone == ""
+    other = {"kind": "contact_channels", "channels": [{"id": "telegram", "value": "+1 555 0100"}]}
+    assert _lead_from(message("t1", "system", "", "2026-10-02T09:00:00+00:00", meta=other)).phone == ""

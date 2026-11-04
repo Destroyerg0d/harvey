@@ -823,7 +823,7 @@ async def status_counts(state) -> dict:
 def _new_report(read: int = 0) -> dict:
     return {"status": "ok", "note": "", "read": read, "waiting": 0, "skipped": 0, "not_project": 0,
             "escalated": 0, "triaged": 0, "drafted": 0, "estimates": 0, "estimate_fallbacks": 0,
-            "invalid": 0, "unverified": 0, "no_draft": 0, "cancelled": 0, "reasons": {},
+            "invalid": 0, "unverified": 0, "no_draft": 0, "cancelled": 0, "whatsapp": 0, "reasons": {},
             "previews": []}
 
 
@@ -1013,9 +1013,29 @@ class InboundPipeline:
                                        f"{result.category} matter, not a new project: {result.summary}"})
         return None, True
 
+    async def _queue_whatsapp(self, lead: InboundLead, triaged: Triage, report: dict):
+        """A project lead who left a number joins the WhatsApp queue once a
+        number is linked (channels.whatsapp.number), with that channel's own
+        approval and limits. It runs even when their email address is bad:
+        WhatsApp is then the only way left. Never stops the email."""
+        whatsapp = getattr(getattr(self.config, "channels", None), "whatsapp", None)
+        if not (lead.phone and getattr(whatsapp, "number", "")):
+            return
+        from harvey.whatsapp.contacts import queue_contact
+        try:
+            result = await queue_contact(
+                self.state, phone=lead.phone, name=lead.name, email=lead.email,
+                context=triaged.summary, source=how_they_reached_us(lead),
+                country=lead.country, config=self.config)
+        except Exception as e:
+            logger.warning(f"Inbound: couldn't queue {lead.email} for WhatsApp: {e}")
+            return
+        report["whatsapp"] += result.queued
+
     async def _store(self, plan: Plan, report: dict):
         lead, triaged = plan.lead, plan.triaged
         now = self.now()
+        await self._queue_whatsapp(lead, triaged, report)
         if plan.status:
             # Triage just reset the count when they wrote something new.
             current = await get_record(self.state, lead.email) or {}
@@ -1376,7 +1396,7 @@ def _print_report(report: dict):
     print(f"  Skipped {report['skipped']}, not a project {report['not_project']}, escalated "
           f"{report['escalated']}, invalid address {report['invalid']}, unverified "
           f"{report['unverified']}, no usable draft {report['no_draft']}, drafts cancelled "
-          f"{report['cancelled']}.")
+          f"{report['cancelled']}, queued for WhatsApp {report['whatsapp']}.")
     for reason, n in sorted(report["reasons"].items(), key=lambda x: -x[1]):
         print(f"    {n:>5}  {reason}")
     if report["status"] != "ok" or report["note"]:

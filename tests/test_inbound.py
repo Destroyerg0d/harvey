@@ -1317,3 +1317,66 @@ def test_cmd_run_needs_a_provider_with_an_outbox(monkeypatch, tmp_path, capsys):
     _, reader = cli(monkeypatch, tmp_path, [recent_lead()], cfg=cfg)
     I.cmd_inbound(args("run"))
     assert "gmail, microsoft or smtp" in capsys.readouterr().out and reader.since == []
+
+
+# ── WhatsApp ──
+
+def whatsapp_config(number="+15555550100"):
+    cfg = config()
+    cfg.channels.whatsapp.number = number
+    return cfg
+
+
+@pytest.fixture
+def queued(monkeypatch):
+    import harvey.whatsapp.contacts as contacts
+    from harvey.whatsapp.contacts import QueueResult
+    calls = []
+
+    async def queue_contact(state, **kwargs):
+        calls.append(kwargs)
+        if isinstance(calls.queue_error, Exception):
+            raise calls.queue_error
+        return QueueResult("queued", "c1")
+
+    class Calls(list):
+        queue_error = None
+    calls = Calls()
+    monkeypatch.setattr(contacts, "queue_contact", queue_contact)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_a_project_lead_with_a_number_joins_the_whatsapp_queue(state, queued):
+    report = await pipeline(state, [lead(phone="+1 555 0100")], cfg=whatsapp_config()).run()
+    assert report["drafted"] == 1 and report["whatsapp"] == 1
+    [call] = queued
+    assert call["phone"] == "+1 555 0100" and call["email"] == BUSINESS and call["name"] == "Ann Lee"
+    assert call["context"] == "wants a new online shop" and call["source"]
+
+
+@pytest.mark.asyncio
+async def test_a_bad_email_address_still_reaches_whatsapp(state, verified, queued):
+    verified.grade = "invalid"
+    report = await pipeline(state, [lead(phone="+1 555 0100")], cfg=whatsapp_config()).run()
+    assert report["invalid"] == 1 and report["drafted"] == 0 and report["whatsapp"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cfg, phone", [(whatsapp_config(""), "+1 555 0100"), (whatsapp_config(), "")])
+async def test_no_linked_number_or_no_phone_queues_nothing(state, queued, cfg, phone):
+    report = await pipeline(state, [lead(phone=phone)], cfg=cfg).run()
+    assert report["drafted"] == 1 and report["whatsapp"] == 0 and queued == []
+
+
+@pytest.mark.asyncio
+async def test_a_whatsapp_failure_never_stops_the_email(state, queued):
+    queued.queue_error = RuntimeError("no")
+    report = await pipeline(state, [lead(phone="+1 555 0100")], cfg=whatsapp_config()).run()
+    assert report["drafted"] == 1 and report["whatsapp"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_dry_run_queues_nothing_for_whatsapp(state, verified, queued):
+    await pipeline(state, [lead(phone="+1 555 0100")], cfg=whatsapp_config()).run(dry_run=True)
+    assert queued == []

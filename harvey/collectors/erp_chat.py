@@ -222,6 +222,11 @@ def _read_messages(rows: list[dict], lead: InboundLead) -> None:
         at = parse_time(m.get("created_at"))
         if kind == "contact_channels" and "whatsapp" in json.dumps(meta.get("channels") or "").lower():
             lead.has_whatsapp = True
+            # The number they typed into the card, when the session has none.
+            for channel in meta.get("channels") if isinstance(meta.get("channels"), list) else ():
+                if (isinstance(channel, dict) and "whatsapp" in json.dumps(channel).lower()
+                        and sum(c.isdigit() for c in str(channel.get("value") or "")) >= 7):
+                    lead.phone = lead.phone or str(channel["value"]).strip()
         human = sender == "employee" and not is_ai and kind not in DROPPED_KINDS
         if human and at and (last_human is None or at > last_human):
             last_human = at
