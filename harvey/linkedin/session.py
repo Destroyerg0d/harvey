@@ -206,8 +206,9 @@ class Driver:
 
 
 @asynccontextmanager
-async def open_session(cfg, headless: bool | None = None):
-    """The dedicated profile in system Chrome: yields a Driver."""
+async def open_session(cfg, headless: bool | None = None, **context_options):
+    """The dedicated profile in system Chrome: yields a Driver. ``context_options``
+    go to Playwright's persistent context as they are."""
     from playwright.async_api import async_playwright
 
     chrome = find_chrome(cfg.chrome_path)
@@ -220,7 +221,7 @@ async def open_session(cfg, headless: bool | None = None):
             str(folder), executable_path=chrome,
             headless=cfg.headless if headless is None else headless,
             viewport={"width": 1280, "height": 860},
-            args=["--no-first-run", "--no-default-browser-check"])
+            args=["--no-first-run", "--no-default-browser-check"], **context_options)
         page = context.pages[0] if context.pages else await context.new_page()
         yield Driver(page)
     finally:

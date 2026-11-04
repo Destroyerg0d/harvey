@@ -598,9 +598,107 @@ class LinkedInChannelConfig(BaseModel):
         return self
 
 
+class WhatsAppHoursConfig(LinkedInHoursConfig):
+    """A message goes out only in these hours of the recipient's own time zone
+    when Harvey knows it, and of ``timezone`` when it doesn't."""
+
+    @model_validator(mode="after")
+    def _daytime(self):
+        if _time.fromisoformat(self.start) >= _time.fromisoformat(self.end):
+            raise ValueError("channels.whatsapp.hours.start must be before end")
+        return self
+
+
+class WhatsAppChannelConfig(BaseModel):
+    """First messages, one follow-up and replies through WhatsApp Web
+    (harvey/whatsapp/), only to people who gave us their number themselves.
+
+    Automating WhatsApp breaks its terms and can get the number banned, so use a
+    separate number. A new number is the riskiest pattern there is: these limits
+    are its safety margin, so they are deliberately low."""
+
+    enabled: bool = False
+    # Drafts wait for your approval until this is true (the dashboard's switch
+    # overrides it once used).
+    autopilot: bool = False
+    # The linked number, shown on the dashboard so you can tell which phone it is.
+    number: str = ""
+    # First messages a day: this few for new_number_days after linking, then more.
+    max_daily_first_messages_new: int = 5
+    max_daily_first_messages: int = 10
+    new_number_days: int = 14
+    # All messages (first, follow-up, reply), a day and in any one hour.
+    max_daily_messages: int = 30
+    max_messages_per_hour: int = 8
+    hours: WhatsAppHoursConfig = WhatsAppHoursConfig()
+    # Human pacing: a random wait between actions, and a longer break every few.
+    min_delay_seconds: int = 45
+    max_delay_seconds: int = 180
+    break_every_actions: int = 5
+    break_min_seconds: int = 300
+    break_max_seconds: int = 900
+    # One run at a time, at most one every run_every_minutes, each at most this long.
+    run_every_minutes: int = 60
+    max_run_minutes: int = 60
+    # A ban or warning pauses this long; a phone that dropped off, this long;
+    # this many failed sends in a row pause until you resume.
+    pause_hours_on_warning: int = 48
+    pause_minutes_phone_offline: int = 30
+    max_failed_sends_in_a_row: int = 3
+    # One follow-up 3-5 days later if silent, never more than max_unanswered
+    # messages without a reply.
+    follow_up_min_days: int = 3
+    follow_up_max_days: int = 5
+    max_unanswered: int = 3
+    # How long `harvey whatsapp login` waits for you to scan the QR code.
+    login_timeout_minutes: int = 30
+    # Numbers never to message, cold or in reply (compliance.do_not_contact
+    # takes addresses and domains, not numbers). Each with its + country code.
+    do_not_contact: list[str] = []
+    # The dedicated Chrome profile (relative to the project), and Chrome itself
+    # ("" finds the installed Google Chrome). Always visible: no headless setting.
+    profile_dir: str = "data/whatsapp-profile"
+    chrome_path: str = ""
+
+    @field_validator("max_daily_first_messages_new", "max_daily_first_messages", "new_number_days",
+                     "max_daily_messages", "max_messages_per_hour", "min_delay_seconds",
+                     "max_delay_seconds", "break_every_actions", "break_min_seconds",
+                     "break_max_seconds", "run_every_minutes", "max_run_minutes",
+                     "pause_hours_on_warning", "pause_minutes_phone_offline",
+                     "max_failed_sends_in_a_row", "follow_up_min_days", "follow_up_max_days",
+                     "max_unanswered", "login_timeout_minutes")
+    @classmethod
+    def _not_negative(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("must be 0 or more")
+        return v
+
+    @field_validator("do_not_contact")
+    @classmethod
+    def _numbers(cls, v: list[str]) -> list[str]:
+        from harvey.whatsapp.numbers import normalize_phone
+        out = []
+        for raw in v or []:
+            number = normalize_phone(raw)
+            if not number.ok:
+                raise ValueError(f"'{raw}' isn't a number with a + country code: {number.problem}")
+            out.append(number.e164)
+        return out
+
+    @model_validator(mode="after")
+    def _ranges(self):
+        for low, high in (("min_delay_seconds", "max_delay_seconds"),
+                          ("break_min_seconds", "break_max_seconds"),
+                          ("follow_up_min_days", "follow_up_max_days")):
+            if getattr(self, low) > getattr(self, high):
+                raise ValueError(f"channels.whatsapp.{low} is more than {high}")
+        return self
+
+
 class ChannelsConfig(BaseModel):
     email: EmailChannelConfig = EmailChannelConfig()
     linkedin: LinkedInChannelConfig = LinkedInChannelConfig()
+    whatsapp: WhatsAppChannelConfig = WhatsAppChannelConfig()
 
 
 PRECLEARED_ADDRESS_SOURCES = ("published", "bought", "scraped", "given", "unknown")

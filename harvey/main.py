@@ -428,6 +428,9 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
     # inside LinkedIn hours, never two at once, at most one every ~2 hours.
     from harvey.agents.linkedin_agent import LinkedInRunner
     linkedin = LinkedInRunner(brain, state, config)
+    # WhatsApp (channels.whatsapp.enabled): the same, by recipients' clocks.
+    from harvey.agents.whatsapp_agent import WhatsAppRunner
+    whatsapp = WhatsAppRunner(brain, state, config)
     # The learner: once a day, lessons from results for you to approve.
     from harvey.agents.learner import LearnerRunner
     learner = LearnerRunner(brain, state, config)
@@ -468,6 +471,7 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
                 # of however long the missed timer would have run.
                 shutting_down = False
                 while in_quiet_hours(config):
+                    await _start_whatsapp(whatsapp, send_only=True)
                     if await _interruptible_sleep(QUIET_HOURS_POLL_SECONDS, stop_event):
                         shutting_down = True
                         break
@@ -479,6 +483,8 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
             # Replies wait for the operator's hours, as they always have.
             sender.cold_only = send_only
             sender.inbound_only = send_only and not in_their_zones
+            if send_only:
+                await _start_whatsapp(whatsapp, send_only=True)
             # What an unread inbox holds back is decided afresh every cycle.
             sender.hold_prospects, sender.hold_mailboxes = set(), set()
             if send_only and not await sender.cold_due_in_window():
@@ -525,6 +531,7 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
                     await linkedin.maybe_start()
                 except Exception as e:
                     logger.warning(f"LinkedIn couldn't start: {e}")
+                await _start_whatsapp(whatsapp)
 
             # 3c. The learner's daily timer (harvey/agents/learner.py): a run
             # once a day in the background (not in quiet hours), never two at
@@ -653,9 +660,19 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
                 break
 
     await linkedin.shutdown()
+    await whatsapp.shutdown()
     await learner.shutdown()
     await inbound.shutdown()
     logger.info("Harvey shutting down. Deals don't close themselves, but I need a break.")
+
+
+async def _start_whatsapp(whatsapp, send_only: bool = False) -> None:
+    """Start a WhatsApp run if one is due. It goes by recipients' clocks, so what
+    is approved can still go in your quiet hours (``send_only``: no model calls)."""
+    try:
+        await whatsapp.maybe_start(send_only=send_only)
+    except Exception as e:
+        logger.warning(f"WhatsApp couldn't start: {e}")
 
 
 def _needs_setup() -> bool:

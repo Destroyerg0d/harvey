@@ -30,6 +30,9 @@ from harvey.startups import parse_funding
 # methods live in harvey/linkedin/store.py.
 from harvey.linkedin.schema import LINKEDIN_SCHEMA
 from harvey.linkedin.store import LinkedInStateMixin
+# WhatsApp (harvey/whatsapp/), the same way.
+from harvey.whatsapp.schema import WHATSAPP_SCHEMA
+from harvey.whatsapp.store import WhatsAppStateMixin
 
 DB_PATH = PROJECT_ROOT / "data" / "harvey.db"
 
@@ -665,7 +668,7 @@ _CONVERSATION_COLUMNS = frozenset({
 })
 
 
-class StateManager(LinkedInStateMixin):
+class StateManager(LinkedInStateMixin, WhatsAppStateMixin):
     def __init__(self, db_path: str | None = None):
         self.db_path = db_path or str(DB_PATH)
 
@@ -703,6 +706,7 @@ class StateManager(LinkedInStateMixin):
             await self._add_extra_columns(db)
             # LinkedIn's tables, outside MIGRATIONS like _EXTRA_COLUMNS.
             await db.executescript(LINKEDIN_SCHEMA)
+            await db.executescript(WHATSAPP_SCHEMA)
             # The Learner's lessons (harvey/lessons.py), the same way.
             from harvey.lessons import LESSONS_SCHEMA
             await db.executescript(LESSONS_SCHEMA)

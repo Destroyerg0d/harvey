@@ -1342,6 +1342,10 @@ def main():
     from harvey.linkedin.cli import add_parser as add_linkedin_parser
     add_linkedin_parser(subparsers)
 
+    # harvey whatsapp login|status|pause|resume|run|add|approve|skip (harvey/whatsapp/cli.py)
+    from harvey.whatsapp.cli import add_parser as add_whatsapp_parser
+    add_whatsapp_parser(subparsers)
+
     # harvey lessons [--approve|--reject|--retire ID] [--run] (harvey/lessons.py)
     from harvey.lessons import add_cli_parser as add_lessons_parser
     add_lessons_parser(subparsers)

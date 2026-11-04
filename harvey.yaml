@@ -120,6 +120,28 @@ channels:
     # Harvey acts on LinkedIn only in these hours, with 60-240 s between actions
     # and at most 12 an hour. `harvey linkedin login` signs the profile in.
     # hours: {start: "10:00", end: "19:00", timezone: "Asia/Kolkata", weekdays_only: true}
+    # WhatsApp through WhatsApp Web, only to people who gave you their number
+    # themselves (`harvey whatsapp add`). Automating WhatsApp breaks its terms and
+    # can get the number banned: use a separate number you can afford to lose, and
+    # keep these limits low. `harvey whatsapp login` links it by QR code. Remove
+    # the # marks to switch it on. Put the real number in harvey.local.yaml.
+    # whatsapp:
+    #   enabled: true
+    #   autopilot: false             # drafts wait on the dashboard's WhatsApp tab until true
+    #   number: "+15555550100"       # the linked number, shown on the dashboard
+    #   max_daily_first_messages_new: 5   # first messages a day for new_number_days after linking
+    #   max_daily_first_messages: 10      # ...and after that
+    #   new_number_days: 14
+    #   max_daily_messages: 30       # first messages, follow-ups and replies
+    #   max_messages_per_hour: 8
+    #   min_delay_seconds: 45        # between actions, with longer breaks every few
+    #   max_delay_seconds: 180
+    #   follow_up_min_days: 3        # one follow-up 3-5 days later if silent
+    #   follow_up_max_days: 5
+    #   max_unanswered: 3
+    #   do_not_contact: []           # numbers never to message, each with its + country code
+    #   # Goes by the recipient's own clock when known; anyone Harvey can't place uses this.
+    #   hours: {start: "10:00", end: "19:00", timezone: "Asia/Kolkata", weekdays_only: true}
 
 usage:
   max_daily_claude_percent: 80
