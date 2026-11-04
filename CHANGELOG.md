@@ -443,6 +443,12 @@ minor versions can still change behaviour.
 
 ### Fixed
 
+- **Sending no longer waits for profiling.** A profile batch reads 25 sites
+  (more pages each now: the phone view for site age, the contact page for
+  COUNTRY) and can take several minutes, and the send phase waited for it
+  every cycle. It now runs in the background, one batch at a time across
+  heartbeats, still bounded by the cycle timeout; what a stopped batch
+  already read is kept.
 - **Bing search results are usable again, and junk is dropped.** Bing wraps
   every result in its own click-tracking link (`bing.com/ck/a?...&u=a1...`),
   so each hit read as bing.com and was thrown away, and a Bing page counted as

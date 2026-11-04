@@ -61,6 +61,8 @@ ERROR_BACKOFF_CAP = 900
 # between one stuck agent and Harvey freezing for hours with no agent
 # knowing it's dead — found in production after exactly that happened.
 CYCLE_TIMEOUT_SECONDS = 600
+# Companies a background profile batch reads (see _profile_in_background).
+PROFILE_BATCH = 25
 
 # Cap on a single quiet-hours sleep chunk. See the quiet-hours block in
 # heartbeat() for why this exists — a system sleep/wake cycle during one
@@ -303,6 +305,21 @@ async def _run_agents(tasks: list) -> dict:
     return outcomes
 
 
+async def _profile_in_background(state, config) -> None:
+    """One profile batch, bounded by CYCLE_TIMEOUT_SECONDS; a failure is
+    logged and the next heartbeat starts another."""
+    try:
+        await asyncio.wait_for(run_profile_stage(state, limit=PROFILE_BATCH, config=config),
+                               timeout=CYCLE_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        logger.warning(f"Profiling: a batch ran past {CYCLE_TIMEOUT_SECONDS}s and was stopped; "
+                       "the next heartbeat starts another.")
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.error(f"Profiling failed: {e}", exc_info=e)
+
+
 async def _interruptible_sleep(seconds: float, stop_event: asyncio.Event) -> bool:
     """Sleep up to `seconds`, waking immediately on shutdown.
 
@@ -408,6 +425,7 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
     interval = config.usage.heartbeat_interval_minutes * 60
     max_calls = max(int(200 * (config.usage.max_daily_claude_percent / 100)), 1)
     consecutive_errors = 0
+    profiling: asyncio.Task | None = None   # the background profile batch, if one runs
 
     while not stop_event.is_set():
         try:
@@ -547,12 +565,15 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
             if sender.is_native or has_open_convos:
                 tasks.append(("handle_replies", handler.run()))
 
-            # Profiling rides along every cycle. It is three HTTP requests per
+            # Profiling rides along every cycle. It is a few HTTP requests per
             # business with no model call, so it costs nothing against the
             # Claude budget the rest of this loop is rationing — and it is what
             # turns a name and a domain into something worth writing about.
-            if summary.get("unprofiled", 0):
-                tasks.append(("profile", run_profile_stage(state, limit=25, config=config)))
+            # A batch reads up to PROFILE_BATCH sites, which takes minutes, so it
+            # runs in the background, one batch at a time across heartbeats:
+            # the send phase below never waits for it.
+            if summary.get("unprofiled", 0) and (profiling is None or profiling.done()):
+                profiling = asyncio.create_task(_profile_in_background(state, config))
 
             outcomes = await _run_agents(tasks)
 
