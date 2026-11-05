@@ -1151,3 +1151,50 @@ a.btn, a.btn:hover { text-decoration: none; }
 .lrn-side b { color: var(--text); font-family: var(--mono); font-weight: 500; margin-right: 2px; }
 .lrn-variant .lrn-note { margin-top: 0; font-size: var(--fs-caption); color: var(--text-3); }
 @media (max-width: 640px) { .lrn-filter { min-width: 0; flex: 1 1 120px; } }
+
+/* ── LinkedIn and WhatsApp: connecting, the switch, your own reply ─ */
+
+.conn-card { margin-bottom: var(--sp-4); }
+.conn-head { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; margin-bottom: var(--sp-2); }
+.conn-head h3 { margin: 0; font-size: var(--fs-body); font-weight: 600; }
+.conn-facts { font-size: var(--fs-caption); color: var(--text-2); overflow-wrap: anywhere; }
+.conn-step { margin: 0 0 var(--sp-3); font-size: var(--fs-ui); line-height: 1.55; max-width: 72ch; }
+.conn-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.conn-actions .muted { font-size: var(--fs-caption); flex: 1 1 200px; }
+.conn-switch { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); flex-wrap: wrap; margin-top: var(--sp-3); padding-top: var(--sp-3); border-top: 1px solid var(--line); }
+.conn-switch-state { flex: 1 1 240px; min-width: 0; font-size: var(--fs-ui); line-height: 1.55; color: var(--text-2); }
+.conn-switch-state b { color: var(--text); }
+.conn-switch-state .li-why { display: block; margin: 4px 0 0; }
+.conn-switch.armed { display: block; }
+.conn-risk { display: flex; gap: var(--sp-2); margin: 0; font-size: var(--fs-ui); line-height: 1.55; max-width: 72ch; color: var(--bad); }
+.conn-risk .icon { flex: none; margin-top: 3px; }
+.conn-risk span { color: var(--text); }
+.conn-switch .convo-actions { margin-top: var(--sp-3); padding-top: 0; border-top: 0; }
+.conn-switch .convo-actions .muted { flex-basis: 100%; margin-right: 0; }
+.conn-switch .convo-actions .btn-ghost { margin-left: 0; }
+.conn-switch .mode-confirm .form-input { width: min(12rem, 100%); }
+.conn-warning { flex-direction: column; align-items: flex-start; gap: 2px; }
+.conn-warning .k { overflow-wrap: anywhere; }
+.conn-warning .v { font-weight: 400; }
+.reply-box { margin-top: var(--sp-4); }
+.reply-box .form-label { margin-bottom: 4px; }
+.reply-box textarea { width: 100%; resize: vertical; }
+.reply-box textarea:disabled { background: var(--surface-2); cursor: not-allowed; }
+.reply-box .li-why { margin: 6px 0 0; }
+.reply-foot { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2) var(--sp-3); flex-wrap: wrap; margin-top: 6px; }
+.reply-foot .muted { flex: 1 1 200px; font-size: var(--fs-caption); }
+.thread-more { align-self: center; }
+.thread-msg.not-sent { opacity: 0.65; text-decoration: line-through; text-decoration-thickness: 1px; }
+.thread-msg.not-sent .sender { text-decoration: none; display: block; }
+.conv-more { display: block; margin: 0 auto var(--sp-4); }
+.add-contact .form-row { row-gap: 0; }
+.add-contact .form-group { flex: 1 1 180px; }
+.add-contact .form-input { width: 100%; }
+.add-contact .form-group.add-contact-go { flex: 0 0 auto; }
+.add-contact-result { margin: 0; font-size: var(--fs-ui); line-height: 1.55; overflow-wrap: anywhere; }
+.add-contact-result:empty { display: none; }
+.add-contact-result.good { color: var(--good); }
+.add-contact-result.bad { color: var(--bad); }
+#wa-convos .convo-card, #wa-queue .convo-card { margin-bottom: var(--sp-3); }
+#wa-due .figure .k { min-width: 0; overflow-wrap: anywhere; }
+#wa-limits .figure .v { text-align: right; }

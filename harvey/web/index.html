@@ -324,6 +324,7 @@
     </div>
     <div class="page-actions" id="li-actions"></div>
   </div>
+  <div id="li-connection"></div>
   <div id="li-banner"></div>
   <div id="li-summary"></div>
 
@@ -332,7 +333,7 @@
 
   <div class="grid-main mbx-lower">
     <div>
-      <div class="subhead">Conversations <span class="hint">their latest message, and the reply drafted for it</span></div>
+      <div class="subhead">Conversations <span class="hint">everyone a message has passed between, with the whole history</span></div>
       <div id="li-convos"></div>
       <div class="subhead">Follow-ups due</div>
       <div id="li-due"></div>
@@ -344,6 +345,8 @@
       <div class="card" id="li-funnel"></div>
       <div class="subhead">Limits and runs</div>
       <div class="card" id="li-limits"></div>
+      <div class="subhead">Warnings and pauses</div>
+      <div class="card" id="li-warnings"></div>
       <div class="subhead">Autopilot</div>
       <div id="li-mode"></div>
     </aside>
@@ -361,24 +364,51 @@
     </div>
     <div class="page-actions" id="wa-actions"></div>
   </div>
+  <div id="wa-connection"></div>
   <div id="wa-banner"></div>
   <div id="wa-summary"></div>
 
   <div class="subhead">Queue <span class="hint">drafts to approve, approved items waiting to send, and sends that need you</span></div>
   <div id="wa-queue"></div>
 
+  <div class="subhead">Add a contact <span class="hint">one person who gave you their number themselves. There is no list upload, on purpose.</span></div>
+  <div class="card add-contact">
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label" for="wa-add-phone">Phone, with its + and country code</label>
+        <input class="form-input" id="wa-add-phone" type="tel" autocomplete="off" placeholder="+14155550100">
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="wa-add-name">Name</label>
+        <input class="form-input" id="wa-add-name" type="text" autocomplete="off" placeholder="Jane Doe">
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="wa-add-source">Where they gave you the number</label>
+        <input class="form-input" id="wa-add-source" type="text" autocomplete="off" placeholder="Website contact form">
+      </div>
+      <div class="form-group add-contact-go">
+        <button class="btn btn-primary" onclick="waAddContact(this)">Add to the queue</button>
+      </div>
+    </div>
+    <p class="add-contact-result" id="wa-add-result" role="status"></p>
+  </div>
+
   <div id="wa-review-wrap"></div>
 
   <div class="grid-main mbx-lower">
     <div>
-      <div class="subhead">Conversations <span class="hint">their latest message, and the reply drafted for it</span></div>
+      <div class="subhead">Conversations <span class="hint">everyone a message has passed between, with the whole history</span></div>
       <div id="wa-convos"></div>
+      <div class="subhead">Follow-ups due</div>
+      <div id="wa-due"></div>
     </div>
     <aside>
       <div class="subhead">Funnel</div>
       <div class="card" id="wa-funnel"></div>
       <div class="subhead">Limits and runs</div>
       <div class="card" id="wa-limits"></div>
+      <div class="subhead">Warnings and pauses</div>
+      <div class="card" id="wa-warnings"></div>
       <div class="subhead">Autopilot</div>
       <div id="wa-mode"></div>
     </aside>

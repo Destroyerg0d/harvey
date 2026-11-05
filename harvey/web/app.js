@@ -3054,6 +3054,276 @@ function mbxSegmentsHtml(seg) {
     '<p class="table-foot">' + foot + '</p>';
 }
 
+// ── Connecting a channel, its on/off switch, and writing your own reply ──
+// (both tabs; harvey/channel_login.py runs the sign-in, in a process of its own)
+
+const CH_NAME = {linkedin: 'LinkedIn', whatsapp: 'WhatsApp'};
+const CH_PREFIX = {linkedin: 'li', whatsapp: 'wa'};
+const CH_STATE = {
+  not_connected: ['Not connected', 't-idle'], waiting: ['Waiting for you', 't-waiting'],
+  connected: ['Connected', 't-good'], signed_out: ['Signed out', 't-bad'],
+};
+const CH_THREAD_TAIL = 6, CH_PAGE = 20;
+const _chArmed = {linkedin: false, whatsapp: false};
+const _chBusy = {linkedin: false, whatsapp: false};
+const _chPoll = {linkedin: null, whatsapp: null};
+const _chSeen = {linkedin: '', whatsapp: ''};
+const _chShown = {linkedin: CH_PAGE, whatsapp: CH_PAGE};
+const _chOpen = new Set();      // conversations showing all their messages
+
+function chLoad(ch) { return ch === 'linkedin' ? loadLinkedIn() : loadWhatsApp(); }
+function chData(ch) { return ch === 'linkedin' ? _li : _wa; }
+
+function chCardHtml(ch, c) {
+  const name = CH_NAME[ch], arg = jsq(ch);
+  const [label, tone] = own(CH_STATE, c.state) || CH_STATE.not_connected;
+  const facts = [];
+  if (c.state === 'connected' && c.since) facts.push('Connected since ' + formatDate(c.since));
+  if (c.number && c.state !== 'not_connected') facts.push(escHtml(c.number));
+  if (c.state === 'waiting' && c.deadline) facts.push('Waits until ' + formatDate(c.deadline));
+  let actions;
+  if (c.state === 'waiting') {
+    actions = '<button class="btn btn-secondary btn-sm" onclick="chCancel(' + arg + ',this)"' +
+      (_chBusy[ch] ? ' disabled' : '') + '>Cancel</button>';
+  } else {
+    actions = '<button class="btn ' + (c.state === 'connected' ? 'btn-secondary' : 'btn-primary') +
+      ' btn-sm" onclick="chConnect(' + arg + ',this)"' + (c.can_connect && !_chBusy[ch] ? '' : ' disabled') + '>' +
+      (c.state === 'not_connected' ? 'Connect' : 'Reconnect') + '</button>';
+    if (c.session_running) {
+      actions += '<span class="muted">A ' + name + ' session is running in that Chrome profile. Connect when it has finished.</span>';
+    }
+  }
+  return '<div class="card conn-card"><div class="conn-head"><h3>' + name + ' connection</h3>' +
+      '<span class="badge ' + tone + '">' + label + '</span>' +
+      (facts.length ? '<span class="conn-facts">' + facts.join(' · ') + '</span>' : '') + '</div>' +
+    '<p class="conn-step">' + escHtml(c.step) + '</p>' +
+    (c.note ? '<p class="li-why' + (c.state === 'connected' ? '' : ' bad') + '">' + escHtml(c.note) + '</p>' : '') +
+    '<div class="conn-actions">' + actions + '</div>' + chSwitchHtml(ch, c) + '</div>';
+}
+
+function chSwitchHtml(ch, c) {
+  const name = CH_NAME[ch], arg = jsq(ch);
+  const row = (text, button) => '<div class="conn-switch"><div class="conn-switch-state">' + text + '</div>' + button + '</div>';
+  if (c.enabled) {
+    return row('<b>' + name + ' is on.</b> Turning it off works at once, and a run already going stops where it is.' +
+        (c.harvey_running ? '' : ' <span class="li-why bad">Harvey itself isn’t running, so nothing happens until you start it on the Controls tab.</span>'),
+      '<button class="btn btn-danger btn-sm" onclick="chSwitch(' + arg + ',\'off\')"' + (_chBusy[ch] ? ' disabled' : '') + '>Turn off</button>');
+  }
+  if (c.state !== 'connected') {
+    return row('<b>' + name + ' is off.</b> Connect it first; then you can turn it on here.',
+      '<button class="btn btn-secondary btn-sm" disabled>Turn on…</button>');
+  }
+  if (!_chArmed[ch]) {
+    return row('<b>' + name + ' is off.</b> Nothing is read or sent there.',
+      '<button class="btn btn-secondary btn-sm" onclick="chArm(' + arg + ')">Turn on…</button>');
+  }
+  const word = escHtml(c.confirm_word), id = ch + '-switch-confirm', go = ch + '-switch-go', want = jsq(c.confirm_word);
+  return '<div class="conn-switch armed"><p class="conn-risk">' + icon('alert') + '<span>' + escHtml(c.risk) + '</span></p>' +
+    '<div class="convo-actions mode-confirm"><span class="muted">Type <b>' + word + '</b> to turn it on.</span>' +
+      '<input class="form-input" id="' + id + '" autocomplete="off" aria-label="Type ' + word + ' to confirm" ' +
+        'oninput="document.getElementById(\'' + go + '\').disabled = this.value.trim().toLowerCase() !== ' + want + '" ' +
+        'onkeydown="if (event.key === \'Enter\' && this.value.trim().toLowerCase() === ' + want + ') chSwitch(' + arg + ',\'on\')">' +
+      '<button class="btn btn-primary btn-sm" id="' + go + '" disabled onclick="chSwitch(' + arg + ',\'on\')">Turn on ' + name + '</button>' +
+      '<button class="btn btn-ghost btn-sm" onclick="chDisarm(' + arg + ')">Cancel</button></div></div>';
+}
+
+// Draws the card, says so when a sign-in has just ended, and polls while one waits.
+function chShow(ch, c) {
+  const data = chData(ch);
+  if (data) data.connection = c;
+  // The word being typed is never drawn away.
+  if (!_chArmed[ch] || c.state !== 'connected') {
+    if (c.state !== 'connected') _chArmed[ch] = false;
+    liEl(CH_PREFIX[ch] + '-connection', chCardHtml(ch, c));
+  }
+  const was = _chSeen[ch];
+  _chSeen[ch] = c.state;
+  if (was === 'waiting' && c.state !== 'waiting') {
+    if (c.state === 'connected') showToast(CH_NAME[ch] + ' is connected.', 'success');
+    else if (c.note) showToast(c.note, 'error');
+  }
+  if (c.state === 'waiting' && !_chPoll[ch]) {
+    _chPoll[ch] = setInterval(() => chTick(ch), 3000);
+  } else if (c.state !== 'waiting' && _chPoll[ch]) {
+    clearInterval(_chPoll[ch]);
+    _chPoll[ch] = null;
+  }
+}
+
+async function chTick(ch) {
+  if (currentTab !== ch) {           // coming back to the tab starts it again
+    clearInterval(_chPoll[ch]);
+    _chPoll[ch] = null;
+    return;
+  }
+  const c = await api('/api/' + ch + '/login');
+  if (!c || !c.state || currentTab !== ch) return;
+  chShow(ch, c);
+  if (c.state !== 'waiting') chLoad(ch);
+}
+
+async function chConnect(ch, btn) {
+  if (_chBusy[ch]) return;
+  _chBusy[ch] = true;
+  if (btn) btn.disabled = true;
+  const res = await liPost('/api/' + ch + '/login');
+  _chBusy[ch] = false;
+  if (res && res.success) showToast('A Chrome window is opening on this PC.', 'success');
+  else showToast(failMsg(res, 'Couldn’t start the sign-in.'), 'error');
+  chLoad(ch);
+}
+
+async function chCancel(ch, btn) {
+  if (_chBusy[ch]) return;
+  _chBusy[ch] = true;
+  if (btn) { btn.disabled = true; btn.textContent = 'Closing the window…'; }
+  const res = await liPost('/api/' + ch + '/login/cancel');
+  _chBusy[ch] = false;
+  if (res && res.success) showToast('Cancelled. The Chrome window closes.', 'success');
+  else showToast(failMsg(res, 'Couldn’t cancel it.'), 'error');
+  chLoad(ch);
+}
+
+function chArm(ch) {
+  _chArmed[ch] = true;
+  const data = chData(ch);
+  if (data && data.connection) liEl(CH_PREFIX[ch] + '-connection', chCardHtml(ch, data.connection));
+  const input = document.getElementById(ch + '-switch-confirm');
+  if (input) input.focus();
+}
+
+function chDisarm(ch) {
+  _chArmed[ch] = false;
+  const data = chData(ch);
+  if (data && data.connection) liEl(CH_PREFIX[ch] + '-connection', chCardHtml(ch, data.connection));
+}
+
+async function chSwitch(ch, mode) {
+  if (_chBusy[ch]) return;
+  const body = {mode};
+  if (mode === 'on') {
+    const input = document.getElementById(ch + '-switch-confirm');
+    body.confirm = input ? input.value.trim().toLowerCase() : '';
+  }
+  _chBusy[ch] = true;
+  const res = await liPost('/api/' + ch + '/enabled', body);
+  _chBusy[ch] = false;
+  if (res && res.success) {
+    _chArmed[ch] = false;
+    showToast(mode === 'on' ? CH_NAME[ch] + ' is on. Harvey picks it up on its next cycle.'
+      : CH_NAME[ch] + ' is off. Nothing more goes out there.', 'success');
+  } else {
+    showToast(failMsg(res, 'Couldn’t change that.'), 'error');
+  }
+  chLoad(ch);
+  loadToday();
+}
+
+// One message of a conversation's history.
+function chMsgHtml(m, who) {
+  const out = m.direction === 'out';
+  const flag = m.status === 'maybe_sent' ? ' · may have gone out'
+    : m.status === 'not_sent' ? ' · not sent' + (m.note ? ': ' + escHtml(m.note) : '') : '';
+  const note = m.kind === 'invite_note' ? ' · connection invite' : '';
+  const body = m.body ? escHtml(m.body) : (m.kind === 'invite_note' ? '<span class="muted">Sent without a note</span>' : '');
+  return '<div class="thread-msg ' + (out ? 'sent' : 'received') + (m.status === 'not_sent' ? ' not-sent' : '') +
+    '"><div class="sender">' + (out ? 'You' : escHtml(who)) + ' &middot; ' + relTime(m.at) + note + flag + '</div>' + body + '</div>';
+}
+
+// The history, the latest few first drawn, the rest a click away.
+function chThreadHtml(ch, id, thread, who) {
+  const open = _chOpen.has(id);
+  const shown = open ? thread : thread.slice(-CH_THREAD_TAIL);
+  const hidden = thread.length - shown.length;
+  const toggle = thread.length > CH_THREAD_TAIL
+    ? '<button class="btn btn-ghost btn-sm thread-more" onclick="chToggleThread(' + jsq(ch) + ',' + jsq(id) + ')">' +
+        (open ? 'Show only the latest' : 'Show ' + hidden + ' earlier message' + (hidden === 1 ? '' : 's')) + '</button>'
+    : '';
+  return toggle + shown.map(m => chMsgHtml(m, who)).join('');
+}
+
+function chToggleThread(ch, id) {
+  if (_chOpen.has(id)) _chOpen.delete(id); else _chOpen.add(id);
+  chDrawConvos(ch);
+}
+
+function chShowMore(ch) {
+  _chShown[ch] += CH_PAGE;
+  chDrawConvos(ch);
+}
+
+function chMoreHtml(ch, total) {
+  const left = total - _chShown[ch];
+  return left > 0
+    ? '<button class="btn btn-secondary btn-sm conv-more" onclick="chShowMore(' + jsq(ch) + ')">Show ' +
+        Math.min(left, CH_PAGE) + ' more of ' + left + ' left</button>'
+    : '';
+}
+
+// The reply box. What's typed survives every redraw (chDrawConvos).
+function chReplyHtml(ch, id, blocked, hint) {
+  if (blocked) {
+    return '<div class="reply-box"><textarea class="form-input reply-input" rows="2" disabled ' +
+        'aria-label="Your own reply: closed" placeholder="Closed"></textarea>' +
+      '<p class="li-why">' + escHtml(blocked) + '</p></div>';
+  }
+  const input = 'reply-' + ch + '-' + escHtml(id);
+  return '<div class="reply-box"><label class="form-label" for="' + input + '">Write your own reply</label>' +
+    '<textarea class="form-input reply-input" id="' + input + '" rows="3"></textarea>' +
+    '<div class="reply-foot"><span class="muted">' + hint + '</span>' +
+      '<button class="btn btn-primary btn-sm" onclick="chSendReply(' + jsq(ch) + ',' + jsq(id) + ',this)">Queue my reply</button></div></div>';
+}
+
+function chDrawConvos(ch) {
+  const data = chData(ch);
+  if (!data) return;
+  const id = CH_PREFIX[ch] + '-convos';
+  const wrap = document.getElementById(id);
+  const kept = {};
+  let focus = null;
+  if (wrap) {
+    wrap.querySelectorAll('.reply-input').forEach(t => {
+      if (t.value) kept[t.id] = t.value;
+      if (t === document.activeElement) focus = {id: t.id, start: t.selectionStart, end: t.selectionEnd};
+    });
+  }
+  const convos = data.conversations || [];
+  liEl(id, (ch === 'linkedin' ? liConvosHtml : waConvosHtml)(convos.slice(0, _chShown[ch])) + chMoreHtml(ch, convos.length));
+  Object.entries(kept).forEach(([key, value]) => {
+    const t = document.getElementById(key);
+    if (t && !t.disabled) t.value = value;
+  });
+  if (focus) {
+    const t = document.getElementById(focus.id);
+    if (t && !t.disabled) { t.focus(); t.setSelectionRange(focus.start, focus.end); }
+  }
+}
+
+async function chSendReply(ch, id, btn) {
+  const input = document.getElementById('reply-' + ch + '-' + id);
+  const body = input ? input.value : '';
+  if (!body.trim()) { showToast('Write something first.', 'error'); return; }
+  if (btn) btn.disabled = true;
+  const path = ch === 'linkedin' ? '/api/linkedin/leads/' : '/api/whatsapp/contacts/';
+  const res = await liPost(path + encodeURIComponent(id) + '/reply', {body});
+  if (btn) btn.disabled = false;
+  if (res && res.success) {
+    if (input) input.value = '';
+    showToast('Queued, approved by you. It goes on the next run, inside the hours and limits.' +
+      (res.replaced ? ' Harvey’s own draft for them is set aside.' : ''), 'success');
+    chLoad(ch);
+  } else {
+    showToast(failMsg(res, 'Couldn’t queue it.'), 'error');
+  }
+}
+
+function chWarningsHtml(list) {
+  if (!list.length) return '<p class="muted">No warnings so far.</p>';
+  return '<div class="figures">' + list.map(w => '<div class="figure conn-warning"><span class="k">' +
+    escHtml(w.reason || w.kind) + '</span><span class="v"><small class="muted">' + formatDate(w.at) +
+    (w.until ? ', paused until ' + formatDate(w.until) : '') + '</small></span></div>').join('') + '</div>';
+}
+
 // ── LinkedIn: invites, messages, follow-ups and replies ──
 
 let _li = null, _liEditing = null, _liArmed = false, _liBusy = false;
@@ -3080,37 +3350,34 @@ function renderLinkedIn(data) {
   _li = data;
   navCount('nav-linkedin', data.drafts_waiting || 0);
   const paused = data.pause;
+  const signedOut = paused && paused.kind === 'signed_out';      // Reconnect, not resume
   liEl('li-actions',
     (data.drafts_waiting ? '<button class="btn btn-primary btn-sm" onclick="liApproveAll(this)">' +
       icon('check') + 'Approve all drafts</button>' : '') +
-    (paused
+    (signedOut ? '' : paused
       ? '<button class="btn btn-secondary btn-sm" onclick="liPause(\'resume\')">Resume LinkedIn</button>'
       : '<button class="btn btn-danger btn-sm" onclick="liPause(\'pause\')">Pause LinkedIn</button>'));
+  if (data.connection) chShow('linkedin', data.connection);
   liEl('li-banner', liBannerHtml(data));
   liEl('li-summary', liSummaryHtml(data));
   liEl('li-queue', liQueueHtml(data.queue || []));
-  liEl('li-convos', liConvosHtml(data.conversations || []));
+  chDrawConvos('linkedin');
   liEl('li-due', liDueHtml(data.follow_ups_due || []));
   liEl('li-chart', liChartHtml(data.chart || {}));
   liEl('li-funnel', liFunnelHtml(data.funnel || {}));
   liEl('li-limits', liLimitsHtml(data));
+  liEl('li-warnings', chWarningsHtml(data.warnings || []));
   liEl('li-mode', liModeHtml(data));
 }
 
 function liBannerHtml(d) {
-  if (d.pause) {
+  if (d.pause && d.pause.kind !== 'signed_out') {      // the connection card says that one
     const until = d.pause.until ? ' until ' + formatDate(d.pause.until) : ' until you resume it';
     return '<div class="banner bad">' + icon('alert') + '<div><b>LinkedIn is paused' + escHtml(until) + '</b>' +
       '<p>' + escHtml(d.pause.reason || '') + '. Nothing is read or sent on LinkedIn meanwhile. ' +
-      (d.pause.kind === 'signed_out' ? 'Run <code>harvey linkedin login</code> in a terminal and sign in.'
-        : 'Look at the LinkedIn window before you resume.') + '</p></div></div>';
+      'Look at the LinkedIn window before you resume.</p></div></div>';
   }
-  if (!d.enabled) {
-    return '<div class="banner">' + icon('flag') + '<div><b>LinkedIn is off</b><p>Set ' +
-      '<code>channels.linkedin.enabled: true</code> in your config, sign the profile in with ' +
-      '<code>harvey linkedin login</code>, and Harvey runs LinkedIn ' + escHtml(d.hours) + '.</p></div></div>';
-  }
-  if (d.autopilot) {
+  if (d.autopilot && d.enabled) {
     return '<div class="banner wait">' + icon('alert') + '<div><b>LinkedIn autopilot is on</b>' +
       '<p>Harvey sends what it writes on LinkedIn without asking. It still holds anything with a link that ' +
       'isn’t yours, or a reply to someone asking whether this is automated.</p></div></div>';
@@ -3184,12 +3451,10 @@ function liQueueHtml(queue) {
 }
 
 function liConvosHtml(convos) {
-  if (!convos.length) return '<div class="card muted">No replies on LinkedIn yet.</div>';
+  if (!convos.length) return '<div class="card muted">No messages on LinkedIn yet.</div>';
   return convos.map(c => {
     const l = c.lead || {}, inbound = c.latest_in;
-    const thread = (c.thread || []).map(m => '<div class="thread-msg ' + (m.direction === 'out' ? 'sent' : 'received') +
-      '"><div class="sender">' + (m.direction === 'out' ? 'You' : escHtml(l.first_name || l.name || 'Them')) +
-      ' &middot; ' + relTime(m.at) + '</div>' + escHtml(m.body) + '</div>').join('');
+    const thread = chThreadHtml('linkedin', l.id, c.thread || [], l.first_name || l.name || 'Them');
     const draft = c.draft ? '<div class="thread-draft"><div class="sender">' + icon('pen') + 'Reply ' +
       (c.draft.status === 'approved' ? 'approved, sends next run' : 'drafted, waiting for you') + '</div>' +
       liBody({...c.draft, kind: 'reply'}) + '<div class="convo-actions">' +
@@ -3200,7 +3465,9 @@ function liConvosHtml(convos) {
     return '<div class="convo-card"><div class="convo-head"><div><h3>' + liLeadLine(l) + '</h3>' +
       '<div class="sub">' + escHtml(l.headline || '') + (inbound ? ' · wrote ' + relTime(inbound.at) : '') + '</div></div>' +
       '<div class="tags">' + (inbound && inbound.intent ? badge(inbound.intent) : '') + '</div></div>' +
-      '<div class="thread">' + thread + draft + '</div><div class="convo-actions">' + stageBtns + '</div></div>';
+      '<div class="thread">' + thread + draft + '</div>' +
+      chReplyHtml('linkedin', l.id, c.reply_blocked, 'It goes through the queue, inside LinkedIn hours and the limits.') +
+      '<div class="convo-actions">' + stageBtns + '</div></div>';
   }).join('');
 }
 
@@ -3397,41 +3664,34 @@ function renderWhatsApp(data) {
   }
   _wa = data;
   navCount('nav-whatsapp', (data.drafts_waiting || 0) + (data.maybe_sent || 0));
+  const signedOut = data.pause && data.pause.kind === 'signed_out';      // Reconnect, not resume
   liEl('wa-actions',
     (data.drafts_waiting ? '<button class="btn btn-primary btn-sm" onclick="waApproveAll(this)">' +
       icon('check') + 'Approve all drafts</button>' : '') +
-    (data.pause
+    (signedOut ? '' : data.pause
       ? '<button class="btn btn-secondary btn-sm" onclick="waPause(\'resume\')">Resume WhatsApp</button>'
       : '<button class="btn btn-danger btn-sm" onclick="waPause(\'pause\')">Stop WhatsApp now</button>'));
+  if (data.connection) chShow('whatsapp', data.connection);
   liEl('wa-banner', waBannerHtml(data));
   liEl('wa-summary', waSummaryHtml(data));
   liEl('wa-queue', waQueueHtml(data.queue || []));
   liEl('wa-review-wrap', waReviewHtml(data.review || [], data.stopped || []));
-  liEl('wa-convos', waConvosHtml(data.conversations || []));
+  chDrawConvos('whatsapp');
+  liEl('wa-due', waDueHtml(data.follow_ups_due || []));
   liEl('wa-funnel', waFunnelHtml(data.funnel || {}));
   liEl('wa-limits', waLimitsHtml(data));
+  liEl('wa-warnings', chWarningsHtml(data.warnings || []));
   liEl('wa-mode', waModeHtml(data));
 }
 
 function waBannerHtml(d) {
-  if (d.pause) {
+  if (d.pause && d.pause.kind !== 'signed_out') {      // the connection card says that one
     const until = d.pause.until ? ' until ' + formatDate(d.pause.until) : ' until you resume it';
     return '<div class="banner bad">' + icon('alert') + '<div><b>WhatsApp is paused' + escHtml(until) + '</b>' +
       '<p>' + escHtml(d.pause.reason || '') + '. Nothing is read or sent on WhatsApp meanwhile. ' +
-      (d.pause.kind === 'signed_out' ? 'Run <code>harvey whatsapp login</code> in a terminal and scan the QR code.'
-        : 'Look at the WhatsApp window and your phone before you resume.') + '</p></div></div>';
+      'Look at the WhatsApp window and your phone before you resume.</p></div></div>';
   }
-  if (!d.enabled) {
-    return '<div class="banner">' + icon('flag') + '<div><b>WhatsApp is off</b><p>Set ' +
-      '<code>channels.whatsapp.enabled: true</code> in your config and link a separate number with ' +
-      '<code>harvey whatsapp login</code>. Automating WhatsApp breaks its terms and can get the number ' +
-      'banned.</p></div></div>';
-  }
-  if (!d.linked) {
-    return '<div class="banner wait">' + icon('alert') + '<div><b>No phone is linked</b><p>Run ' +
-      '<code>harvey whatsapp login</code> in a terminal and scan the QR code with the separate number.</p></div></div>';
-  }
-  if (d.autopilot) {
+  if (d.autopilot && d.enabled) {
     return '<div class="banner wait">' + icon('alert') + '<div><b>WhatsApp autopilot is on</b>' +
       '<p>Harvey sends what it writes on WhatsApp without asking, replies to real people included. It still ' +
       'holds anything with a link that isn’t yours, or a reply to someone asking whether this is automated.</p></div></div>';
@@ -3542,13 +3802,11 @@ function waReviewHtml(review, stopped) {
 }
 
 function waConvosHtml(convos) {
-  if (!convos.length) return '<div class="card muted">No replies on WhatsApp yet.</div>';
+  if (!convos.length) return '<div class="card muted">No messages on WhatsApp yet.</div>';
   return convos.map(c => {
     const l = c.contact || {}, inbound = c.latest_in;
     const first = (l.name || '').split(' ')[0];
-    const thread = (c.thread || []).map(m => '<div class="thread-msg ' + (m.direction === 'out' ? 'sent' : 'received') +
-      '"><div class="sender">' + (m.direction === 'out' ? 'You' : escHtml(first || 'Them')) +
-      ' &middot; ' + relTime(m.at) + '</div>' + escHtml(m.body) + '</div>').join('');
+    const thread = chThreadHtml('whatsapp', l.id, c.thread || [], first || 'Them');
     const draft = c.draft ? '<div class="thread-draft"><div class="sender">' + icon('pen') + 'Reply ' +
       (c.draft.status === 'approved' ? 'approved, sends inside their hours' : 'drafted, waiting for you') + '</div>' +
       waBody({...c.draft, kind: 'reply'}) + '<div class="convo-actions">' +
@@ -3559,8 +3817,40 @@ function waConvosHtml(convos) {
     return '<div class="convo-card"><div class="convo-head"><div><h3>' + waContactLine(l) + '</h3>' +
       '<div class="sub">' + escHtml(l.source || '') + (inbound ? ' · wrote ' + relTime(inbound.at) : '') + '</div></div>' +
       '<div class="tags">' + (inbound && inbound.intent ? badge(inbound.intent) : '') + '</div></div>' +
-      '<div class="thread">' + thread + draft + '</div><div class="convo-actions">' + stageBtns + '</div></div>';
+      '<div class="thread">' + thread + draft + '</div>' +
+      chReplyHtml('whatsapp', l.id, c.reply_blocked,
+        'Under 80 words, no price, emoji or dash. It goes through the queue, inside their hours and the limits.') +
+      '<div class="convo-actions">' + stageBtns + '</div></div>';
   }).join('');
+}
+
+function waDueHtml(due) {
+  if (!due.length) return '<div class="card muted">No first messages or follow-ups due.</div>';
+  return '<div class="card"><div class="figures">' + due.map(x => '<div class="figure"><span class="k">' +
+    waContactLine(x.contact) + '</span><span class="v">' + escHtml(x.which) +
+    (x.due_at ? ' <small class="muted">due ' + relTime(x.due_at) + '</small>' : '') + '</span></div>').join('') +
+    '</div><p class="figure-note">Harvey drafts these on its next WhatsApp run, within the day’s limits.</p></div>';
+}
+
+async function waAddContact(btn) {
+  const value = id => { const el = document.getElementById(id); return el ? el.value : ''; };
+  const out = document.getElementById('wa-add-result');
+  if (btn) btn.disabled = true;
+  const res = await liPost('/api/whatsapp/contacts',
+    {phone: value('wa-add-phone'), name: value('wa-add-name'), source: value('wa-add-source')});
+  if (btn) btn.disabled = false;
+  const ok = res && res.success;
+  if (out) {
+    out.textContent = failMsg(res, 'Couldn’t add them.');
+    out.className = 'add-contact-result ' + (ok && res.status !== 'needs_review' ? 'good' : 'bad');
+  }
+  if (ok && res.status !== 'duplicate') {
+    ['wa-add-phone', 'wa-add-name', 'wa-add-source'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.value = '';
+    });
+  }
+  loadWhatsApp();
 }
 
 function waFunnelHtml(f) {
