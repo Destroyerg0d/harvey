@@ -59,6 +59,11 @@ class Harness:
     def __init__(self, monkeypatch, tmp_path, provider="codex", model="gpt-5.5", db=None):
         self.tmp = tmp_path
         self.monkeypatch = monkeypatch
+        # Never the real account's usage: over its limit, a heartbeat here would
+        # behave differently depending on who has been using Claude this week.
+        async def no_quota(_self):
+            return None
+        monkeypatch.setattr("harvey.integrations.quota.QuotaClient.get_utilization", no_quota)
         self.log = tmp_path / "codex.log"
         self.scenario = "smart"
         self.native = tmp_path / "native-codex"

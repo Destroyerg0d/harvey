@@ -61,6 +61,12 @@ ERROR_BACKOFF_CAP = 900
 # between one stuck agent and Harvey freezing for hours with no agent
 # knowing it's dead — found in production after exactly that happened.
 CYCLE_TIMEOUT_SECONDS = 600
+# Over usage.max_daily_claude_percent, only what spends the model freely stops:
+# writing, prospecting, LinkedIn drafts and the learner. Reading replies and
+# sending what's already approved go on, since they cost next to nothing and a
+# lead's reply shouldn't wait days for a weekly limit to reset. From here the
+# whole cycle sleeps, which leaves the very last of the quota for you.
+HARD_STOP_PERCENT = 98
 # Companies a background profile batch reads (see _profile_in_background).
 PROFILE_BATCH = 25
 
@@ -515,13 +521,16 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
 
             # 3. Check usage budget (real subscription quota when readable,
             # else Harvey's own call counter)
-            if not await brain.is_within_budget(
+            over_limit = not await brain.is_within_budget(
                 max_calls, max_percent=config.usage.max_daily_claude_percent
+            )
+            if over_limit and not await brain.is_within_budget(
+                max_calls, max_percent=max(HARD_STOP_PERCENT, config.usage.max_daily_claude_percent)
             ):
                 logger.info(
-                    f"{brain.provider_label} usage limit reached "
-                    f"({config.usage.max_daily_claude_percent}% of quota or "
-                    f"{max_calls} calls). Sleeping 1h, then re-checking."
+                    f"{brain.provider_label} usage is nearly out "
+                    f"({HARD_STOP_PERCENT}% of quota or {max_calls} calls). "
+                    "Nothing runs until it resets. Sleeping 1h, then re-checking."
                 )
                 if await _interruptible_sleep(3600, stop_event):
                     break
@@ -529,7 +538,9 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
 
             # 3b. LinkedIn: start a run if one is due (it runs on in the
             # background, far longer than a cycle; it never blocks this one).
-            if not send_only:
+            if over_limit and not send_only:
+                await _start_whatsapp(whatsapp, send_only=True)
+            if not send_only and not over_limit:
                 try:
                     await linkedin.maybe_start()
                 except Exception as e:
@@ -541,7 +552,7 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
             # once. Every cycle it also refreshes the leak guard's view of the
             # lessons you approved.
             try:
-                await learner.maybe_start(start=not send_only)
+                await learner.maybe_start(start=not send_only and not over_limit)
             except Exception as e:
                 logger.warning(f"The learner couldn't start: {e}")
 
@@ -551,6 +562,15 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
                             "in recipients' own time zones.")
                 summary = {}
                 action = "quiet_hours_send"
+            elif over_limit:
+                logger.info(
+                    f"{brain.provider_label} usage is over your "
+                    f"{config.usage.max_daily_claude_percent}% limit: no writing or prospecting "
+                    "until it resets. Reading replies and sending what's approved."
+                )
+                # Profiling makes no model call, so it carries on too.
+                summary = {"unprofiled": await state.count_companies_needing_profile()}
+                action = "over_limit_send"
             else:
                 logger.info("Checking pipeline state...")
                 summary = await state.get_state_summary()

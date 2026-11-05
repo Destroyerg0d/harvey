@@ -547,6 +547,11 @@ minor versions can still change behaviour.
 
 ### Fixed
 
+- **Over the Claude limit, Harvey no longer stops reading replies and sending.** Hitting
+  `usage.max_daily_claude_percent` used to put the whole cycle to sleep, so a weekly limit could
+  leave approved email unsent and replies unread for days. Now only writing, prospecting, LinkedIn
+  drafts and the learner wait; replies, sending and profiling go on. The whole cycle sleeps only
+  from 98%, which keeps the last of the quota for you.
 - **Sending no longer waits for profiling.** A profile batch reads 25 sites
   (more pages each now: the phone view for site age, the contact page for
   COUNTRY) and can take several minutes, and the send phase waited for it
