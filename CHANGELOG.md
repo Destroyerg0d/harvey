@@ -9,6 +9,35 @@ minor versions can still change behaviour.
 
 ### Added
 
+- **LinkedIn and WhatsApp run from the dashboard, with no terminal.** Each tab opens on a
+  connection card that says where things stand and what to do next. **Connect**
+  (`POST /api/linkedin/login`, `/api/whatsapp/login`) starts the existing login command as a
+  background process, one at a time per channel, refused while a sign-in or a session already
+  holds that Chrome profile. A Chrome window opens on the PC; you sign in or scan there, and
+  Harvey still never sees a password or a code. The tab follows it by itself, through a wait
+  that times out, a closed window or a Chrome it can't find, and **Cancel** closes the window
+  properly, or ends the whole process tree if it doesn't answer. A run won't start while a
+  sign-in waits. `harvey/channel_login.py` keeps the state in a settings row and an OS lock, so
+  a crash can't leave a channel "waiting", and a terminal `harvey linkedin login` shows up too.
+- **An on/off switch with no restart.** The settings `linkedin:enabled` and `whatsapp:enabled`
+  override `channels.<channel>.enabled` and are read every heartbeat, as `whatsapp:autopilot`
+  is. Turning a channel on is refused until it's connected and takes a typed confirmation that
+  says plainly what automating the account risks. Turning it off is one click and stops a run
+  where it is: it's read again between steps, after every wait and just before Send or Enter is
+  pressed, and what hasn't gone stays approved. Off stops Scout's LinkedIn search too, though
+  turning the channel on here doesn't start that password-based search.
+- **Your own reply in a conversation.** It joins the same queue, approved by you, under the same
+  caps, hours and stop rules, and sets aside what Harvey had drafted for them. The box is closed,
+  and says why, once someone has said no on any channel or is on a do-not-contact list, before
+  they've written back at all, while a message may have gone out, and at the unanswered limit.
+- **Add a contact on the WhatsApp tab**: phone, name and where they gave you the number, one
+  person at a time through `queue_contact`. There is no list upload and a pasted list is refused.
+  A number held for review says what's wrong and what to do about it.
+- **Everything on the tabs.** Every conversation with its whole history (no more 40 people and
+  their last six messages), including people who haven't answered and what you approved that
+  was then stopped, with why. WhatsApp gains follow-ups due. Both gain warnings and pauses that
+  outlast the pause itself. Today gets a card when a channel is on but signed out or never
+  connected, as it already did for one paused by a warning.
 - **Export everything to a spreadsheet** (`harvey export --everything`, and a button on the
   Contacts tab). One .xlsx with a sheet each for contacts, companies, emails, conversations,
   website leads, LinkedIn, WhatsApp, facts, campaigns, lessons, feedback and activity. Settings
@@ -422,6 +451,12 @@ minor versions can still change behaviour.
 
 ### Changed
 
+- **Pausing LinkedIn now holds a run already going.** Its send loop only read the pause at the
+  start of a run, so the dashboard's "Nothing is read or sent until you resume" wasn't true of
+  one in progress. WhatsApp's already did this.
+- **LinkedIn's sign-in notices its window closing.** It used to wait out the full 30 minutes.
+- **A LinkedIn message or reply is checked against the unanswered limit and any no, again just
+  before it goes**, as WhatsApp's are. A reply from you would otherwise have gone past them.
 - **Automatic replies no longer stop a sequence, and replies from addresses
   Harvey doesn't know are no longer lost.** Most "replies" to cold email are
   helpdesk acknowledgements and out-of-offices; each one marked the prospect
