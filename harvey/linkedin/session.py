@@ -3,7 +3,8 @@
 Harvey drives the installed Google Chrome (not Playwright's bundled
 Chromium) with a persistent profile of its own in data/linkedin-profile,
 visible on screen by default. The owner signs that profile in once with
-`harvey linkedin login`: Harvey opens the login page and waits. It never
+`harvey linkedin login`, or the Connect button on the dashboard's LinkedIn tab,
+which starts the same command: Harvey opens the login page and waits. It never
 types a password or a 2FA code, and has no way to.
 
 ``Driver`` is the small set of things the agent does to a page (go to a
@@ -71,6 +72,10 @@ class Driver:
     @property
     def url(self) -> str:
         return self.page.url
+
+    @property
+    def closed(self) -> bool:
+        return self.page.is_closed()
 
     async def goto(self, url: str) -> None:
         await self.page.goto(url, wait_until="domcontentloaded", timeout=45000)
@@ -242,10 +247,12 @@ async def is_signed_in(driver) -> bool:
 
 
 async def login_interactive(cfg, timeout_minutes: float = 10, poll_seconds: float = 3,
-                            say=print) -> bool:
+                            say=print, stopped=None, session=None) -> bool:
     """Open linkedin.com/login in the dedicated profile, visible, and wait
-    for the owner to sign in themself. True once signed in."""
-    async with open_session(cfg, headless=False) as driver:
+    for the owner to sign in themself. True once signed in. ``stopped`` hears
+    why, when the wait ends before its time."""
+    opener = session or (lambda c: open_session(c, headless=False))
+    async with opener(cfg) as driver:
         await driver.goto(LOGIN_URL)
         if await is_signed_in(driver):
             say("  This profile is already signed in to LinkedIn.")
@@ -256,6 +263,11 @@ async def login_interactive(cfg, timeout_minutes: float = 10, poll_seconds: floa
         deadline = asyncio.get_running_loop().time() + timeout_minutes * 60
         while asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(poll_seconds)
+            if getattr(driver, "closed", False):
+                say("  The Chrome window was closed.")
+                if stopped:
+                    stopped("The Chrome window was closed")
+                return False
             if await is_signed_in(driver):
                 await driver.wait(2)
                 return True

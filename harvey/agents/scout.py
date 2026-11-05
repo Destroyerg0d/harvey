@@ -237,7 +237,14 @@ class Scout:
         # the mercy of Serper/Bing flakiness — cheapest, most reliable win
         # available before spending any queries.
         strategies.append(("known_companies", self._prospect_via_known_companies))
-        if self.config.channels.linkedin.enabled and self.env.linkedin_email:
+        # The dashboard's LinkedIn switch can only take this away: off means off
+        # everywhere, but turning it on there runs the channel through its own
+        # signed-in profile, and isn't a yes to a password-based search as well.
+        linkedin_search = bool(self.config.channels.linkedin.enabled and self.env.linkedin_email)
+        if linkedin_search:
+            from harvey.agents.linkedin_agent import ENABLED_KEY
+            linkedin_search = (await self.state.get_setting(ENABLED_KEY) or "").strip().lower() != "off"
+        if linkedin_search:
             strategies.append(("linkedin", self._prospect_via_linkedin))
         # Job boards first: hiring is the strongest intent signal, and the
         # strategy self-skips when python-jobspy isn't installed.
@@ -246,7 +253,7 @@ class Scout:
         # email, which Harvey can't verify; it rides the same switch as the
         # LinkedIn channel (and its login) so it is off unless LinkedIn
         # prospecting is wanted, and doesn't spend the cycle's query budget.
-        if self.config.channels.linkedin.enabled and self.env.linkedin_email:
+        if linkedin_search:
             strategies.append(("profile_search", self._prospect_via_profile_search))
         # Old shops, by the text their software prints (opt-in: icp.legacy_niches
         # or icp.footprint_queries). Companies only; the backfill above finds

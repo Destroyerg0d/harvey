@@ -4,6 +4,8 @@ import asyncio
 import json
 from datetime import datetime, timezone
 
+SIGNED_IN_KEY = "linkedin:signed_in_at"
+
 
 def add_parser(subparsers):
     sub = subparsers.add_parser("linkedin", help="LinkedIn: sign in, import the tracker, run, pause")
@@ -33,24 +35,39 @@ def cmd_linkedin(args):
 
 
 async def _login(args, config, state):
+    """The sign-in itself, whether you ran this or the dashboard's Connect did:
+    it writes how it went where the dashboard reads it (harvey/channel_login.py)."""
+    from harvey import channel_login
+    from harvey.agents.linkedin_agent import channel_on
     from harvey.linkedin import guards
-    from harvey.linkedin.session import ChromeNotFound, login_interactive
+    from harvey.linkedin.session import login_interactive
     await state.init_db()
-    try:
-        ok = await login_interactive(config.channels.linkedin,
-                                     timeout_minutes=config.channels.linkedin.login_timeout_minutes)
-    except ChromeNotFound as e:
-        print(f"\n  {e}\n")
+    cfg = config.channels.linkedin
+    if await channel_login.session_going(state, "linkedin", cfg):
+        print("\n  A LinkedIn session is running in that Chrome profile. Try again when it has finished.\n")
         return
-    if ok:
+    why: list[str] = []
+
+    async def attempt():
+        ok = await login_interactive(cfg, timeout_minutes=cfg.login_timeout_minutes, stopped=why.append)
+        return ok, "; ".join(why)
+
+    async def connected():
         await guards.clear_pause(state, kinds=("signed_out",))
-        await state.set_setting("linkedin:signed_in_at",
-                                datetime.now(timezone.utc).isoformat(timespec="seconds"))
+        await state.set_setting(SIGNED_IN_KEY, datetime.now(timezone.utc).isoformat(timespec="seconds"))
+
+    outcome = await channel_login.run_attended(state, "linkedin", attempt,
+                                               minutes=cfg.login_timeout_minutes, on_connected=connected)
+    if outcome.connected:
         print("\n  Signed in. The profile keeps the sign-in in data/linkedin-profile.\n")
-        if not config.channels.linkedin.enabled:
-            print("  LinkedIn is still off: set channels.linkedin.enabled: true to let Harvey run it.\n")
-    else:
+        if not await channel_on(state, config):
+            print("  LinkedIn is still off: turn it on on the dashboard's LinkedIn tab to let Harvey run it.\n")
+    elif outcome.status == channel_login.TIMED_OUT:
         print("\n  Not signed in yet (timed out). Run `harvey linkedin login` again.\n")
+    elif outcome.status == channel_login.CANCELLED:
+        print("\n  Cancelled from the dashboard. Nothing changed.\n")
+    else:
+        print(f"\n  {outcome.detail}\n")
 
 
 async def _import(args, config, state):
@@ -67,7 +84,7 @@ async def _import(args, config, state):
 
 
 async def _status(args, config, state):
-    from harvey.agents.linkedin_agent import LAST_RUN_KEY, autopilot_on
+    from harvey.agents.linkedin_agent import LAST_RUN_KEY, autopilot_on, channel_on
     from harvey.linkedin import guards
     from harvey.linkedin.pacing import Pacing
     await state.init_db()
@@ -82,7 +99,7 @@ async def _status(args, config, state):
         last = json.loads(await state.get_setting(LAST_RUN_KEY) or "{}")
     except ValueError:
         last = {}
-    print("\n  LinkedIn: " + ("on" if cfg.enabled else "off (channels.linkedin.enabled)")
+    print("\n  LinkedIn: " + ("on" if await channel_on(state, config) else "off")
           + (", autopilot" if await autopilot_on(state, config) else ", approval mode"))
     print(f"  Hours: {pacing.hours_text()} ({'inside' if pacing.in_hours() else 'outside'} now)")
     if pause:

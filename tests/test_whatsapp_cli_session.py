@@ -94,7 +94,7 @@ def test_run_when_off_says_why(state, capsys, monkeypatch):
 
 
 def test_the_login_command_records_when_it_was_linked(state, capsys, monkeypatch):
-    async def fine(cfg):
+    async def fine(cfg, **hooks):
         return True
     monkeypatch.setattr(wa_session, "login_interactive", fine)
     run(state.init_db())
@@ -106,7 +106,7 @@ def test_the_login_command_records_when_it_was_linked(state, capsys, monkeypatch
 
 
 def test_a_login_that_times_out_records_nothing(state, capsys, monkeypatch):
-    async def timed_out(cfg):
+    async def timed_out(cfg, **hooks):
         return False
     monkeypatch.setattr(wa_session, "login_interactive", timed_out)
     run(state.init_db())

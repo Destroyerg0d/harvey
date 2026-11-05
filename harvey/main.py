@@ -424,11 +424,14 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
     shared = getattr(sender, "mailbox_providers", None)
     if shared is not None:
         writer.mailbox_providers = handler.mailbox_providers = shared
-    # LinkedIn (channels.linkedin.enabled): a paced session in the background,
-    # inside LinkedIn hours, never two at once, at most one every ~2 hours.
+    # LinkedIn: a paced session in the background, inside LinkedIn hours, never
+    # two at once, at most one every ~2 hours. The runner exists whatever the
+    # config says: it asks the dashboard's switch (linkedin:enabled, which
+    # overrides channels.linkedin.enabled) every cycle, so turning it on or off
+    # needs no restart.
     from harvey.agents.linkedin_agent import LinkedInRunner
     linkedin = LinkedInRunner(brain, state, config)
-    # WhatsApp (channels.whatsapp.enabled): the same, by recipients' clocks.
+    # WhatsApp: the same (whatsapp:enabled), by recipients' clocks.
     from harvey.agents.whatsapp_agent import WhatsAppRunner
     whatsapp = WhatsAppRunner(brain, state, config)
     # The learner: once a day, lessons from results for you to approve.

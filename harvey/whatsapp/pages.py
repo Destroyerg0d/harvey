@@ -54,6 +54,8 @@ ROW_TITLE = "[data-testid='cell-frame-title'] span[title], span[title]"
 ROW_UNREAD = "[aria-label*='unread' i], [data-testid='icon-unread-count']"
 # Icons of WhatsApp's own "phone isn't connected" banner.
 OFFLINE_ICON = "[data-icon='alert-phone'], [data-icon='alert-computer']"
+# Where WhatsApp Web's localStorage keeps its own number ("15555550100:12@c.us").
+OWN_NUMBER_KEYS = ("last-wid-md", "last-wid")
 # Never read for words: the page's code and metadata aren't its interface.
 NOT_INTERFACE = "script, style, noscript, template, head"
 

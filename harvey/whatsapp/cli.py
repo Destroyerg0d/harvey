@@ -41,26 +41,45 @@ def cmd_whatsapp(args):
 
 
 async def _login(args, config, state):
+    """The link itself, whether you ran this or the dashboard's Connect did: it
+    writes how it went where the dashboard reads it (harvey/channel_login.py)."""
+    from harvey import channel_login
+    from harvey.agents.whatsapp_agent import channel_on
     from harvey.whatsapp import guards
     from harvey.whatsapp.pacing import mark_linked
-    from harvey.whatsapp.session import ChromeNotFound, login_interactive
+    from harvey.whatsapp.session import login_interactive
     await state.init_db()
     cfg = config.channels.whatsapp
-    try:
-        ok = await login_interactive(cfg)
-    except ChromeNotFound as e:
-        print(f"\n  {e}\n")
+    if await channel_login.session_going(state, "whatsapp", cfg):
+        print("\n  A WhatsApp session is running in that Chrome profile. Try again when it has finished.\n")
         return
-    if ok:
+    why: list[str] = []
+    numbers: list[str] = []
+    linked = ""
+
+    async def attempt():
+        ok = await login_interactive(cfg, stopped=why.append, number_seen=numbers.append)
+        return ok, "; ".join(why)
+
+    async def connected():
+        nonlocal linked
         await guards.clear_pause(state, kinds=("signed_out",))
-        linked = await mark_linked(state, cfg)
+        linked = await mark_linked(state, cfg, number=numbers[-1] if numbers else "")
+
+    outcome = await channel_login.run_attended(state, "whatsapp", attempt,
+                                               minutes=cfg.login_timeout_minutes, on_connected=connected)
+    if outcome.connected:
         print(f"\n  Linked. The profile keeps the link in {cfg.profile_dir}. Linked since {linked[:16]} UTC; "
               f"the first {cfg.new_number_days} days run at {cfg.max_daily_first_messages_new} first "
               "messages a day.\n")
-        if not cfg.enabled:
-            print("  WhatsApp is still off: set channels.whatsapp.enabled: true to let Harvey run it.\n")
-    else:
+        if not await channel_on(state, config):
+            print("  WhatsApp is still off: turn it on on the dashboard's WhatsApp tab to let Harvey run it.\n")
+    elif outcome.status == channel_login.TIMED_OUT:
         print("\n  Not linked yet. Run `harvey whatsapp login` again when you have the phone to hand.\n")
+    elif outcome.status == channel_login.CANCELLED:
+        print("\n  Cancelled from the dashboard. Nothing changed.\n")
+    else:
+        print(f"\n  {outcome.detail}\n")
 
 
 async def _add(args, config, state):
@@ -84,7 +103,7 @@ async def _add(args, config, state):
 
 
 async def _status(args, config, state):
-    from harvey.agents.whatsapp_agent import LAST_RUN_KEY, autopilot_on
+    from harvey.agents.whatsapp_agent import LAST_RUN_KEY, autopilot_on, channel_on
     from harvey.whatsapp import guards
     from harvey.whatsapp.pacing import WhatsAppPacing
     await state.init_db()
@@ -101,7 +120,7 @@ async def _status(args, config, state):
         last = json.loads(await state.get_setting(LAST_RUN_KEY) or "{}")
     except ValueError:
         last = {}
-    print("\n  WhatsApp: " + ("on" if cfg.enabled else "off (channels.whatsapp.enabled)")
+    print("\n  WhatsApp: " + ("on" if await channel_on(state, config) else "off")
           + (", autopilot" if await autopilot_on(state, config) else ", approval mode"))
     number = cfg.number or "(channels.whatsapp.number isn't set)"
     print(f"  Number: {number}, "

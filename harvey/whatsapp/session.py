@@ -4,19 +4,21 @@ The installed Google Chrome with a persistent profile of its own in
 data/whatsapp-profile, always visible on screen: there is no headless setting.
 LinkedIn's session code does the work; this adds pressing Enter.
 
-`harvey whatsapp login` opens web.whatsapp.com and waits while the owner links
-the phone by QR code. Harvey never handles a code. The UI language is forced to
-English because the breakers read WhatsApp's own words: in another language a
+`harvey whatsapp login`, or the Connect button on the dashboard's WhatsApp tab,
+which starts the same command, opens web.whatsapp.com and waits while the owner
+links the phone by QR code. Harvey never handles a code. The UI language is forced
+to English because the breakers read WhatsApp's own words: in another language a
 ban notice wouldn't match anything.
 """
 
 import asyncio
 import logging
+import re
 from contextlib import asynccontextmanager
 
 from harvey.linkedin.session import ChromeNotFound, Driver, open_session as _open_chrome, profile_dir
 from harvey.whatsapp.guards import HARD_STOPS, detect_breaker
-from harvey.whatsapp.pages import HOME_URL, app_ready
+from harvey.whatsapp.pages import HOME_URL, OWN_NUMBER_KEYS, app_ready
 
 logger = logging.getLogger("harvey.whatsapp")
 
@@ -55,10 +57,6 @@ class WhatsAppDriver(Driver):
     async def press_enter(self) -> None:
         await self.page.keyboard.press("Enter")
 
-    @property
-    def closed(self) -> bool:
-        return self.page.is_closed()
-
 
 @asynccontextmanager
 async def open_session(cfg):
@@ -79,14 +77,48 @@ async def is_linked(driver) -> bool:
         return False
 
 
-async def login_interactive(cfg, poll_seconds: float = 3, say=print, session=None) -> bool:
+async def own_number(driver) -> str:
+    """The linked number, from what WhatsApp Web keeps in its own storage, so the
+    dashboard can say which phone it is without a config edit. Only ever a label:
+    this hasn't been checked against the live site, and anything unexpected comes
+    back as "" (channels.whatsapp.number is then what's shown)."""
+    page = getattr(driver, "page", None)
+    if page is None:
+        return ""
+    for key in OWN_NUMBER_KEYS:
+        try:
+            raw = await page.evaluate("key => localStorage.getItem(key)", key)
+        except Exception:
+            return ""
+        found = re.search(r"(\d{7,15})(?::\d+)?@", str(raw or ""))
+        if found:
+            return "+" + found.group(1)
+    return ""
+
+
+async def login_interactive(cfg, poll_seconds: float = 3, say=print, session=None, stopped=None,
+                            number_seen=None) -> bool:
     """Open WhatsApp Web in the dedicated profile, visible, and wait for the
-    owner to link the phone themself. True once linked."""
+    owner to link the phone themself. True once linked. ``stopped`` hears why,
+    when the wait ends before its time; ``number_seen``, the linked number."""
     minutes = cfg.login_timeout_minutes
+
+    def stop(reason: str) -> bool:
+        say(f"  {reason}.")
+        if stopped:
+            stopped(reason)
+        return False
+
+    async def saw_number(driver) -> None:
+        number = await own_number(driver)
+        if number and number_seen:
+            number_seen(number)
+
     async with (session or open_session)(cfg) as driver:
         await driver.goto(HOME_URL)
         if await is_linked(driver):
             say("  This profile is already linked to WhatsApp.")
+            await saw_number(driver)
             return True
         say("  A Chrome window is open on WhatsApp Web.")
         say("  On the phone with the separate number: WhatsApp > Linked devices > Link a device,")
@@ -96,16 +128,15 @@ async def login_interactive(cfg, poll_seconds: float = 3, say=print, session=Non
         while asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(poll_seconds)
             if getattr(driver, "closed", False):
-                say("  The Chrome window was closed.")
-                return False
+                return stop("The Chrome window was closed")
             if await is_linked(driver):
                 await driver.wait(LINK_SETTLE_SECONDS)
+                await saw_number(driver)
                 return True
             try:
                 breaker = detect_breaker(driver.url, await driver.html())
             except Exception:
                 continue
             if breaker and breaker.kind in HARD_STOPS:
-                say(f"  {breaker.reason}.")
-                return False
+                return stop(breaker.reason)
         return False

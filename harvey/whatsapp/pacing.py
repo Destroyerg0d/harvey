@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 
 from harvey.linkedin.pacing import Pacing
 from harvey import send_window
+from harvey.whatsapp.numbers import digits_of
 
 COUNT_PREFIX = "whatsapp:count:"
 LINKED_AT_KEY = "whatsapp:linked_at"
@@ -35,13 +36,15 @@ def _parse(value) -> datetime | None:
     return parsed.astimezone(timezone.utc).replace(tzinfo=None) if parsed.tzinfo else parsed
 
 
-async def mark_linked(state, cfg, at: datetime | None = None) -> str:
+async def mark_linked(state, cfg, at: datetime | None = None, number: str = "") -> str:
     """Record when the phone was linked. The ramp counts from here, so linking
-    the same number again doesn't start it over; a different number does."""
+    the same number again doesn't start it over; a different number does.
+    ``number``: what WhatsApp Web itself says it is, over the config's."""
     at = at or datetime.now(timezone.utc).replace(tzinfo=None)
     linked = await state.get_setting(LINKED_AT_KEY)
-    number = (getattr(cfg, "number", "") or "").strip()
-    if not linked or (number and number != await state.get_setting(LINKED_NUMBER_KEY)):
+    number = (number or getattr(cfg, "number", "") or "").strip()
+    known = await state.get_setting(LINKED_NUMBER_KEY)
+    if not linked or (number and digits_of(number) != digits_of(known)):
         linked = at.isoformat(timespec="seconds")
         await state.set_setting(LINKED_AT_KEY, linked)
     if number:

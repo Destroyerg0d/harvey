@@ -18,7 +18,9 @@ A run, inside LinkedIn hours and at most one every ~2 hours:
    check the thread shows it. Any mismatch is a failure, not a retry.
 
 Any LinkedIn warning, captcha, sign-in challenge or limit notice stops the
-run and pauses LinkedIn for 48 hours (harvey/linkedin/guards.py).
+run and pauses LinkedIn for 48 hours (harvey/linkedin/guards.py). The
+dashboard's on/off switch and pause are read again before every send, so
+either one stops a run already going.
 """
 
 import asyncio
@@ -29,9 +31,10 @@ import re
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+from harvey import channel_login
 from harvey.linkedin import guards
 from harvey.linkedin.guards import BreakerTripped, active_pause, detect_breaker
-from harvey.linkedin.pacing import Pacing
+from harvey.linkedin.pacing import Pacing, wait_unless
 from harvey.linkedin.pages import (
     COMPOSER, CONNECTIONS_URL, CONVERSATION_LIST, FEED_URL, INVITE_NOTE_BOX, MESSAGING_URL,
     SEND_BUTTON, SENT_INVITES_URL, clean_text, compose_link_from_profile, invite_confirmed,
@@ -47,6 +50,7 @@ logger = logging.getLogger("harvey.linkedin")
 LAST_RUN_KEY = "linkedin:last_run"
 RUNNING_KEY = "linkedin:running"
 AUTOPILOT_KEY = "linkedin:autopilot"
+ENABLED_KEY = "linkedin:enabled"
 NOTES_OFF_KEY = "linkedin:notes_unavailable_until"
 
 DECLINE_INTENTS = {"not_interested", "unsubscribe"}
@@ -87,6 +91,44 @@ async def autopilot_on(state, config) -> bool:
     if value in ("on", "off"):
         return value == "on"
     return bool(config.channels.linkedin.autopilot)
+
+
+async def channel_on(state, config) -> bool:
+    """LinkedIn on or off: the dashboard's switch once used, else the config.
+    Read every cycle, since the heartbeat only reads its config at startup."""
+    value = (await state.get_setting(ENABLED_KEY) or "").strip().lower()
+    if value in ("on", "off"):
+        return value == "on"
+    return bool(config.channels.linkedin.enabled)
+
+
+class SwitchedOff(Exception):
+    """The channel was switched off during a run: stop it where it is."""
+
+
+async def said_no(state, config, lead: dict, entries=None) -> str:
+    """Why this lead must not get another message from anyone here, you included,
+    or "": a no on any channel, or the do-not-contact list. ``entries``: that list,
+    when the caller already has it."""
+    from harvey.config import live_do_not_contact
+    from harvey.gate import do_not_contact_domain_match, do_not_contact_match
+    from harvey.whatsapp.contacts import SAID_NO
+    if lead.get("stage") == "declined":
+        return "they said no on LinkedIn"
+    entries = live_do_not_contact(config) if entries is None else entries
+    prospect = await state.get_prospect(lead["prospect_id"]) if lead.get("prospect_id") else None
+    if prospect is not None:
+        if prospect.status == "opted_out":
+            return "they opted out"
+        if prospect.status in SAID_NO:
+            return "they said no by email"
+        if prospect.email and do_not_contact_match(prospect.email, entries):
+            return "their address is on your do-not-contact list"
+    company_id = lead.get("company_id") or (prospect.company_id if prospect else "")
+    company = await state.get_company(company_id) if company_id else None
+    if company and company.domain and do_not_contact_domain_match(company.domain, entries):
+        return "their company is on your do-not-contact list"
+    return ""
 
 
 def _clean_draft(text: str) -> str:
@@ -140,11 +182,13 @@ class LinkedInAgent:
     # ── When it may run ──
 
     async def why_not_now(self, ignore_interval: bool = False) -> str:
-        if not self.cfg.enabled:
-            return "LinkedIn is off (channels.linkedin.enabled is false)"
+        if not await channel_on(self.state, self.config):
+            return "LinkedIn is off (the switch on the dashboard's LinkedIn tab, or channels.linkedin.enabled)"
         pause = await active_pause(self.state, self.now())
         if pause:
             return "LinkedIn is paused: " + str(pause.get("reason") or "paused")
+        if await channel_login.in_progress(self.state, "linkedin"):
+            return "a LinkedIn sign-in is waiting, and its Chrome window holds the profile"
         if not self.pacing.in_hours():
             return f"outside LinkedIn hours ({self.pacing.hours_text()})"
         running = _parse(await self.state.get_setting(RUNNING_KEY))
@@ -190,6 +234,9 @@ class LinkedInAgent:
         except BreakerTripped as e:
             self.report["outcome"] = "stopped: " + e.breaker.reason
             logger.warning(f"LinkedIn: stopped and paused: {e.breaker.reason}")
+        except SwitchedOff:
+            self.report["outcome"] = "stopped: switched off"
+            logger.info("LinkedIn: switched off, so the run stopped.")
         except Exception as e:
             self.report["outcome"] = f"error: {e}"
             logger.error(f"LinkedIn run failed: {e}", exc_info=True)
@@ -209,16 +256,28 @@ class LinkedInAgent:
     async def _steps(self):
         await self.pacing.prune()
         await self._check_signed_in()
-        await self.sync_inbox()
-        await self.sync_connections()
-        await self.sync_sent_invites()
-        await self.handle_inbound()
-        await self.draft_messages()
-        await self.pick_invites()
-        await self.send_approved()
+        for step in (self.sync_inbox, self.sync_connections, self.sync_sent_invites,
+                     self.handle_inbound, self.draft_messages, self.pick_invites, self.send_approved):
+            await self._still_on()
+            await step()
+        await self._still_on()      # stopped during the last step: say so, not "done"
 
     def _time_left(self) -> bool:
         return self.deadline is None or self.now() < self.deadline
+
+    async def _still_on(self):
+        """The switch works mid-run, not just at the start of one."""
+        if not await channel_on(self.state, self.config):
+            raise SwitchedOff()
+
+    async def _held(self) -> bool:
+        """Switched off or paused, this moment."""
+        return not await channel_on(self.state, self.config) or bool(
+            await active_pause(self.state, self.now()))
+
+    async def _wait_between_actions(self):
+        """The wait between actions, which ends early if the channel is stopped."""
+        await wait_unless(self.pacing.between_actions(), self._held)
 
     async def _guard(self, html: str):
         breaker = detect_breaker(self.driver.url, html)
@@ -339,7 +398,10 @@ class LinkedInAgent:
             if not self._time_left() or not self.pacing.in_hours() or \
                     await self.pacing.blocked("withdraw"):
                 break
-            await self.pacing.between_actions()
+            await self._wait_between_actions()
+            await self._still_on()
+            if await active_pause(self.state, self.now()):
+                break
             anchor = f"a[href*='/in/{invite.slug}']"
             if not await self.driver.click_button_near(anchor, r"^withdraw"):
                 continue
@@ -804,6 +866,9 @@ FACTS about them:
         for item in items:
             if not self._time_left() or not self.pacing.in_hours():
                 break
+            await self._still_on()
+            if await active_pause(self.state, self.now()):
+                break
             if item["lead_id"] in self._failed_leads:
                 continue
             lead = await self.state.li_get_lead(item["lead_id"])
@@ -813,6 +878,14 @@ FACTS about them:
                 await self.state.li_update_message(item["id"], status="skipped",
                                                    error="they declined")
                 continue
+            # What you approved or wrote yourself is held to the same stop rules.
+            if item["kind"] != "invite_note":
+                why = await said_no(self.state, self.config, lead)
+                if not why and len(await self.state.li_unanswered(lead["id"])) >= self.cfg.max_unanswered:
+                    why = f"{self.cfg.max_unanswered} messages without a reply already"
+                if why:
+                    await self.state.li_update_message(item["id"], status="skipped", error=why)
+                    continue
             if item["kind"] == "message" and (lead.get("last_inbound_at") or "") > (
                     item["created_at"] or ""):
                 await self.state.li_update_message(
@@ -835,7 +908,13 @@ FACTS about them:
                 self.report["would_send"].append(
                     {"kind": item["kind"], "lead": lead.get("name"), "body": item["body"]})
                 continue
-            await self.pacing.between_actions()
+            await self._wait_between_actions()
+            await self._still_on()
+            if await active_pause(self.state, self.now()):
+                break
+            current = await self.state.li_get_message(item["id"])
+            if current is None or current["status"] != "approved":
+                continue
             if kind == "invite":
                 ok, detail = await self.send_invite(lead, item)
             else:
@@ -872,6 +951,9 @@ FACTS about them:
         if typed != clean_text(body):
             await self.driver.clear(COMPOSER)
             return False, "the message box didn't hold exactly the draft, so it wasn't sent"
+        if await self._held():          # stopped while typing: it stays approved
+            await self.driver.clear(COMPOSER)
+            return False, ""
         if not await self.driver.click(SEND_BUTTON):
             await self.driver.clear(COMPOSER)
             return False, "couldn't press Send"
@@ -942,11 +1024,18 @@ FACTS about them:
                     await self.driver.clear(INVITE_NOTE_BOX)
                     await self.driver.click_button(r"^(dismiss|close|cancel)$")
                     return False, "the note box didn't hold exactly the note, so nothing was sent"
+                if await self._held():      # stopped while typing: it stays approved
+                    await self.driver.clear(INVITE_NOTE_BOX)
+                    await self.driver.click_button(r"^(dismiss|close|cancel)$")
+                    return False, ""
                 if not await self.driver.click_button(r"^send( invitation| now)?$",
                                                       within="[role='dialog']"):
                     return False, "couldn't press Send on the invite"
                 sent_note = note
         if not sent_note:
+            if await self._held():
+                await self.driver.click_button(r"^(dismiss|close|cancel)$")
+                return False, ""
             if not (await self.driver.click_button(r"^send without a note$")
                     or await self.driver.click_button(r"^send( now| invitation)?$",
                                                       within="[role='dialog']")):
@@ -978,7 +1067,7 @@ class LinkedInRunner:
 
     async def maybe_start(self) -> str:
         """Start a run if one is due. Returns why not, or "started"."""
-        if not getattr(self.config.channels.linkedin, "enabled", False):
+        if not await channel_on(self.state, self.config):
             return "off"
         if self.running:
             return "a run is going"

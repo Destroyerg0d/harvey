@@ -13,7 +13,7 @@ STRATEGIES = (
 
 def _scout(linkedin_enabled: bool, linkedin_email: str = "") -> Scout:
     brain = SimpleNamespace(load_skills_for_agent=lambda name: "")
-    state = SimpleNamespace(log_action=AsyncMock())
+    state = SimpleNamespace(log_action=AsyncMock(), get_setting=AsyncMock(return_value=""))
     config = SimpleNamespace(
         channels=SimpleNamespace(linkedin=SimpleNamespace(enabled=linkedin_enabled))
     )

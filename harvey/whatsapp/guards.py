@@ -3,7 +3,7 @@
 - A ban, "this account is not allowed", unusual activity, spam or a temporary
   restriction: a hard stop, paused 48 hours (``pause_hours_on_warning``).
 - Signed out, or the QR code showing: paused until the phone is linked again
-  (`harvey whatsapp login`).
+  (Connect on the dashboard's WhatsApp tab, or `harvey whatsapp login`).
 - "Phone not connected" or WhatsApp open in another window: a short pause.
 - Three failed sends in a row (``max_failed_sends_in_a_row``): paused until you
   resume, because something is wrong that retrying won't fix.
@@ -144,7 +144,8 @@ async def trip(state, breaker: Breaker, cfg=None, now: datetime | None = None) -
     """Record a breaker: signed out waits for the phone, a warning is 48 hours,
     a phone that dropped off or a second window a short while."""
     if breaker.kind == "signed_out":
-        return await set_pause(state, breaker.reason + ". Run `harvey whatsapp login` to link it.",
+        return await set_pause(state, breaker.reason + ". Press Connect on the dashboard's WhatsApp tab "
+                                                       "(or run `harvey whatsapp login`) to link it.",
                                kind="signed_out", hours=None, url=breaker.url, now=now)
     if breaker.kind in ("phone_offline", "session_conflict"):
         minutes = getattr(cfg, "pause_minutes_phone_offline", 30)

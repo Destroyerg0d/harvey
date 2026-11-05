@@ -4,7 +4,8 @@ A captcha or security check, an "unusual activity" or restriction notice,
 the weekly invitation limit, a "Something went wrong" toast, or a login
 wall. Any of them pauses LinkedIn for ``pause_hours_on_warning`` (48 by
 default) with the reason, which the dashboard shows, and ends the run.
-Signed out pauses until the owner signs in again (`harvey linkedin login`).
+Signed out pauses until the owner signs in again (Connect on the dashboard's
+LinkedIn tab, or `harvey linkedin login`).
 
 Message text is never read for this: a lead writing "something went wrong
 with our checkout" is not LinkedIn warning the account.
@@ -131,7 +132,8 @@ async def set_pause(state, reason: str, kind: str = "breaker", hours: float | No
 async def trip(state, breaker: Breaker, hours: float = 48) -> dict:
     """Record a breaker: signed out waits for a sign-in, the rest ``hours``."""
     if breaker.kind == "signed_out":
-        return await set_pause(state, breaker.reason + ". Run `harvey linkedin login` to sign in.",
+        return await set_pause(state, breaker.reason + ". Press Connect on the dashboard's LinkedIn tab "
+                                                       "(or run `harvey linkedin login`) to sign in.",
                                kind="signed_out", hours=None, url=breaker.url)
     return await set_pause(state, breaker.reason, kind=breaker.kind, hours=hours, url=breaker.url)
 

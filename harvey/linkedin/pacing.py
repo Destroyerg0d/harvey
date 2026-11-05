@@ -14,6 +14,26 @@ import pytz
 
 COUNT_PREFIX = "linkedin:count:"
 KINDS = ("invite", "message", "withdraw")
+# How often a long wait between actions looks up to see whether it should stop.
+STOP_CHECK_SECONDS = 10.0
+
+
+async def wait_unless(wait, should_stop) -> bool:
+    """Await ``wait``, ending it early once ``should_stop`` says so. True if it ran
+    to its end. A break can be fifteen minutes, and a channel just switched off
+    shouldn't hold Chrome open for them."""
+    task = asyncio.ensure_future(wait)
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=STOP_CHECK_SECONDS)
+            if done:
+                task.result()
+                return True
+            if await should_stop():
+                return False
+    finally:
+        if not task.done():
+            task.cancel()
 
 
 class Pacing:

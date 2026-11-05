@@ -29,8 +29,12 @@ import unicodedata
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
-from harvey.agents.linkedin_agent import DECLINE_INTENTS, REPLY_INTENTS, _clean_draft, asks_if_automated
+from harvey import channel_login
+from harvey.agents.linkedin_agent import (
+    DECLINE_INTENTS, REPLY_INTENTS, SwitchedOff, _clean_draft, asks_if_automated,
+)
 from harvey.gate import find_links
+from harvey.linkedin.pacing import wait_unless
 from harvey.linkedin.pages import clean_text, names_match
 from harvey.linkedin.store import _iso
 from harvey.untrusted import UNTRUSTED_RULE, fence
@@ -50,6 +54,7 @@ logger = logging.getLogger("harvey.whatsapp")
 LAST_RUN_KEY = "whatsapp:last_run"
 RUNNING_KEY = "whatsapp:running"
 AUTOPILOT_KEY = "whatsapp:autopilot"
+ENABLED_KEY = "whatsapp:enabled"
 
 MAX_CHATS_PER_RUN = 12
 MAX_DRAFT_ATTEMPTS = 3
@@ -120,6 +125,39 @@ async def autopilot_on(state, config) -> bool:
     if value in ("on", "off"):
         return value == "on"
     return bool(config.channels.whatsapp.autopilot)
+
+
+async def channel_on(state, config) -> bool:
+    """WhatsApp on or off: the dashboard's switch once used, else the config.
+    Read every cycle, since the heartbeat only reads its config at startup."""
+    value = (await state.get_setting(ENABLED_KEY) or "").strip().lower()
+    if value in ("on", "off"):
+        return value == "on"
+    return bool(config.channels.whatsapp.enabled)
+
+
+def next_due(contact: dict, rows: list[dict], cfg, now: datetime) -> tuple[str, datetime | None]:
+    """Which message this contact is due, and since when: ("first" | "follow_up",
+    when), or ("", None). A row of that kind in any state, skipped included, means
+    it has had its chance: a first message you skipped isn't written again, and
+    there is at most one follow-up."""
+    if any(m["direction"] == "in" for m in rows):
+        return "", None
+    out = [m for m in rows if m["direction"] == "out"]
+    if any(m["status"] in HOLDING_STATUSES for m in out):
+        return "", None
+    kinds = {m["kind"] for m in out}
+    if contact["stage"] == "queued":
+        return ("", None) if "first" in kinds else ("first", _parse(contact.get("created_at")))
+    if contact["stage"] != "messaged" or "follow_up" in kinds:
+        return "", None
+    sent = [m for m in out if m["status"] == "sent"]
+    if not sent or len(sent) >= cfg.max_unanswered:
+        return "", None
+    last = _parse(sent[-1].get("sent_at")) or now
+    due = max(_parse(contact.get("next_action_at")) or last,
+              last + timedelta(days=cfg.follow_up_min_days))
+    return ("follow_up", due) if due <= now else ("", None)
 
 
 def clean_draft(text: str) -> str:
@@ -221,13 +259,15 @@ class WhatsAppAgent:
         return False
 
     async def why_not_now(self, ignore_interval: bool = False, send_only: bool = False) -> str:
-        if not self.cfg.enabled:
-            return "WhatsApp is off (channels.whatsapp.enabled is false)"
+        if not await channel_on(self.state, self.config):
+            return "WhatsApp is off (the switch on the dashboard's WhatsApp tab, or channels.whatsapp.enabled)"
         pause = await active_pause(self.state, self.now())
         if pause:
             return "WhatsApp is paused: " + str(pause.get("reason") or "paused")
+        if await channel_login.in_progress(self.state, "whatsapp"):
+            return "a WhatsApp sign-in is waiting, and its Chrome window holds the profile"
         if not await self.pacing.linked_at():
-            return "the phone isn't linked yet (run `harvey whatsapp login`)"
+            return "the phone isn't linked yet (Connect on the dashboard's WhatsApp tab, or `harvey whatsapp login`)"
         running = _parse(await self.state.get_setting(RUNNING_KEY))
         if running and self.now() - running < timedelta(minutes=self.cfg.max_run_minutes + 15):
             return "a WhatsApp run is already going"
@@ -273,6 +313,9 @@ class WhatsAppAgent:
         except BreakerTripped as e:
             self.report["outcome"] = "stopped: " + e.breaker.reason
             logger.warning(f"WhatsApp: stopped and paused: {e.breaker.reason}")
+        except SwitchedOff:
+            self.report["outcome"] = "stopped: switched off"
+            logger.info("WhatsApp: switched off, so the run stopped.")
         except Exception as e:
             self.report["outcome"] = f"error: {e}"
             logger.error(f"WhatsApp run failed: {e}", exc_info=True)
@@ -291,14 +334,24 @@ class WhatsAppAgent:
     async def _steps(self, send_only: bool = False):
         await self.pacing.prune()
         await self._wait_ready()
-        if not send_only:
-            await self.sync_inbox()
-            await self.handle_inbound()
-            await self.draft_messages()
-        await self.send_approved()
+        steps = () if send_only else (self.sync_inbox, self.handle_inbound, self.draft_messages)
+        for step in (*steps, self.send_approved):
+            await self._still_on()
+            await step()
+        await self._still_on()      # stopped during the last step: say so, not "done"
 
     def _time_left(self) -> bool:
         return self.deadline is None or self.now() < self.deadline
+
+    async def _still_on(self):
+        """The switch works mid-run, not just at the start of one."""
+        if not await channel_on(self.state, self.config):
+            raise SwitchedOff()
+
+    async def _held(self) -> bool:
+        """Switched off or paused, this moment."""
+        return not await channel_on(self.state, self.config) or bool(
+            await active_pause(self.state, self.now()))
 
     async def _guard(self, html: str):
         url = (self.driver.url or "").split("?")[0]
@@ -538,27 +591,8 @@ class WhatsAppAgent:
     # ── 3. First messages and the follow-up ──
 
     async def _next_due(self, contact: dict, now: datetime) -> str:
-        """Which message this contact is due, or "". A row of that kind in any
-        state, skipped included, means it has had its chance: a first message
-        you skipped isn't written again, and there is at most one follow-up."""
         rows = await self.state.wa_messages(contact_id=contact["id"])
-        if any(m["direction"] == "in" for m in rows):
-            return ""
-        out = [m for m in rows if m["direction"] == "out"]
-        if any(m["status"] in HOLDING_STATUSES for m in out):
-            return ""
-        kinds = {m["kind"] for m in out}
-        if contact["stage"] == "queued":
-            return "" if "first" in kinds else "first"
-        if contact["stage"] != "messaged" or "follow_up" in kinds:
-            return ""
-        sent = [m for m in out if m["status"] == "sent"]
-        if not sent or len(sent) >= self.cfg.max_unanswered:
-            return ""
-        last = _parse(sent[-1].get("sent_at")) or now
-        due = max(_parse(contact.get("next_action_at")) or last,
-                  last + timedelta(days=self.cfg.follow_up_min_days))
-        return "follow_up" if due <= now else ""
+        return next_due(contact, rows, self.cfg, now)[0]
 
     async def draft_messages(self):
         used, caps = await self.pacing.used(), await self.pacing.caps()
@@ -706,6 +740,7 @@ class WhatsAppAgent:
             if not self._time_left():
                 break
             # The kill switch works mid-run, not just at the start of one.
+            await self._still_on()
             if await active_pause(self.state, self.now()):
                 break
             if item["contact_id"] in self._failed_contacts:
@@ -731,7 +766,8 @@ class WhatsAppAgent:
                 self.report["would_send"].append({"kind": item["kind"], "contact": contact.get("name") or "",
                                                   "body": item["body"]})
                 continue
-            await self.pacing.between_actions()
+            await wait_unless(self.pacing.between_actions(), self._held)
+            await self._still_on()
             if await active_pause(self.state, self.now()):
                 break
             current = await self.state.wa_get_message(item["id"])
@@ -806,6 +842,10 @@ class WhatsAppAgent:
             await self.driver.clear(COMPOSER)
             return "failed", "the open chat changed while typing, so nothing was sent"
         before = sum(1 for m in parse_messages(html) if m.direction == "out" and want in clean_text(m.body))
+        # Typing takes half a minute. Stopped meanwhile: nothing goes, and it stays approved.
+        if await self._held():
+            await self.driver.clear(COMPOSER)
+            return "held", ""
         # From here it may have gone: only a confirmed bubble clears maybe_sent.
         if not await self.state.wa_claim(item["id"]):
             await self.driver.clear(COMPOSER)
@@ -846,7 +886,7 @@ class WhatsAppRunner:
 
     async def maybe_start(self, send_only: bool = False) -> str:
         """Start a run if one is due. Returns why not, or "started"."""
-        if not getattr(self.config.channels.whatsapp, "enabled", False):
+        if not await channel_on(self.state, self.config):
             return "off"
         if self.running:
             return "a run is going"

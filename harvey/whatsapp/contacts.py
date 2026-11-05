@@ -96,17 +96,20 @@ async def find_prospect(state, email: str = "", phone: str = ""):
     return None
 
 
-async def stop_reason(state, config, contact: dict, *, replying: bool = False) -> str:
+async def stop_reason(state, config, contact: dict, *, replying: bool = False, numbers=None,
+                      scan_phones: bool = True) -> str:
     """Why this contact must not get a WhatsApp message from us now, or "".
 
     ``replying``: they wrote to us on WhatsApp, so a live email conversation
     doesn't stop the answer (a WhatsApp reply itself marks their email replied).
-    A no, on any channel, always does."""
+    A no, on any channel, always does. ``numbers`` and ``scan_phones`` are for
+    drawing a whole tab: the blocked list already read, and no walk through every
+    stored phone per contact. Before a draft or a send, both stay at their defaults."""
     from harvey.config import live_do_not_contact
     from harvey.gate import do_not_contact_domain_match, do_not_contact_match
 
     phone, email = contact.get("phone") or "", (contact.get("email") or "").strip().lower()
-    if phone and phone in blocked_numbers(config):
+    if phone and phone in (blocked_numbers(config) if numbers is None else numbers):
         return "their number is on channels.whatsapp.do_not_contact"
     entries = live_do_not_contact(config)
     if email and do_not_contact_match(email, entries):
@@ -115,7 +118,7 @@ async def stop_reason(state, config, contact: dict, *, replying: bool = False) -
     if contact.get("prospect_id"):
         prospect = await state.get_prospect(contact["prospect_id"])
     if prospect is None:
-        prospect = await find_prospect(state, email, phone)
+        prospect = await find_prospect(state, email, phone if scan_phones else "")
     if prospect is None:
         return ""
     if prospect.email and do_not_contact_match(prospect.email, entries):
