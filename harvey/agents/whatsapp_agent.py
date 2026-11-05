@@ -378,6 +378,7 @@ class WhatsAppAgent:
 
     async def _open_chat(self, contact: dict) -> tuple[str, str]:
         """Open this contact's chat by number: ("open" | "invalid" | "timeout", html)."""
+        await self._still_on()
         await self.driver.goto(send_url(contact["phone"]))
         html = ""
         for _ in range(CHAT_POLLS):
@@ -775,7 +776,7 @@ class WhatsAppAgent:
                 continue
             try:
                 outcome, detail = await self.send_message(contact, item)
-            except BreakerTripped:
+            except (BreakerTripped, SwitchedOff):
                 raise
             except Exception as e:
                 logger.warning(f"WhatsApp: the send recipe broke: {e}")

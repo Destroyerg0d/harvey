@@ -304,7 +304,7 @@ async def start(state, channel: str, *, minutes: float, session_running: bool) -
                            "or press Cancel.")
         if session_running:
             return False, (f"A {label} session is running in that Chrome profile. Wait for it to "
-                           "finish, or stop it first, then connect.")
+                           f"finish, or turn {label} off so it stops, then connect.")
         try:
             child = spawn(channel, log_path(state, channel))
         except OSError as e:

@@ -60,11 +60,6 @@ def _lead_view(lead: dict | None) -> dict:
     return {k: lead.get(k) for k in keep}
 
 
-async def _recent_pauses(state) -> list[dict]:
-    """The latest warnings and other stops, which outlast the pause they caused."""
-    return await channel_login.recent_pauses(state, "linkedin_paused")
-
-
 async def _last_run(state) -> dict:
     from harvey.agents.linkedin_agent import LAST_RUN_KEY
     try:
@@ -294,7 +289,7 @@ async def linkedin_overview(tz: int = 0):
         return {
             "enabled": connection["enabled"],
             "connection": connection,
-            "warnings": await _recent_pauses(state),
+            "warnings": await channel_login.recent_pauses(state, "linkedin_paused"),
             "autopilot": await autopilot_on(state, config),
             "autopilot_source": "dashboard" if override in ("on", "off") else "config",
             "hours": pacing.hours_text(),

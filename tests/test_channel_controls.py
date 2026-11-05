@@ -189,6 +189,46 @@ def test_off_during_a_whatsapp_run_stops_before_the_next_send(tmp_path):
     assert run(w.state.get_setting("whatsapp:running")) == ""
 
 
+def test_off_while_reading_whatsapp_stops_before_the_next_chat_opens(tmp_path):
+    w = wf.World(tmp_path, [wa_jane(unread=True, thread=[("in", "Hello")])])
+    w.contact()
+
+    async def off(*a):
+        await w.state.set_setting(WA_KEY, "off")
+    agent = w.agent()
+    agent.pacing._sleep = off
+    report = run(agent.run(ignore_interval=True))
+    assert report["outcome"] == "stopped: switched off"
+    assert not any("phone=" in url for url in w.driver.visited)
+
+
+def test_off_just_before_a_chat_opens_to_send_is_a_stop_not_a_failed_send(tmp_path):
+    """Nothing was typed, so nothing counts against the failed-send breaker."""
+    w = wf.World(tmp_path, [wa_jane()])
+    m = w.approved(w.contact())
+    agent = w.agent()
+    original = agent.send_message
+
+    async def send(contact, item):
+        await w.state.set_setting(WA_KEY, "off")
+        return await original(contact, item)
+    agent.send_message = send
+    report = run(agent.run(ignore_interval=True))
+    assert report["outcome"] == "stopped: switched off" and report["failed"] == 0
+    assert w.get(m)["status"] == "approved" and w.driver.enter_presses == 0
+    assert run(w.state.get_setting(wa_guards.FAILED_KEY)) in ("", "0")
+
+
+def test_off_while_reading_linkedin_stops_before_the_next_page(tmp_path):
+    li = LiWorld(tmp_path, [li_jane()])
+
+    async def off(*a):
+        await li.state.set_setting(LI_KEY, "off")
+    report = li.go(sleep=off)
+    assert report["outcome"] == "stopped: switched off"
+    assert li.driver.visited == [lf.FEED_URL]         # the check it starts with, and nothing after
+
+
 def test_off_while_typing_a_whatsapp_message_means_enter_is_never_pressed(tmp_path):
     w = wf.World(tmp_path, [wa_jane()])
 

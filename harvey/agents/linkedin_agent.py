@@ -288,6 +288,7 @@ class LinkedInAgent:
     async def _visit(self, url: str, pause: bool = True) -> str:
         if pause:
             await self.pacing.between_pages()
+        await self._still_on()
         await self.driver.goto(url)
         html = await self.driver.html()
         await self._guard(html)
