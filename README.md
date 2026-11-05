@@ -553,6 +553,7 @@ The sidebar is grouped by what you're doing: **Work** (what needs you), **Pipeli
 - **Outbox** — the decisions desk. Each email sits next to what Harvey knew when it wrote it: the company, how the address was found and verified, and the signals the email draws on. `J`/`K` to move, `A` approve, `E` edit, `R` reject.
 - **Conversations** — every reply in the context of the emails that led to it. Threads Harvey handed to you (a contract request, a reply it had no safe answer for) come first, with **Hand back to Harvey**, **Close** and **Reopen**.
 - **Mailboxes** — sending health and results for every mailbox and sending domain: sent today against the combined daily limit, sends over 7 days, bounce and reply rates, and what's queued. Each domain gets a card with its SPF, DKIM, DMARC, MX, age and blocklist checks (cached for an hour; **Re-check DNS now** looks again) and a 0-100 health score with its working shown. The score is Harvey's own estimate from bounces, DNS and blocklists, not the inbox-placement score a warmup tool reports. Each mailbox gets a row (status and why, today against its limit, bounces since resume and all time, replies, opt-outs, queue, last send), with a 14-day chart per mailbox and the results funnel from businesses found to ready to meet. It only reads: a paused mailbox points you to the Outbox to resume it.
+- **LinkedIn** and **WhatsApp** — run each channel from here, with no terminal. **Connect** opens a Chrome window on the PC running Harvey: you sign in to LinkedIn there yourself, or link WhatsApp from your phone (Linked devices, Link a device, scan). The tab follows it by itself and says connected, timed out or cancelled; **Cancel** closes the window. Harvey never sees a password or a code. An **on/off switch** takes effect with no restart: turning a channel on needs it connected and a typed confirmation that says plainly what automating the account risks, and turning it off is one click and stops a run where it is. Below that: the funnel, the queue with Approve, Edit and Skip, every conversation with its whole history, follow-ups due, caps used, the last run, and warnings and pauses, including ones that have since ended. **Write your own reply** in a conversation and it joins the same queue, approved by you, under the same caps, hours and stop rules; once someone has said no, or before they've written back at all, the box is closed and says why. WhatsApp also has **Add a contact**, one person at a time with where they gave you the number (there is no list upload), and a number whose country code can't be established waits under Numbers to check with what to fix.
 
 **Pipeline**
 - **Signals** — the confirmation gate and the cohort builder
@@ -646,10 +647,10 @@ harvey retry-writes          # retry prospects the Writer gave up on
 harvey gmail auth            # one-time Gmail OAuth (--mailbox EMAIL: one of several)
 harvey gmail test            # check the Gmail sign-in (every mailbox, or --mailbox EMAIL)
 harvey microsoft auth|test  # one-time Microsoft 365 sign-in (docs/microsoft365.md)
-harvey linkedin login        # sign the dedicated Chrome profile in to LinkedIn yourself
+harvey linkedin login        # sign the dedicated Chrome profile in to LinkedIn yourself (or Connect on the dashboard)
 harvey linkedin run --once   # one LinkedIn session now (--dry-run: read and draft, send nothing)
 harvey linkedin status|pause|resume|import  # caps used, pauses, the kill switch, load a tracker
-harvey whatsapp login        # link a separate number to its own Chrome profile by QR code, yourself
+harvey whatsapp login        # link a separate number to its own Chrome profile by QR code, yourself (or Connect on the dashboard)
 harvey whatsapp add PHONE --source S  # queue one person who gave you their number (--name, --email, --context, --country)
 harvey whatsapp run --once   # one WhatsApp session now (--dry-run: read and draft, send nothing)
 harvey whatsapp status|pause|resume|approve|skip  # caps used, pauses, the kill switch, the queue
@@ -811,9 +812,12 @@ Harvey automates outreach, but **you are the sender.** Cold email is legal in mo
 
 **LinkedIn.** Browser automation violates LinkedIn's ToS and can get the account restricted. Off by default. If you turn it on, use an account you can afford to lose.
 
-LinkedIn requires both `channels.linkedin.enabled: true` and configured
-credentials. Training a product does not enable it; the setup wizard records
-your explicit choice.
+The channel runs when `channels.linkedin.enabled` is true or you turn it on with
+the switch on the dashboard's LinkedIn tab, which overrides the config either way.
+Training a product does not enable it; the setup wizard records your explicit
+choice. Scout's separate LinkedIn search needs `channels.linkedin.enabled: true`
+and configured credentials: the dashboard's switch can turn that off, but turning
+the channel on there doesn't start it.
 
 **WhatsApp.** Automating WhatsApp through WhatsApp Web breaks its terms and can get the number banned, with no appeal worth counting on. Off by default (`channels.whatsapp`). If you turn it on, use a separate number you can afford to lose, never your main one. Harvey only messages people who gave you their number themselves: `harvey whatsapp add` takes one person at a time and needs a source, there is no bulk import, a number whose country code can't be established waits for you instead of being guessed, and anyone who said no on any channel, is on a do-not-contact list or is in a live email conversation is refused. A new number is the riskiest pattern there is, so the limits are low: 5 first messages a day for the first 14 days after linking, then 10; 30 messages a day and 8 an hour in total; 45 to 180 seconds apart; 10:00 to 19:00 on weekdays by each recipient's own clock when Harvey knows it. Everything waits as a draft on the **WhatsApp** tab until you approve it. A first message says how you got the number and ends with an easy way out, and a no stops their email too. Any ban, restriction, spam or unusual-activity notice stops it for 48 hours and says so on the dashboard. A send that can't be confirmed is held for you and never retried. The page's selectors live in one file (`harvey/whatsapp/pages.py`) and WhatsApp changes its page without notice: when they stop matching, nothing is sent.
 
@@ -893,6 +897,7 @@ harvey/
 ├── signals.py           # the 23-signal catalog Harvey proposes
 ├── pipeline.py          # DISCOVER → PROFILE chaining
 ├── gate.py              # deterministic pre-send checks
+├── channel_login.py     # Connect on the dashboard: the sign-in as its own process
 ├── dashboard.py         # FastAPI JSON API
 ├── dashboard_auth.py    # dashboard token, Host/Origin checks
 ├── collectors/

@@ -113,18 +113,21 @@ channels:
     #   # your real ones in harvey.local.yaml, never in this tracked file.
     #   price_list: ["$1,111", "$2,222"]
   linkedin:
-    enabled: false             # explicit opt-in; credentials alone do not enable it
+    enabled: false             # explicit opt-in; the switch on the dashboard's LinkedIn tab overrides this
     max_daily_connections: 15  # connection invites a day (75 a week: max_weekly_invites)
     max_daily_messages: 25     # first messages, follow-ups and replies a day
     autopilot: false           # drafts wait on the dashboard's LinkedIn tab until true
     # Harvey acts on LinkedIn only in these hours, with 60-240 s between actions
-    # and at most 12 an hour. `harvey linkedin login` signs the profile in.
+    # and at most 12 an hour. Connect on the dashboard's LinkedIn tab, or
+    # `harvey linkedin login`, signs the profile in.
     # hours: {start: "10:00", end: "19:00", timezone: "Asia/Kolkata", weekdays_only: true}
     # WhatsApp through WhatsApp Web, only to people who gave you their number
     # themselves (`harvey whatsapp add`). Automating WhatsApp breaks its terms and
     # can get the number banned: use a separate number you can afford to lose, and
-    # keep these limits low. `harvey whatsapp login` links it by QR code. Remove
-    # the # marks to switch it on. Put the real number in harvey.local.yaml.
+    # keep these limits low. Connect on the dashboard's WhatsApp tab, or `harvey
+    # whatsapp login`, links it by QR code, and the switch on that tab turns it on
+    # and off (it overrides `enabled` here). To set anything else, remove the #
+    # marks. Put the real number in harvey.local.yaml.
     # whatsapp:
     #   enabled: true
     #   autopilot: false             # drafts wait on the dashboard's WhatsApp tab until true
