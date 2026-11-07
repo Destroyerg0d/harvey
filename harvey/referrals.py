@@ -241,6 +241,7 @@ def clean_role(value) -> str:
 async def _ask_json(brain, prompt: str, task: str, agent: str = "handler"):
     """One JSON answer from the brain (think_json when it has one)."""
     session = f"harvey-{agent}"
+    failed_before = _failed_calls(brain)
     if hasattr(brain, "think_json"):
         result = await brain.think_json(prompt, session_id=session, agent=agent, task=task)
     else:
@@ -251,7 +252,16 @@ async def _ask_json(brain, prompt: str, task: str, agent: str = "handler"):
             result = None
     if result is None and getattr(brain, "paused_reason", ""):
         raise BrainUnavailable(brain.paused_reason)
+    if result is None and _failed_calls(brain) > failed_before:
+        # No answer came back at all (every retry failed): that says nothing
+        # about what was asked, so it mustn't count against it.
+        raise BrainUnavailable("the model call failed; trying again later")
     return result
+
+
+def _failed_calls(brain) -> int:
+    count = getattr(brain, "failed_calls", 0)
+    return count if isinstance(count, int) else 0
 
 
 async def ask_who(brain, words: str, company: str = "") -> dict:

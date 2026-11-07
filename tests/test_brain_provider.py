@@ -751,3 +751,57 @@ def test_cli_status_hides_another_providers_pause(monkeypatch, tmp_path, capsys)
                       config=BrainConfig(provider="codex", model="gpt-5.5"),
                       setting=_STALE_CODEX_PAUSE)
     assert "Codex PAUSED" in out
+
+
+# ── The Claude CLI's usage limit ──
+
+
+class _LimitProcess:
+    """The CLI out of quota: exit 1, nothing on stderr, the reason on stdout."""
+    returncode = 1
+
+    async def communicate(self, data=None):
+        return (b'{"type": "result", "is_error": true, '
+                b'"result": "Claude AI usage limit reached|1999999999"}', b"")
+
+
+@pytest.mark.asyncio
+async def test_a_usage_limit_on_stdout_pauses_calls(state, monkeypatch):
+    started = []
+
+    async def fake_exec(*cmd, **kwargs):
+        started.append(cmd)
+        return _LimitProcess()
+
+    async def no_sleep(_seconds):
+        return None
+    monkeypatch.setattr(brain_mod.asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(brain_mod.asyncio, "sleep", no_sleep)
+    brain = Brain(state)
+    assert await brain.think("hi") == ""
+    assert "usage limit" in brain.paused_reason
+    assert brain.failed_calls == 1
+    assert len(started) == 1                 # no retries into the limit
+    assert await brain.think("again") == ""  # and no new call while paused
+    assert len(started) == 1
+
+
+class _BlankFailure:
+    returncode = 1
+
+    async def communicate(self, data=None):
+        return b"", b""
+
+
+@pytest.mark.asyncio
+async def test_a_blank_failure_is_counted_as_a_failed_call(state, monkeypatch):
+    async def fake_exec(*cmd, **kwargs):
+        return _BlankFailure()
+
+    async def no_sleep(_seconds):
+        return None
+    monkeypatch.setattr(brain_mod.asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(brain_mod.asyncio, "sleep", no_sleep)
+    brain = Brain(state)
+    assert await brain.think("hi") == ""
+    assert brain.failed_calls == 1 and brain.paused_reason == ""

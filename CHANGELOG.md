@@ -547,6 +547,11 @@ minor versions can still change behaviour.
 
 ### Fixed
 
+- **A spent Claude limit no longer loses website leads.** The Claude CLI reports its usage limit in
+  the JSON on stdout and exits 1 with nothing on stderr, so Harvey saw a blank failure, kept calling,
+  and the inbound triage counted each failed call as an unusable answer: three of them and the lead
+  was given up for good. Now that message pauses model calls for an hour, and a call that fails
+  outright never counts against a lead (it is read again next time).
 - **Over the Claude limit, Harvey no longer stops reading replies and sending.** Hitting
   `usage.max_daily_claude_percent` used to put the whole cycle to sleep, so a weekly limit could
   leave approved email unsent and replies unread for days. Now only writing, prospecting, LinkedIn

@@ -661,6 +661,26 @@ async def test_the_brain_going_down_loses_nothing(state):
 
 
 @pytest.mark.asyncio
+async def test_a_call_that_fails_outright_costs_the_lead_nothing(state):
+    """Every retry failing (the CLI exits 1) isn't an unusable answer: the lead
+    keeps all its tries and is read again next time."""
+    brain = Brain()
+    brain.failed_calls = 0
+
+    async def fails(prompt, session_id=None, agent="", task="", **_):
+        brain.failed_calls += 1
+        return ""
+    brain.think = fails
+    p = pipeline(state, [lead()], brain=brain)
+    for _ in range(I.MAX_ATTEMPTS + 1):
+        report = await p.run()
+        assert report["status"] == "paused" and report["_carried"]
+    assert await I.get_record(state, BUSINESS) is None
+    del brain.think                          # it works again
+    assert (await p.run())["drafted"] == 1
+
+
+@pytest.mark.asyncio
 async def test_a_dry_run_writes_nothing(state, verified):
     # A draft waiting from before, overtaken by new messages: not touched either.
     await pipeline(state, [lead(email="old@biz.example")]).run()

@@ -39,6 +39,16 @@ _NON_RETRYABLE_PATTERNS = (
 )
 
 
+# What the Claude CLI says when the plan's limit is spent. It says it on
+# stdout, in the JSON result, and exits 1 with nothing on stderr: read there,
+# a limit looked like a blank failure and nothing paused.
+_USAGE_LIMIT_PATTERNS = (
+    "usage limit",
+    "limit reached",
+    "hit your limit",
+    "out of extra usage",
+)
+
 PROVIDER_LABELS = {"claude": "Claude", "codex": "Codex"}
 
 # Settings key holding the brain's last health transition, for `harvey
@@ -97,6 +107,9 @@ class Brain:
         self._unavailable_at = 0.0
         self._unavailable_fingerprint = None
         self._usage_limited_until = 0.0
+        # Calls that ended with no answer at all (every retry failed), so a
+        # caller can tell "the call failed" from "the answer was unusable".
+        self.failed_calls = 0
         self._usage_pause_recorded = False
         self._status_synced = False
         if self.provider == "codex":
@@ -270,6 +283,11 @@ class Brain:
 
         from harvey import claude_runtime
 
+        if time.monotonic() < self._usage_limited_until:
+            # The CLI said the limit is spent: don't start a call per prompt.
+            logger.debug(f"Claude call skipped: {self.paused_reason}")
+            return ""
+
         # Never start an unisolated call: a CLI missing any isolation flag
         # pauses Claude (like a Codex setup problem) until it's updated.
         try:
@@ -277,6 +295,7 @@ class Brain:
         except claude_runtime.ClaudeRuntimeError as e:
             logger.error(f"Claude call not sent: {e}")
             await self._mark_unavailable(e)
+            self.failed_calls += 1
             return ""
         if self.unavailable:
             await self._mark_available()
@@ -348,6 +367,11 @@ class Brain:
 
                 if process.returncode != 0:
                     error = stderr.decode(errors="replace").strip()
+                    if not error:
+                        # The CLI reports most failures, the usage limit
+                        # among them, in its JSON result on stdout.
+                        error = self._parse_result_payload(
+                            stdout.decode(errors="replace").strip())[0].strip()
                     logger.error(
                         f"Claude exited with code {process.returncode}: {error[:300]}"
                     )
@@ -357,6 +381,9 @@ class Brain:
                             "Non-retryable Claude error (auth). "
                             "Run 'claude login' and restart Harvey."
                         )
+                        self.failed_calls += 1
+                        return ""
+                    if await self._usage_limited(error):
                         return ""
                     continue  # retry transient failures
 
@@ -381,6 +408,8 @@ class Brain:
                     # other transient failure.
                     logger.error(f"Claude reported an error: {response[:300]}")
                     last_error = response
+                    if await self._usage_limited(response):
+                        return ""
                     continue
 
                 logger.debug(f"Brain response: {response[:200]}...")
@@ -390,6 +419,7 @@ class Brain:
                 logger.error(
                     "Claude CLI not found. Install it: https://code.claude.com/docs/en/setup"
                 )
+                self.failed_calls += 1
                 return ""  # not retryable
             except asyncio.CancelledError:
                 # Shutting down — kill the child so it doesn't orphan
@@ -408,7 +438,21 @@ class Brain:
             f"Brain call failed after {max_retries + 1} attempts. "
             f"Last error: {str(last_error)[:200]}"
         )
+        self.failed_calls += 1
         return ""
+
+    async def _usage_limited(self, said: str) -> bool:
+        """The CLI says the plan's limit is spent: pause calls for an hour
+        (``paused_reason`` says so) instead of retrying into it."""
+        if not any(p in (said or "").lower() for p in _USAGE_LIMIT_PATTERNS):
+            return False
+        logger.warning(f"{self.provider_label} usage limit reached; pausing model calls.")
+        await self._start_usage_pause()
+        invalidate = getattr(self.quota, "invalidate", None)
+        if invalidate:
+            invalidate()
+        self.failed_calls += 1
+        return True
 
     async def _think_codex(
         self,
