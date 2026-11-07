@@ -12,7 +12,8 @@ def _utcnow() -> datetime:
 
 
 class Message(BaseModel):
-    # "harvey", "prospect", or "auto" (an auto-reply: out-of-office, a
+    # "harvey", "you" (an email the owner wrote on the dashboard; ours, like
+    # Harvey's), "prospect", or "auto" (an auto-reply: out-of-office, a
     # helpdesk acknowledgement), which is never counted or answered as theirs.
     sender: str
     content: str
@@ -22,6 +23,11 @@ class Message(BaseModel):
     # Message-ID of the email it answers, when known.
     from_email: str = ""
     in_reply_to: str = ""
+    # Theirs: its own Message-ID, Gmail thread and subject, so an email you
+    # write from the dashboard answers it in the same thread.
+    message_id: str = ""
+    thread_ref: str = ""
+    subject: str = ""
 
 
 # Sales stages: tracks where the deal is in the pipeline

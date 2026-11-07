@@ -47,18 +47,20 @@ from pathlib import Path
 
 import aiosqlite
 
-KINDS = ("writing", "subject", "linkedin", "whatsapp", "targeting", "segment_mix")
+KINDS = ("writing", "subject", "linkedin", "whatsapp", "targeting", "segment_mix", "replies")
 STATUSES = ("proposed", "active", "rejected", "retired")
 # Where each status may go. Nothing comes back from rejected or retired: a
 # lesson worth having again is proposed again by the Learner.
 TRANSITIONS = {"proposed": ("active", "rejected"), "active": ("retired",)}
 KIND_LABELS = {"writing": "Writing", "subject": "Subject lines", "linkedin": "LinkedIn",
-               "whatsapp": "WhatsApp", "targeting": "Targeting", "segment_mix": "Segment mix"}
+               "whatsapp": "WhatsApp", "targeting": "Targeting", "segment_mix": "Segment mix",
+               "replies": "Replies (from your guidance)"}
 
 # Which active lessons each prompt carries.
 PROMPT_KINDS = {
     "writer": ("writing", "subject"),
-    "handler": ("writing",),
+    # "replies": what your guidance on conversations taught (harvey/guidance.py).
+    "handler": ("writing", "replies"),
     "linkedin": ("linkedin",),
     "whatsapp": ("whatsapp",),
 }
@@ -307,7 +309,7 @@ async def filter_context(state, days: int = 120) -> dict:
             except (TypeError, ValueError):
                 continue
             for m in messages if isinstance(messages, list) else []:
-                if isinstance(m, dict) and m.get("sender") != "harvey":
+                if isinstance(m, dict) and m.get("sender") not in ("harvey", "you"):
                     excerpts.update(_runs(_words(str(m.get("content") or "")), EXCERPT_RUN_WORDS))
         for (body,) in await rows(
                 "SELECT body FROM linkedin_messages WHERE direction = 'in' "

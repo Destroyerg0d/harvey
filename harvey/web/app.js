@@ -410,7 +410,7 @@ function showTab(id, btn) {
 
 function loadCurrentTab() {
   switch (currentTab) {
-    case 'today': loadLiveStatus(); loadToday(); loadTrend(); loadFunnel(); loadSetupStatus(); loadRuns(); loadTodayActivity(); break;
+    case 'today': loadLiveStatus(); loadToday(); loadChannels(); loadTrend(); loadFunnel(); loadSetupStatus(); loadRuns(); loadTodayActivity(); break;
     case 'signals': loadSignals(); break;
     case 'discover': loadDiscoverProviders(); break;
     case 'companies': if (!companyDrill) loadCompanies(); break;
@@ -418,6 +418,7 @@ function loadCurrentTab() {
     case 'campaigns': loadCampaigns(); break;
     case 'outbox': loadOutbox(); break;
     case 'conversations': loadConversations(); break;
+    case 'inbound': loadInbound(); break;
     case 'mailboxes': loadMailboxes(); break;
     case 'linkedin': loadLinkedIn(); break;
     case 'whatsapp': loadWhatsApp(); break;
@@ -604,6 +605,40 @@ async function loadFunnel() {
       '<span class="legend-val">' + s[1] + '</span>' +
       '<span class="legend-pct">' + Math.round(100 * s[1] / total) + '%</span></div>'
     ).join('') + '</div>';
+}
+
+// Every channel at a glance: connected, on, autopilot, paused, and the last 24 hours.
+async function loadChannels() {
+  const el = document.getElementById('today-channels');
+  if (!el) return;
+  const d = await api('/api/channels');
+  if (!d || d.success === false) { el.innerHTML = ''; return; }
+  const row = (name, tab, tone, status, detail) =>
+    '<button class="chan" onclick="goTab(' + jsq(tab) + ')"><span class="inb-dot t-' + tone + '" aria-hidden="true"></span>' +
+    '<span class="chan-name">' + name + '</span><span class="chan-status">' + escHtml(status) + '</span>' +
+    '<span class="chan-detail">' + escHtml(detail) + '</span></button>';
+  const e = d.email || {}, w = d.whatsapp || {}, l = d.linkedin || {}, r = d.erp || {};
+  const chan = (c, label) => {
+    if (c.paused) return ['bad', 'Paused', c.paused];
+    if (c.state === 'signed_out') return ['bad', 'Signed out', c.step || ''];
+    if (c.state !== 'connected') return ['idle', c.state === 'waiting' ? 'Connecting' : 'Not connected', c.step || ''];
+    if (!c.enabled) return ['idle', 'Connected, off', c.step || ''];
+    return ['good', 'On' + (c.autopilot ? ', autopilot' : ', approval first'),
+      (c.sent || 0) + ' sent, ' + (c.replies || 0) + ' replies in 24h' + (c.waiting ? ', ' + c.waiting + ' to approve' : '')];
+  };
+  const [wt, ws, wd] = chan(w), [lt, ls, ld] = chan(l);
+  el.innerHTML = '<div class="subhead">Channels <span class="hint">connected, switched on, and the last 24 hours</span></div>' +
+    '<div class="card chan-list">' +
+    row('Email', 'mailboxes', e.paused ? 'bad' : e.enabled ? 'good' : 'idle',
+      e.paused ? 'Paused' : (e.enabled ? 'On' : 'Off') + (e.autopilot ? ', autopilot' : ', approval first'),
+      e.paused || ((e.sent || 0) + ' sent from ' + (e.mailboxes || 1) + ' mailboxes, ' + (e.replies || 0) + ' new conversations in 24h' +
+        (e.waiting ? ', ' + e.waiting + ' to approve' : ''))) +
+    row('WhatsApp', 'whatsapp', wt, ws, wd) +
+    row('LinkedIn', 'linkedin', lt, ls, ld) +
+    row('Website chat (ERP)', 'inbound', r.ok ? 'good' : r.enabled ? 'bad' : 'idle',
+      r.ok ? 'Reading' : 'Needs a look',
+      r.ok ? 'last read ' + relTime(r.last_run) + ', ' + (r.read || 0) + ' chats looked at, ' + (r.drafted || 0) + ' emailed' : (r.why || '')) +
+    '</div>';
 }
 
 async function loadTodayActivity() {
@@ -2542,7 +2577,33 @@ function renderConversations() {
       'No conversation matches this filter.') + '</div>';
     return;
   }
+  const kept = convoKeep(el);
   el.innerHTML = bar + shown.map(convoCard).join('');
+  convoRestore(kept);
+}
+
+// What's typed in a reply or guidance box, and which boxes are open, survive
+// every redraw of the tab (a refresh, a filter, another card's action).
+function convoKeep(el) {
+  const kept = {values: {}, open: new Set(), focus: null};
+  el.querySelectorAll('.convo-input').forEach(t => {
+    if (t.value) kept.values[t.id] = t.value;
+    if (t === document.activeElement) kept.focus = {id: t.id, start: t.selectionStart, end: t.selectionEnd};
+  });
+  el.querySelectorAll('details.convo-box[open]').forEach(d => kept.open.add(d.id));
+  return kept;
+}
+
+function convoRestore(kept) {
+  kept.open.forEach(id => { const d = document.getElementById(id); if (d) d.open = true; });
+  Object.entries(kept.values).forEach(([id, value]) => {
+    const t = document.getElementById(id);
+    if (t && !t.disabled) t.value = value;
+  });
+  if (kept.focus) {
+    const t = document.getElementById(kept.focus.id);
+    if (t && !t.disabled) { t.focus(); t.setSelectionRange(kept.focus.start, kept.focus.end); }
+  }
 }
 
 function convoCard(c) {
@@ -2559,18 +2620,30 @@ function convoCard(c) {
         '<span class="te-when">' + relTime(it.email.sent_at) + '</span></div>' +
         '<div class="te-body">' + escHtml(it.email.body) + '</div></div>';
     }
-    const m = it.msg, sent = m.sender === 'harvey';
+    const m = it.msg, sent = m.sender === 'harvey' || m.sender === 'you';
     // An auto-reply, or a reply from an address other than the one emailed.
-    const who = sent ? 'Harvey' : m.sender === 'auto' ? 'Automatic reply' : escHtml(first);
+    const who = m.sender === 'you' ? 'You' : sent ? 'Harvey' : m.sender === 'auto' ? 'Automatic reply' : escHtml(first);
     const from = !sent && m.from_email && m.from_email !== c.prospect_email ? ' (' + escHtml(m.from_email) + ')' : '';
     return '<div class="thread-msg ' + (sent ? 'sent' : 'received') + '"><div class="sender">' +
       who + from + ' &middot; ' + relTime(m.timestamp) + '</div>' +
       escHtml(m.content) + '</div>';
   }).join('');
+  const guided = c.draft && c.guidance && c.guidance.outbox_id === c.draft.id;
   const draft = c.draft
-    ? '<div class="thread-draft"><div class="sender">' + icon('pen') + 'Harvey drafted a reply · waiting for you</div>' +
+    ? '<div class="thread-draft"><div class="sender">' + icon('pen') +
+      (guided ? 'Harvey drafted this from your guidance · waiting for you' : 'Harvey drafted a reply · waiting for you') + '</div>' +
       '<div class="td-body">' + escHtml(c.draft.body) + '</div>' +
-      '<button class="btn btn-primary btn-sm" onclick="goTab(\'outbox\')">Review in Outbox' + icon('arrow') + '</button></div>'
+      (guided
+        ? '<button class="btn btn-primary btn-sm" onclick="convoSendDraft(' + jsq(c.draft.id) + ',this)">Send it</button> ' +
+          '<button class="btn btn-secondary btn-sm" onclick="convoEditDraft(' + jsq(c.id) + ')">Edit</button>'
+        : '<button class="btn btn-primary btn-sm" onclick="goTab(\'outbox\')">Review in Outbox' + icon('arrow') + '</button>') +
+      '</div>'
+    : '';
+  const queued = c.queued
+    ? '<div class="thread-draft queued"><div class="sender">' + icon('message') +
+      (c.queued.angle === 'owner_wrote' ? 'Your reply' : 'Harvey’s reply') +
+      ' · queued, goes out on Harvey’s next cycle in this thread</div>' +
+      '<div class="td-body">' + escHtml(c.queued.body) + '</div></div>'
     : '';
   const name = [c.first_name, c.last_name].filter(Boolean).join(' ') || c.company || 'Unknown';
   const stage = own(STAGE_LABELS, c.stage) ? '<span class="tag">' + STAGE_LABELS[c.stage] + '</span>' : '';
@@ -2583,7 +2656,152 @@ function convoCard(c) {
     '<div class="tags">' + (c.intent && !(c.status === 'needs_human' && c.intent === 'escalate') ? badge(c.intent) : '') +
       stage + badge(c.status) + '</div></div>' +
     '<div class="thread">' + (thread || '<p class="muted" style="font-size:13px">No messages in this thread yet.</p>') +
-    draft + '</div>' + convoActions(c) + '</div>';
+    draft + queued + '</div>' + convoGuideHtml(c) + convoReplyHtml(c) + convoActions(c) + '</div>';
+}
+
+// Tell Harvey what to do with their reply: it drafts it from that and holds
+// it for you, then proposes the general lesson your guidance teaches.
+function convoGuideHtml(c) {
+  if (c.prospect_status === 'opted_out' || c.status === 'auto' || c.status === 'closed' ||
+      c.status === 'awaiting_reply' || !(c.thread || []).some(m => m.sender === 'prospect')) return '';
+  const key = escHtml(c.id), g = c.guidance;
+  let state = '';
+  if (g && g.status === 'drafting') {
+    state = '<p class="guide-result">' + icon('refresh') + 'Harvey is drafting from your guidance. It takes about a minute.</p>';
+  } else if (g && g.status === 'failed') {
+    state = '<p class="guide-result">' + icon('alert') + 'The draft didn’t work: ' + escHtml(g.error || 'try again') + '</p>';
+  }
+  let lesson = '';
+  if (g && g.lesson_id && g.lesson_status === 'proposed') {
+    lesson = '<div class="lesson-offer">' + icon('sparkle') + '<span>Harvey learned: <b>' + escHtml(g.lesson_text) +
+      '</b></span><button class="btn btn-primary btn-sm" onclick="convoLesson(' + jsq(g.lesson_id) + ',\'active\')">Keep</button>' +
+      '<button class="btn btn-ghost btn-sm" onclick="convoLesson(' + jsq(g.lesson_id) + ',\'rejected\')">Skip</button></div>';
+  } else if (g && g.lesson_id && g.lesson_status === 'active') {
+    lesson = '<div class="lesson-offer">' + icon('check') + '<span>Kept: Harvey now does this on every reply. <b>' +
+      escHtml(g.lesson_text) + '</b></span></div>';
+  } else if (g && g.status === 'drafted' && g.lesson_note && g.lesson_note !== 'proposed') {
+    lesson = '<p class="guide-result">' + escHtml(g.lesson_note.replace(/^no lesson: /, 'No lesson from this one: ')) + '</p>';
+  }
+  const open = c.status === 'needs_human' && !g ? ' open' : '';
+  return lesson + '<details class="convo-box guide" id="convo-guide-' + key + '"' + open + '><summary>' + icon('sparkle') +
+    'Tell Harvey what to do</summary>' + state +
+    '<div class="reply-box"><label class="form-label" for="convo-guide-text-' + key + '">Your guidance' +
+      (g ? ' (Harvey drafts again from this)' : '') + '</label>' +
+    '<textarea class="form-input reply-input convo-input" id="convo-guide-text-' + key + '" rows="3" ' +
+      'placeholder="For example: thank them, ask for their current site, and offer a call this week"></textarea>' +
+    '<div class="reply-foot"><span class="muted">Harvey drafts the reply from this and holds it for you to send. ' +
+      'It also proposes a lesson for similar replies, which you keep or skip.</span>' +
+      '<button class="btn btn-primary btn-sm" onclick="convoGuide(' + jsq(c.id) + ',this)"' +
+      (g && g.status === 'drafting' ? ' disabled' : '') + '>Draft the reply</button></div></div></details>';
+}
+
+let _convoPoll = null;
+async function convoGuide(id, btn) {
+  const t = document.getElementById('convo-guide-text-' + id);
+  const text = t ? t.value.trim() : '';
+  if (!text) { showToast('Tell Harvey what to do first.', 'error'); return; }
+  btn.disabled = true;
+  const data = await api('/api/conversations/' + encodeURIComponent(id) + '/guide', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({guidance: text}),
+  });
+  if (data && data.success) {
+    if (t) t.value = '';
+    showToast('Harvey is drafting it from your guidance.', 'success');
+    convoPollGuidance();
+  } else {
+    btn.disabled = false;
+    showToast(failMsg(data, 'Could not start that draft.'), 'error');
+  }
+  loadConversations();
+}
+
+// Redraw while a guided draft is being written, then stop.
+function convoPollGuidance() {
+  clearTimeout(_convoPoll);
+  _convoPoll = setTimeout(async () => {
+    await loadConversations();
+    if ((_convos || []).some(c => c.guidance && c.guidance.status === 'drafting')) convoPollGuidance();
+  }, 8000);
+}
+
+async function convoSendDraft(outboxId, btn) {
+  btn.disabled = true;
+  const data = await api('/api/outbox/' + encodeURIComponent(outboxId) + '/approve', {method: 'POST'});
+  btn.disabled = false;
+  if (data && data.success) showToast('Approved: it goes out on the next cycle, in the same thread.', 'success');
+  else showToast(failMsg(data, 'Could not approve that reply.'), 'error');
+  loadConversations();
+  loadToday();
+}
+
+function convoEditDraft(id) {
+  const box = document.getElementById('convo-box-' + id);
+  if (box) box.open = true;
+  convoUseDraft(id);
+}
+
+async function convoLesson(lessonId, status) {
+  const data = await api('/api/lessons/status', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ids: [lessonId], status: status}),
+  });
+  if (data && data.success && (data.changed || []).length) {
+    showToast(status === 'active' ? 'Kept. Harvey uses it on every reply from now on.' : 'Skipped. Harvey won’t use it.', 'success');
+  } else {
+    showToast(failMsg(data, 'Could not change that lesson.'), 'error');
+  }
+  loadConversations();
+}
+
+// Your own email on this thread. Harvey sends it from the conversation's
+// mailbox, in the same Gmail thread, through the Sender's usual checks.
+function convoReplyHtml(c) {
+  if (c.prospect_status === 'opted_out' || c.status === 'auto') return '';
+  const key = escHtml(c.id);
+  const fromDraft = c.draft
+    ? '<button class="btn btn-ghost btn-sm" type="button" onclick="convoUseDraft(' + jsq(c.id) + ')">Start from Harvey’s draft</button>'
+    : '';
+  const takeOver = c.status === 'needs_human' ? '' :
+    '<label class="check"><input type="checkbox" id="convo-take-' + key + '"> I’ll take it from here (Harvey stops answering)</label>';
+  return '<details class="convo-box" id="convo-box-' + key + '"><summary>' + icon('pen') + 'Write your own reply</summary>' +
+    '<div class="reply-box"><label class="form-label" for="convo-reply-' + key + '">Your email' +
+      (c.draft ? ' (sending it replaces Harvey’s draft)' : '') + '</label>' +
+    '<textarea class="form-input reply-input convo-input" id="convo-reply-' + key + '" rows="6"></textarea>' +
+    '<div class="reply-foot">' + takeOver + fromDraft +
+      '<span class="muted">Goes out from ' + escHtml(c.mailbox_address || 'the conversation’s mailbox') +
+      ' in this thread on the next cycle. Replies wait through quiet hours.</span>' +
+      '<button class="btn btn-primary btn-sm" onclick="convoSendReply(' + jsq(c.id) + ',this)">Send it</button></div></div></details>';
+}
+
+function convoUseDraft(id) {
+  const c = (_convos || []).find(x => x.id === id);
+  const t = document.getElementById('convo-reply-' + id);
+  if (c && c.draft && t) { t.value = c.draft.body; t.focus(); }
+}
+
+async function convoSendReply(id, btn) {
+  const t = document.getElementById('convo-reply-' + id);
+  const body = t ? t.value.trim() : '';
+  if (!body) { showToast('Write the email first.', 'error'); return; }
+  const take = document.getElementById('convo-take-' + id);
+  btn.disabled = true;
+  const data = await api('/api/conversations/' + encodeURIComponent(id) + '/reply', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({body: body, take_over: !!(take && take.checked)}),
+  });
+  btn.disabled = false;
+  if (data && data.success) {
+    if (t) t.value = '';
+    const box = document.getElementById('convo-box-' + id);
+    if (box) box.open = false;
+    showToast(data.replaced_draft ? 'Sent in place of Harvey’s draft: it goes out on the next cycle.'
+      : 'Queued: it goes out on the next cycle, in the same thread.', 'success');
+    loadConversations();
+    loadToday();
+  } else {
+    showToast(failMsg(data, 'Could not queue that email.'), 'error');
+  }
 }
 
 // Harvey answers new replies only on open conversations: an escalated one
@@ -2591,7 +2809,7 @@ function convoCard(c) {
 function convoActions(c) {
   if (c.status === 'needs_human') {
     return '<div class="convo-actions"><span class="muted">' + icon('alert') +
-      'Harvey handed this to you. Reply from your inbox, then:</span>' +
+      'Harvey handed this to you. Reply here or from your inbox, then:</span>' +
       '<button class="btn btn-secondary btn-sm" onclick="setConvoStatus(' + jsq(c.id) + ',\'open\')">Hand back to Harvey</button>' +
       '<button class="btn btn-secondary btn-sm" onclick="setConvoStatus(' + jsq(c.id) + ',\'closed\')">Close</button></div>';
   }
@@ -4016,12 +4234,245 @@ async function waSetMode(mode) {
   loadWhatsApp();
 }
 
+// ── Website leads: the ERP's client inbox, and chats you paste (harvey/inbound_view.py) ──
+
+let _inb = null, _inbFilter = 'all';
+const _inbJobs = {};   // paste jobs started from this page: id -> {result, form}
+const INB_FILTERS = [
+  ['all', 'All', () => true],
+  ['emailed', 'Emailed', r => r.status === 'drafted' || r.status === 'sent'],
+  ['look', 'Worth a look', r => ['escalated', 'triage_failed', 'no_draft', 'unverified', 'invalid_address'].includes(r.status)
+    || (r.outbox_status === 'pending_review')],
+  ['skipped', 'Skipped or not a lead', r => r.status === 'skipped' || r.status === 'not_project'],
+];
+const INB_WHERE = [['website', 'Our website’s live chat'], ['whatsapp', 'WhatsApp'], ['email', 'Email'],
+  ['call', 'A call or meeting (your notes)'], ['other', 'Somewhere else']];
+
+async function loadInbound(full = true) {
+  const data = await api('/api/inbound');
+  if (!data) { document.getElementById('inbound-list').innerHTML = offlineState(); return; }
+  _inb = data;
+  inboundConnection();
+  if (full || !document.getElementById('inb-chat')) inboundPasteForm();
+  inboundJobs();
+  inboundList();
+}
+
+function inboundConnection() {
+  const c = _inb.connection || {}, run = c.last_run || {};
+  const counts = (_inb.counts || {}).status || {};
+  const emailed = (counts.drafted || 0) + (counts.sent || 0);
+  const read = Object.values(counts).reduce((a, b) => a + b, 0);
+  const tone = c.ok ? 'good' : (c.configured && c.enabled ? 'bad' : 'idle');
+  const line = c.ok
+    ? 'Connected. Harvey reads the client inbox every ' + c.poll_minutes + ' minutes; last read ' + relTime(run.at) +
+      ' (' + (run.read || 0) + ' chats looked at, ' + (run.drafted || 0) + ' emailed).'
+    : escHtml(c.why || 'Not connected.');
+  document.getElementById('inbound-connection').innerHTML =
+    '<div class="card inb-conn"><div class="inb-dot t-' + tone + '" aria-hidden="true"></div><div>' +
+      '<b>' + (c.ok ? 'The ERP connection is working' : 'The ERP connection needs a look') + '</b>' +
+      '<p class="muted">' + line + '</p>' +
+      '<p class="muted">' + read + ' people read so far, ' + emailed + ' emailed. Follow-ups ' +
+        (c.autopilot ? 'send on their own (inbound autopilot)' : 'wait for your approval') +
+        '; a written estimate always waits for you.</p></div></div>';
+  navCount('nav-inbound', (_inb.leads || []).filter(INB_FILTERS[2][2]).length);
+}
+
+function inboundPasteForm() {
+  const where = INB_WHERE.map(w => '<option value="' + w[0] + '">' + escHtml(w[1]) + '</option>').join('');
+  document.getElementById('inbound-paste').innerHTML =
+    '<div class="card inb-form">' +
+    '<label class="form-label" for="inb-chat">The chat</label>' +
+    '<textarea class="form-input" id="inb-chat" rows="8" placeholder="Paste the conversation: copied from the ERP client inbox, a WhatsApp or email thread, or your own notes about the client"></textarea>' +
+    '<div class="inb-fields">' +
+      '<div><label class="form-label" for="inb-email">Their email</label>' +
+        '<input class="form-input" id="inb-email" type="email" autocomplete="off" placeholder="taken from the chat if it’s in it"></div>' +
+      '<div><label class="form-label" for="inb-phone">WhatsApp number (optional)</label>' +
+        '<input class="form-input" id="inb-phone" type="tel" autocomplete="off" placeholder="with the country code, like +1 555 0100"></div>' +
+      '<div><label class="form-label" for="inb-name">Name (optional)</label>' +
+        '<input class="form-input" id="inb-name" autocomplete="off"></div>' +
+      '<div><label class="form-label" for="inb-site">Website (optional)</label>' +
+        '<input class="form-input" id="inb-site" autocomplete="off" placeholder="Harvey reads it before writing"></div>' +
+      '<div><label class="form-label" for="inb-where">Where the chat happened</label>' +
+        '<select class="form-input" id="inb-where">' + where + '</select></div>' +
+    '</div>' +
+    '<label class="form-label" for="inb-note">Your note for Harvey (optional)</label>' +
+    '<textarea class="form-input" id="inb-note" rows="2" placeholder="For example: offer a call this week, and mention we can keep their current theme"></textarea>' +
+    '<div class="reply-foot"><span class="muted">Harvey reads the chat, looks at their website, and writes to them. ' +
+      'The email sends on its own on the next cycle (a written estimate waits for you); with a number, WhatsApp follows ' +
+      'inside its own limits.</span>' +
+      '<button class="btn btn-primary btn-sm" onclick="inboundPaste(this)">Read it and contact them</button></div>' +
+    '</div>';
+}
+
+function inboundForm() {
+  const v = id => (document.getElementById(id) || {}).value || '';
+  return {chat: v('inb-chat'), email: v('inb-email').trim(), phone: v('inb-phone').trim(),
+          name: v('inb-name').trim(), website: v('inb-site').trim(), where: v('inb-where') || 'website',
+          note: v('inb-note').trim()};
+}
+
+async function inboundPaste(btn, form, anyway) {
+  form = form || inboundForm();
+  if (!form.chat.trim()) { showToast('Paste the chat first.', 'error'); return; }
+  if (btn) btn.disabled = true;
+  const data = await api('/api/inbound/paste', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({...form, send_anyway: !!anyway}),
+  });
+  if (btn) btn.disabled = false;
+  if (!(data && data.success)) { showToast(failMsg(data, 'Could not start that.'), 'error'); return; }
+  _inbJobs[data.job] = {form: form, email: data.email, name: data.name, shape: data.shape, result: null};
+  if (!anyway) ['inb-chat', 'inb-email', 'inb-phone', 'inb-name', 'inb-site', 'inb-note'].forEach(id => {
+    const el = document.getElementById(id); if (el) el.value = '';
+  });
+  showToast('Harvey is reading it: about a minute.', 'success');
+  inboundJobs();
+  inboundWatch(data.job);
+}
+
+function inboundWatch(job) {
+  setTimeout(async () => {
+    const data = await api('/api/inbound/jobs/' + encodeURIComponent(job));
+    if (data && data.success && data.status !== 'running') {
+      if (_inbJobs[job]) _inbJobs[job].result = data.result || {status: data.status};
+      inboundJobs();
+      loadInbound(false);
+      return;
+    }
+    if (data && data.success) inboundWatch(job);
+  }, 4000);
+}
+
+const INB_RESULT = {
+  drafted: 'Email written', confirm: 'Check with you first', not_project: 'Doesn’t read as a lead',
+  refused: 'Not sent', failed: 'Didn’t work', skipped: 'Skipped', invalid_address: 'Address doesn’t exist',
+  unverified: 'Address unconfirmed', no_draft: 'No usable draft',
+};
+
+function inboundJobs() {
+  const el = document.getElementById('inbound-jobs');
+  const ids = Object.keys(_inbJobs).reverse();
+  if (!ids.length) { el.innerHTML = ''; return; }
+  el.innerHTML = ids.slice(0, 5).map(id => {
+    const j = _inbJobs[id], r = j.result;
+    const who = escHtml(j.name || j.email || 'them');
+    if (!r) return '<div class="card inb-job"><p>' + icon('refresh') + ' Reading the chat with <b>' + who +
+      '</b> and their website…</p></div>';
+    const ok = r.status === 'drafted';
+    let body = '<p><span class="badge t-' + (ok ? 'good' : r.status === 'confirm' || r.status === 'not_project' ? 'waiting' : 'bad') +
+      '">' + escHtml(INB_RESULT[r.status] || r.status) + '</span> <b>' + who + '</b>' +
+      (r.summary ? ' · ' + escHtml(r.summary) : '') + '</p>';
+    if (r.why) body += '<p class="muted">' + escHtml(r.why) + '</p>';
+    if (ok) {
+      body += '<div class="thread-draft"><div class="sender">' + icon('pen') +
+        (r.estimate ? 'A written estimate · waiting for you in the Outbox' : 'Sends on the next cycle') +
+        (r.researched ? ' · Harvey read their website first' : '') + '</div>' +
+        '<div class="td-body"><b>' + escHtml(r.subject || '') + '</b>\n\n' + escHtml(r.body || '') + '</div></div>';
+    }
+    if (r.whatsapp) body += '<p class="muted">WhatsApp: ' + escHtml(r.whatsapp) + '</p>';
+    if (r.status === 'confirm' || r.status === 'not_project') {
+      body += '<button class="btn btn-secondary btn-sm" onclick="inboundAnyway(' + jsq(id) + ',this)">Write to them anyway</button>';
+    }
+    return '<div class="card inb-job">' + body + '</div>';
+  }).join('');
+}
+
+function inboundAnyway(job, btn) {
+  const j = _inbJobs[job];
+  if (j) inboundPaste(btn, j.form, true);
+}
+
+function setInbFilter(f) { _inbFilter = f; inboundList(); }
+
+function inboundList() {
+  const el = document.getElementById('inbound-list');
+  const rows = (_inb && _inb.leads) || [];
+  if (!rows.length) {
+    el.innerHTML = emptyState(icon('flag'), 'No website leads yet',
+      'When someone leaves their email in the website chat, Harvey reads it from the ERP and it shows up here.');
+    return;
+  }
+  const filter = INB_FILTERS.find(f => f[0] === _inbFilter) || INB_FILTERS[0];
+  const bar = '<div class="toolbar"><div class="segmented" role="group" aria-label="Filter website leads">' +
+    INB_FILTERS.map(f => '<button class="' + (f[0] === filter[0] ? 'on' : '') + '" aria-pressed="' + (f[0] === filter[0]) +
+      '" onclick="setInbFilter(\'' + f[0] + '\')">' + f[1] + ' <span class="n">' + rows.filter(f[2]).length +
+      '</span></button>').join('') + '</div></div>';
+  const open = new Set([...el.querySelectorAll('.inb-chat-lines')].map(d => d.dataset.email));
+  el.innerHTML = bar + rows.filter(filter[2]).slice(0, 300).map(inboundRow).join('');
+  open.forEach(e => inboundShowChat(e, null, true));
+}
+
+function inboundTone(r) {
+  if (r.status === 'drafted' || r.status === 'sent') return 'good';
+  if (r.status === 'skipped' || r.status === 'not_project') return 'idle';
+  return 'waiting';
+}
+
+function inboundRow(r) {
+  const name = [r.first_name, r.last_name].filter(Boolean).join(' ') || r.email;
+  const sent = r.outbox_status === 'sent' ? 'emailed ' + relTime(r.sent_at)
+    : r.outbox_status === 'approved' ? 'sends on the next cycle'
+    : r.outbox_status === 'pending_review' ? 'email waiting for you in the Outbox'
+    : r.outbox_status ? r.outbox_status : '';
+  const convo = r.conversation_status
+    ? '<button class="btn btn-ghost btn-sm" onclick="goTab(\'conversations\')">They replied · ' + escHtml(r.conversation_status) + '</button>' : '';
+  const key = escHtml(r.email);
+  return '<div class="card inb-row"><div class="inb-head">' +
+    '<span class="avatar">' + initials(r.first_name, r.last_name) + '</span>' +
+    '<div class="inb-who"><h3>' + escHtml(name) + '</h3><div class="sub">' +
+      escHtml([r.company, r.email, r.phone].filter(Boolean).join(' · ')) + ' · ' + relTime(r.last_message_at || r.processed_at) + '</div></div>' +
+    '<div class="tags"><span class="badge t-' + inboundTone(r) + '">' + escHtml(r.status_words || r.status) + '</span>' +
+      (r.estimate_ready ? '<span class="tag">estimate</span>' : '') +
+      (r.whatsapp_stage ? '<span class="tag">WhatsApp: ' + escHtml(r.whatsapp_stage) + '</span>' : '') + '</div></div>' +
+    (r.summary ? '<p class="inb-summary">' + escHtml(r.summary) + '</p>' : '') +
+    '<p class="muted inb-why">' + escHtml([r.why, sent].filter(Boolean).join(' · ')) + '</p>' +
+    '<div class="convo-actions"><button class="btn btn-secondary btn-sm" onclick="inboundShowChat(' + jsq(r.email) + ',this)">View the chat</button>' +
+      (r.outbox_status === 'pending_review' ? '<button class="btn btn-secondary btn-sm" onclick="goTab(\'outbox\')">Review the email</button>' : '') +
+      convo + '</div><div class="inb-chat" id="inb-chat-' + key + '"></div></div>';
+}
+
+async function inboundShowChat(email, btn, keep) {
+  const box = document.getElementById('inb-chat-' + email);
+  if (!box) return;
+  if (box.innerHTML && !keep) { box.innerHTML = ''; return; }
+  if (btn) btn.disabled = true;
+  box.innerHTML = '<p class="muted">Reading the chat from the ERP…</p>';
+  const data = await api('/api/inbound/chat', {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({email: email}),
+  });
+  if (btn) btn.disabled = false;
+  if (!(data && data.success)) { box.innerHTML = '<p class="muted">' + escHtml(failMsg(data, 'Couldn’t read the chat.')) + '</p>'; return; }
+  if (!data.found) { box.innerHTML = '<p class="muted">The ERP has no chat for this address any more.</p>'; return; }
+  const who = {visitor: escHtml(data.name || 'Them'), assistant: 'Our assistant', rep: 'Our team', notes: 'Notes'};
+  const meta = [data.city, data.country].filter(Boolean).join(', ') +
+    (data.entry_path ? ' · started on ' + data.entry_path : '') + (data.referrer ? ' · from ' + data.referrer : '');
+  box.innerHTML = '<div class="thread inb-chat-lines" data-email="' + escHtml(email) + '">' +
+    (meta ? '<p class="muted">' + escHtml(meta) + '</p>' : '') +
+    (data.lines || []).map(l => '<div class="thread-msg ' + (l.who === 'visitor' ? 'received' : 'sent') + '"><div class="sender">' +
+      (who[l.who] || escHtml(l.who)) + (l.at ? ' &middot; ' + relTime(l.at) : '') + '</div>' + escHtml(l.text) + '</div>').join('') +
+    '</div>';
+}
+
+async function inboundPollNow(btn) {
+  btn.disabled = true;
+  const data = await api('/api/inbound/poll', {method: 'POST'});
+  btn.disabled = false;
+  if (data && data.success) {
+    showToast('Reading the client inbox now.', 'success');
+    setTimeout(() => loadInbound(false), 6000);
+    setTimeout(() => loadInbound(false), 30000);
+  } else {
+    showToast(failMsg(data, 'Could not read the inbox now.'), 'error');
+  }
+}
+
 // ── Learning: lessons from results, for you to approve (harvey/lessons.py) ──
 
 let _lrn = null, _lrnOut = null, _lrnBusy = false;
 const _lrnFilter = {channel: '', segment: '', step: ''};
 const LRN_KIND = {writing: 'Writing', subject: 'Subject lines', linkedin: 'LinkedIn', whatsapp: 'WhatsApp',
-  targeting: 'Targeting', segment_mix: 'Segment mix'};
+  targeting: 'Targeting', segment_mix: 'Segment mix', replies: 'Replies (from your guidance)'};
 const LRN_SEGMENT = {shopify: 'Shopify', wordpress: 'WordPress', custom: 'Custom', other: 'Other',
   unknown: 'Unknown'};
 const LRN_SHOWN_ROWS = 200;
@@ -4094,6 +4545,10 @@ function lrnEvidenceHtml(lesson, current) {
   const chips = [];
   if (e.source === 'owner_edits') {
     chips.push('<span class="cost-chip">from ' + mbxNum(e.edits) + ' of your edits</span>');
+  }
+  if (e.source === 'your guidance') {
+    chips.push('<span class="cost-chip">from your guidance on a conversation' +
+      (e.intent ? ' (' + escHtml(e.intent) + ')' : '') + '</span>');
   }
   (e.cells || []).forEach(c => {
     const dim = String(c.dimension || '');
@@ -4342,11 +4797,12 @@ setInterval(async () => {
 setInterval(() => {
   if (document.hidden || _locked) return;
   switch (currentTab) {
-    case 'today': loadToday(); loadTrend(); loadFunnel(); loadRuns(); loadTodayActivity(); break;
+    case 'today': loadToday(); loadChannels(); loadTrend(); loadFunnel(); loadRuns(); loadTodayActivity(); break;
     case 'companies': if (!companyDrill) loadCompanies(); break;
     case 'prospects': loadProspects(); break;
     case 'campaigns': loadCampaigns(); break;
     case 'conversations': loadConversations(); break;
+    case 'inbound': loadInbound(false); break;
     case 'mailboxes': loadMailboxes(); break;
     case 'linkedin': loadLinkedIn(); break;
     case 'whatsapp': loadWhatsApp(); break;

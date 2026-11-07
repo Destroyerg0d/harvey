@@ -9,6 +9,30 @@ minor versions can still change behaviour.
 
 ### Added
 
+- **Write your own email on any conversation, and Harvey sends it in the same thread.** A box on
+  every Conversations card (`POST /api/conversations/{id}/reply`, `harvey/owner_reply.py`): it goes
+  out from the conversation's mailbox with the thread's Gmail id and In-Reply-To the latest message
+  in it, approved by you, through the Sender's checks (opt-outs, bounces, do-not-contact, quiet
+  hours; replies never count against the daily limit). Harvey's waiting draft is replaced and read
+  as one of your edits. Someone who hasn't replied yet gets it on the email we sent, and a
+  conversation is started for them. Each reply's Message-ID, thread and subject are now kept on
+  the conversation, and the thread shows your emails as yours.
+- **Tell Harvey what to do with a reply, and it learns from it.** On a conversation (open by
+  itself on Needs you): Harvey drafts the reply from your guidance with the Handler's own prompt
+  and holds it (Send it or Edit on the card; "Approve all" passes it by). Then one call proposes
+  the general rule your guidance teaches, a lesson of the new kind `replies` that goes through the
+  Learner's filter and waits for Keep or Skip on the card (`harvey/guidance.py`).
+- **A Website leads tab.** Everyone the website chat brought in, read from the ERP's client inbox,
+  with what Harvey did and why, its email and whether they replied; the whole chat read from the
+  ERP on a click (GET only); whether the ERP read is working, from the last poll and the last
+  error, which a failed poll now records (`inbound:last_error`); and **Check the inbox now**.
+- **Paste a client chat for Harvey to answer.** On the same tab: a chat copied from the ERP's
+  inbox, a "Name: message" thread or plain notes, their email, an optional WhatsApp number and a
+  note for Harvey. It reads their website, triages the chat and writes the follow-up through the
+  inbound pipeline (`harvey/pasted.py`); with a number, WhatsApp queues them too.
+- **Every channel on Today** (`GET /api/channels`): email, WhatsApp, LinkedIn and the website
+  chat, each connected or not, on or off, autopilot, any pause, and the last 24 hours.
+
 - **LinkedIn and WhatsApp run from the dashboard, with no terminal.** Each tab opens on a
   connection card that says where things stand and what to do next. **Connect**
   (`POST /api/linkedin/login`, `/api/whatsapp/login`) starts the existing login command as a

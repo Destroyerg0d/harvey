@@ -1662,6 +1662,11 @@ async def get_conversations(awaiting: bool = False):
         "SELECT id, conversation_id, subject, body, send_at FROM outbox "
         f"WHERE kind = 'reply' AND status = 'pending_review' AND conversation_id IN ({_in(cids)}) "
         "ORDER BY created_at", tuple(cids)) if cids else [])}
+    # A reply approved and not sent yet (yours, or Harvey's on autopilot): on its way.
+    queued = {d.pop("conversation_id"): d for d in (await query_db(
+        "SELECT id, conversation_id, body, angle, send_at FROM outbox "
+        f"WHERE kind = 'reply' AND status IN ('approved', 'sending') AND conversation_id IN ({_in(cids)}) "
+        "ORDER BY created_at", tuple(cids)) if cids else [])}
     for row in rows:
         try:
             row["thread"] = json.loads(row.get("thread_json", "[]"))
@@ -1673,6 +1678,15 @@ async def get_conversations(awaiting: bool = False):
                          for e in emails.get(row.get("prospect_id"), [])
                          if not camp or e.get("campaign_id") == camp]
         row["draft"] = drafts.get(row["id"])
+        row["queued"] = queued.get(row["id"])
+    # Your latest guidance on each, and the lesson it proposed.
+    try:
+        from harvey import guidance as guide
+        latest = await guide.latest_for(_state(), cids)
+    except Exception:
+        latest = {}
+    for row in rows:
+        row["guidance"] = guide.summary(latest.get(row["id"])) if latest else None
     if awaiting:
         rows += await _awaiting_reply()
     names = _mailbox_names()
@@ -1745,6 +1759,284 @@ async def set_conversation_status(convo_id: str, request: Request):
     await state.log_action("conversation_status", "dashboard",
                            {"conversation_id": convo_id, "from": rows[0]["status"], "to": status})
     return {"success": True, "status": status}
+
+
+@app.post("/api/conversations/{convo_id}/reply")
+async def conversation_reply(convo_id: str, request: Request):
+    """An email you wrote, sent by Harvey on this conversation's own thread
+    (``awaiting-<prospect id>`` for someone who hasn't replied yet). Queued
+    approved: it goes out on the next cycle, through the Sender's checks."""
+    from harvey.config import load_config
+    from harvey.owner_reply import ReplyRefused, queue_your_reply
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    try:
+        state = _state()
+        await state.init_db()
+        result = await queue_your_reply(state, load_config(), body=str(data.get("body") or ""),
+                                        convo_id=convo_id, take_over=bool(data.get("take_over")))
+    except ReplyRefused as e:
+        return JSONResponse({"success": False, "message": str(e)}, status_code=400)
+    except Exception as e:
+        return JSONResponse({"success": False, "message": str(e)}, status_code=500)
+    return {"success": True, **result}
+
+
+# ── Every channel at a glance, for Today (read-only) ──
+
+@app.get("/api/channels")
+async def channels_overview():
+    """One line per channel: connected or not, on or off, autopilot, a pause or
+    warning, and what it did in the last 24 hours. Built from each channel's own
+    connection card (harvey/whatsapp/web.py, harvey/linkedin/web.py)."""
+    from datetime import timedelta
+    from harvey.config import load_config, load_env
+    try:
+        config, env = load_config(), load_env()
+        state = _state()
+        await state.init_db()
+        since = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=24)).isoformat()
+
+        async def count(sql, params=()):
+            rows = await query_db(sql, params)
+            return int(list(rows[0].values())[0] or 0) if rows else 0
+
+        out = {}
+        email_cfg = config.channels.email
+        paused = await state.get_setting("sending_paused")
+        out["email"] = {
+            "enabled": bool(email_cfg.enabled), "mailboxes": len(_configured_mailboxes()) or 1,
+            "paused": paused or "", "autopilot": not getattr(email_cfg, "require_approval", True),
+            "sent": await count("SELECT COUNT(*) AS n FROM outbox WHERE status = 'sent' AND sent_at >= ?", (since,)),
+            "replies": await count("SELECT COUNT(*) AS n FROM conversations WHERE created_at >= ? "
+                                   "AND COALESCE(status, '') != 'auto'", (since,)),
+            "waiting": await count("SELECT COUNT(*) AS n FROM outbox WHERE status = 'pending_review'"),
+        }
+        for name in ("whatsapp", "linkedin"):
+            try:
+                if name == "whatsapp":
+                    from harvey.agents import whatsapp_agent as agent
+                    from harvey.whatsapp import guards
+                    from harvey.whatsapp.web import _connection
+                    table = "whatsapp_messages"
+                else:
+                    from harvey.agents import linkedin_agent as agent
+                    from harvey.linkedin import guards
+                    from harvey.linkedin.web import _connection
+                    table = "linkedin_messages"
+                conn = await _connection(state, config)
+                pause = await guards.active_pause(state)
+                out[name] = {
+                    "state": conn["state"], "enabled": conn["enabled"], "step": conn["step"],
+                    "autopilot": await agent.autopilot_on(state, config),
+                    "paused": (pause or {}).get("reason", "") if pause else "",
+                    "sent": await count(f"SELECT COUNT(*) AS n FROM {table} WHERE direction = 'out' "
+                                        "AND status = 'sent' AND sent_at >= ?", (since,)),
+                    "replies": await count(f"SELECT COUNT(*) AS n FROM {table} WHERE direction = 'in' "
+                                           "AND created_at >= ?", (since,)),
+                    "waiting": await count(f"SELECT COUNT(*) AS n FROM {table} WHERE direction = 'out' "
+                                           "AND status = 'draft'"),
+                }
+            except Exception as e:
+                out[name] = {"state": "unknown", "enabled": False, "step": f"Couldn't read it: {e}"}
+        from harvey.inbound_view import connection
+        erp = await connection(state, config, env)
+        out["erp"] = {"ok": erp["ok"], "why": erp["why"], "enabled": erp["enabled"],
+                      "last_run": erp["last_run"].get("at", ""), "autopilot": erp["autopilot"],
+                      "read": erp["last_run"].get("read", 0), "drafted": erp["last_run"].get("drafted", 0)}
+        return out
+    except Exception as e:
+        return JSONResponse({"success": False, "message": str(e)}, status_code=500)
+
+
+# ── Website leads: the ERP's client inbox, and chats you paste (harvey/inbound_view.py) ──
+
+# Paste jobs and "Check now" polls run here, in the dashboard, a minute or two
+# each. Kept in memory: a restart forgets a finished job's result, not its email.
+_inbound_jobs: dict = {}
+_inbound_tasks: set = set()
+MAX_INBOUND_JOBS = 50
+
+
+def _inbound_job(kind: str) -> str:
+    job = uuid.uuid4().hex[:10]
+    if len(_inbound_jobs) >= MAX_INBOUND_JOBS:
+        for old in sorted(_inbound_jobs, key=lambda k: _inbound_jobs[k]["at"])[:10]:
+            _inbound_jobs.pop(old, None)
+    _inbound_jobs[job] = {"id": job, "kind": kind, "status": "running", "result": None,
+                          "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    return job
+
+
+def _inbound_run(job: str, work):
+    async def _go():
+        try:
+            _inbound_jobs[job].update(status="done", result=await work())
+        except Exception as e:
+            _inbound_jobs[job].update(status="failed", result={"status": "failed", "why": str(e)[:300]})
+    task = asyncio.create_task(_go())
+    _inbound_tasks.add(task)
+    task.add_done_callback(_inbound_tasks.discard)
+
+
+@app.get("/api/inbound")
+async def inbound_overview():
+    """The client inbox as Harvey sees it: is the ERP being read, the counts,
+    and every person Harvey read with what it did. Read-only."""
+    from harvey.config import load_config, load_env
+    from harvey.inbound_view import overview
+    try:
+        state = _state()
+        await state.init_db()
+        data = await overview(state, load_config(), load_env())
+        data["jobs"] = sorted(_inbound_jobs.values(), key=lambda j: j["at"], reverse=True)[:10]
+        return data
+    except Exception as e:
+        return JSONResponse({"success": False, "message": str(e)}, status_code=500)
+
+
+@app.post("/api/inbound/chat")
+async def inbound_chat(request: Request):
+    """One person's chats, read from the ERP now (the ERP only ever gets GET
+    requests). POST here so their address stays out of URLs and access logs."""
+    from harvey.collectors.erp_chat import ERPChatError
+    from harvey.config import load_env
+    from harvey.inbound_view import chat
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    email = str((data or {}).get("email") or "").strip() if isinstance(data, dict) else ""
+    if "@" not in email or len(email) > 254:
+        return JSONResponse({"success": False, "message": "give their email address"}, status_code=400)
+    try:
+        return {"success": True, **await chat(load_env(), email)}
+    except ERPChatError as e:
+        return JSONResponse({"success": False, "message": str(e)}, status_code=502)
+    except Exception as e:
+        return JSONResponse({"success": False, "message": str(e)}, status_code=500)
+
+
+@app.post("/api/inbound/poll")
+async def inbound_poll_now():
+    """Read the client inbox once now, as the background poll does."""
+    from harvey.brain import Brain
+    from harvey.config import load_config, load_env
+    from harvey.inbound import InboundPipeline, InboundRunner
+    config, env = load_config(), load_env()
+    state = _state()
+    await state.init_db()
+    runner = InboundRunner(Brain(state, config.brain), state, config, env)
+    problem = runner.problem()
+    if problem:
+        return JSONResponse({"success": False, "message": problem}, status_code=400)
+    job = _inbound_job("poll")
+
+    async def work():
+        report = await runner.poll_once()
+        if report is None:
+            return {"status": "failed", "why": "the read failed: see the connection line"}
+        return {k: v for k, v in report.items() if not k.startswith("_") and k != "previews"}
+    _inbound_run(job, work)
+    return {"success": True, "job": job}
+
+
+@app.post("/api/inbound/paste")
+async def inbound_paste(request: Request):
+    """A client chat you paste: Harvey reads it, reads their website, and emails
+    them (WhatsApp too, given a number). Runs in the background; see the job."""
+    from harvey.brain import Brain
+    from harvey.config import load_config, load_env
+    from harvey.pasted import MAX_CHAT_CHARS, WHERE, build_lead, parse_pasted_chat, run_pasted
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    data = data if isinstance(data, dict) else {}
+    text = str(data.get("chat") or "")
+    email = str(data.get("email") or "").strip()
+    if not text.strip():
+        return JSONResponse({"success": False, "message": "Paste the chat first."}, status_code=400)
+    if len(text) > MAX_CHAT_CHARS:
+        return JSONResponse({"success": False, "message": f"Keep it under {MAX_CHAT_CHARS} characters."},
+                            status_code=400)
+    pasted = parse_pasted_chat(text, visitor=str(data.get("name") or ""))
+    email = email or pasted.email
+    from harvey.collectors.erp_chat import _clean_email
+    if not _clean_email(email):
+        return JSONResponse({"success": False, "message": "Give their email address."}, status_code=400)
+    where = str(data.get("where") or "website")
+    lead = build_lead(pasted, email=email, phone=str(data.get("phone") or ""),
+                      name=str(data.get("name") or ""), website=str(data.get("website") or ""),
+                      company=str(data.get("company") or ""), note=str(data.get("note") or ""),
+                      where=where if where in WHERE else "other")
+    config, env = load_config(), load_env()
+    state = _state()
+    await state.init_db()
+    job = _inbound_job("paste")
+    _inbound_jobs[job]["email"] = lead.email
+    _inbound_jobs[job]["shape"] = pasted.shape
+    _inbound_run(job, lambda: run_pasted(state, Brain(state, config.brain), config, env, lead,
+                                         send_anyway=bool(data.get("send_anyway"))))
+    return {"success": True, "job": job, "shape": pasted.shape, "lines": len(pasted.lines),
+            "name": lead.name, "phone": lead.phone, "email": lead.email}
+
+
+@app.get("/api/inbound/jobs/{job}")
+async def inbound_job(job: str):
+    found = _inbound_jobs.get(job)
+    if not found:
+        return JSONResponse({"success": False, "message": "That job isn't known (the dashboard restarted?)."},
+                            status_code=404)
+    return {"success": True, **found}
+
+
+# Drafts from your guidance run here, a minute or so each; kept so they aren't collected.
+_guidance_tasks: set = set()
+
+
+@app.post("/api/conversations/{convo_id}/guide")
+async def conversation_guide(convo_id: str, request: Request):
+    """Tell Harvey what to do with this conversation's reply. It drafts the
+    reply from that in the background and holds it for you, then proposes the
+    general lesson your guidance teaches (Keep or Skip, on the card)."""
+    from harvey.brain import Brain
+    from harvey.config import load_config, load_env
+    from harvey.guidance import draft_from, start
+    from harvey.owner_reply import ReplyRefused
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    try:
+        state = _state()
+        await state.init_db()
+        begun = await start(state, convo_id, str(data.get("guidance") or ""))
+    except ReplyRefused as e:
+        return JSONResponse({"success": False, "message": str(e)}, status_code=400)
+    except Exception as e:
+        return JSONResponse({"success": False, "message": str(e)}, status_code=500)
+
+    async def _draft():
+        from harvey.agents.handler import Handler
+        try:
+            config, env = load_config(), load_env()
+            handler = Handler(Brain(state, config.brain), state, config, env)
+            await draft_from(state, handler, begun["id"])
+        except Exception as e:
+            from harvey.guidance import FAILED, _update
+            await _update(state, begun["id"], status=FAILED, error=f"the draft failed: {e}"[:300])
+
+    task = asyncio.create_task(_draft())
+    _guidance_tasks.add(task)
+    task.add_done_callback(_guidance_tasks.discard)
+    return {"success": True, "guidance_id": begun["id"]}
 
 
 @app.get("/api/trend")

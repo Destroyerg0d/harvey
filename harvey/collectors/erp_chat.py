@@ -96,6 +96,10 @@ class InboundLead:
     website: str = ""
     origin: str = "website_chat"
     source_label: str = ""
+    # A chat you pasted (harvey/pasted.py): what their website shows, from
+    # Harvey's profiler, and your note for Harvey on this email.
+    site_facts: str = ""
+    owner_note: str = ""
 
     @property
     def visitor_words(self) -> int:
@@ -413,6 +417,27 @@ class ERPChatClient:
                 people.update(str(r.get("email") or "").strip().lower() for r in rows)
         people.discard("")
         return people
+
+    async def lead_for(self, email: str) -> InboundLead | None:
+        """One person's chats, read now (the dashboard's View chat): their
+        sessions by address, every thread of those, every message."""
+        address = _clean_email(email)
+        if not self.configured:
+            raise ERPChatError("ERP_SUPABASE_URL and ERP_SUPABASE_KEY aren't set in .env")
+        if not address:
+            return None
+        async with self._client() as client:
+            sessions = await self._sessions(client, "email", {address, address.lower()})
+            tokens = {s.get("session_token") for s in sessions} - {None, ""}
+            if not tokens:
+                return None
+            threads = await self._threads_of(client, tokens)
+            thread_ids = {str(t.get("id")) for t in threads if t.get("id")}
+            messages = await self._messages(client, thread_ids)
+        for lead in build_leads(threads, sessions, messages):
+            if lead.email.lower() == address.lower():
+                return lead
+        return None
 
     async def read_leads(self, since: str = "") -> list[InboundLead]:
         """Everyone with an address, deduped by lowercased email. ``since``

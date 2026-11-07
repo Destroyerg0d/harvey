@@ -75,6 +75,7 @@
       <button class="active" onclick="showTab('today', this)"><svg class="icon" aria-hidden="true"><use href="#i-today"/></svg><span class="label">Today</span><span class="nav-count" id="nav-today"></span></button>
       <button onclick="showTab('outbox', this)"><svg class="icon" aria-hidden="true"><use href="#i-outbox"/></svg><span class="label">Outbox</span><span class="nav-count" id="nav-outbox"></span></button>
       <button onclick="showTab('conversations', this)"><svg class="icon" aria-hidden="true"><use href="#i-conversations"/></svg><span class="label">Conversations</span><span class="nav-count" id="nav-conversations"></span></button>
+      <button onclick="showTab('inbound', this)"><svg class="icon" aria-hidden="true"><use href="#i-flag"/></svg><span class="label">Website leads</span><span class="nav-count" id="nav-inbound"></span></button>
       <button onclick="showTab('mailboxes', this)"><svg class="icon" aria-hidden="true"><use href="#i-mailboxes"/></svg><span class="label">Mailboxes</span></button>
       <button onclick="showTab('linkedin', this)"><svg class="icon" aria-hidden="true"><use href="#i-network"/></svg><span class="label">LinkedIn</span><span class="nav-count" id="nav-linkedin"></span></button>
       <button onclick="showTab('whatsapp', this)"><svg class="icon" aria-hidden="true"><use href="#i-message"/></svg><span class="label">WhatsApp</span><span class="nav-count" id="nav-whatsapp"></span></button>
@@ -127,6 +128,8 @@
   <div id="today-setup"></div>
 
   <div id="today-kpis"></div>
+
+  <div id="today-channels"></div>
 
   <div class="grid-main">
     <div>
@@ -275,6 +278,25 @@
 <div id="conversations" class="section">
   <div class="section-head"><div><h2>Conversations</h2><p>Every reply, and how Harvey handled it.</p></div></div>
   <div id="conversations-list"></div>
+</div>
+
+<!-- Website leads: the ERP's client inbox, and chats you paste (harvey/inbound_view.py) -->
+<div id="inbound" class="section">
+  <div class="section-head">
+    <div>
+      <h2>Website leads</h2>
+      <p>Everyone who left their email in the website's live chat, read from the ERP's client inbox
+         (read-only: Harvey never writes to the ERP), and what Harvey did with each one. Paste any
+         client chat below and Harvey reads it, looks at their website and emails them.</p>
+    </div>
+    <div class="page-actions"><button class="btn btn-secondary btn-sm" onclick="inboundPollNow(this)">Check the inbox now</button></div>
+  </div>
+  <div id="inbound-connection"></div>
+  <div class="subhead">Add a lead from a chat <span class="hint">paste the chat, give their email (and WhatsApp number if you have it)</span></div>
+  <div id="inbound-paste"></div>
+  <div id="inbound-jobs"></div>
+  <div class="subhead">Every chat Harvey read <span class="hint">newest first; open one to read the whole chat from the ERP</span></div>
+  <div id="inbound-list"></div>
 </div>
 
 <!-- Mailboxes: sending health and results, per domain and per mailbox -->

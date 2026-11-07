@@ -132,6 +132,7 @@ RUNNING_STALE = timedelta(minutes=30)
 CURSOR_KEY = "inbound:cursor"
 RUNNING_KEY = "inbound:running"
 LAST_RUN_KEY = "inbound:last_run"
+LAST_ERROR_KEY = "inbound:last_error"   # the last poll that failed, for the dashboard
 
 # Prospect statuses that mean nobody writes to them from here again.
 _NOT_AGAIN = frozenset({"contacted", "replied", "opted_out", "lost", "meeting", "closed"})
@@ -330,6 +331,8 @@ def transcript_text(lead: InboundLead, max_chars: int = 6000) -> str:
 def how_they_reached_us(lead: InboundLead) -> str:
     if lead.origin == "website_chat":
         return "the live chat on our website"
+    if lead.origin == "pasted" and lead.source_label:
+        return lead.source_label       # where you said the chat happened
     via = lead.directory or lead.source_label
     return f"an enquiry through {via}" if via else "an enquiry they sent us"
 
@@ -460,6 +463,11 @@ def _facts(lead: InboundLead, triaged: Triage) -> str:
         facts.append("- A person on our team has answered them before")
     if triaged.service_type != "other":
         facts.append(f"- Kind of work: {triaged.service_type}")
+    if lead.site_facts:
+        facts.append(f"- What their own website shows (Harvey read it): {lead.site_facts}")
+    if lead.owner_note:
+        # Yours, from the dashboard: trusted, unlike the conversation.
+        facts.append(f"- The owner's note for this email (follow it): {lead.owner_note}")
     return "\n".join(facts)
 
 
@@ -694,15 +702,17 @@ async def _choose_mailbox(state, config, providers, prospect_id: str) -> str:
 
 
 async def stage(state, config, plan: Plan, *, now: datetime, providers=None,
-                autopilot: bool = False) -> str | None:
+                autopilot: bool = False, force: bool = False) -> str | None:
     """Write what ``plan`` says: the company (a business domain only), the
     prospect and their email in the Outbox. Returns its id, or None when
-    someone beat us to them. Makes no model or verifier calls."""
+    someone beat us to them. Makes no model or verifier calls. ``force``: you
+    said to write to them anyway (a chat you pasted about someone Harvey
+    already dealt with)."""
     lead, triaged = plan.lead, plan.triaged
-    if await already_dealt_with(state, lead):
+    if not force and await already_dealt_with(state, lead):
         return None
     place = ", ".join(x for x in (lead.city, lead.country) if x)
-    source = CHAT_SOURCE if lead.origin == "website_chat" else (
+    source = CHAT_SOURCE if lead.origin == "website_chat" else "inbound:pasted" if lead.origin == "pasted" else (
         "inbound:" + re.sub(r"[^a-z0-9]+", "_", (lead.directory or lead.source_label or "sheet").lower()).strip("_"))
     company_id = ""
     company_name = lead.company.strip()
@@ -1262,18 +1272,37 @@ class InboundRunner:
         return True
 
     async def poll_once(self) -> dict | None:
-        """One poll, bounded; a failure is logged and the next one tries again."""
+        """One poll, bounded; a failure is logged and the next one tries again.
+        A failure is also kept (LAST_ERROR_KEY) for the Website leads tab, and
+        cleared by the next poll that works."""
+        problem = ""
         try:
-            return await asyncio.wait_for(self.pipeline_factory().poll(), timeout=POLL_TIMEOUT_SECONDS)
+            report = await asyncio.wait_for(self.pipeline_factory().poll(), timeout=POLL_TIMEOUT_SECONDS)
+            await self._note_error("")
+            return report
         except asyncio.TimeoutError:
+            problem = f"a read ran past {POLL_TIMEOUT_SECONDS}s and was stopped"
             logger.warning(f"Inbound: a poll ran past {POLL_TIMEOUT_SECONDS}s and was stopped.")
         except asyncio.CancelledError:
             raise
         except ERPChatError as e:
+            problem = f"couldn't read the chat: {e}"
             logger.warning(f"Inbound: couldn't read the chat: {e}")
         except Exception as e:
+            problem = f"the poll failed: {e}"
             logger.error(f"Inbound: a poll failed: {e}", exc_info=e)
+        await self._note_error(problem)
         return None
+
+    async def _note_error(self, problem: str) -> None:
+        try:
+            if problem:
+                await self.state.set_setting(LAST_ERROR_KEY, json.dumps(
+                    {"at": _utcnow().isoformat(timespec="seconds"), "error": problem[:300]}))
+            elif await self.state.get_setting(LAST_ERROR_KEY):
+                await self.state.delete_setting(LAST_ERROR_KEY)
+        except Exception:
+            pass
 
     async def _loop(self):
         while True:

@@ -1545,9 +1545,9 @@ class Sender:
                     convo = await self.state.get_conversation(item["conversation_id"])
                     if convo:
                         from harvey.models.conversation import Message
-                        convo.thread.append(
-                            Message(sender="harvey", content=item["body"])
-                        )
+                        # An email you wrote yourself is filed as yours.
+                        who = "you" if item.get("angle") == "owner_wrote" else "harvey"
+                        convo.thread.append(Message(sender=who, content=item["body"]))
                         await self.state.update_conversation(
                             convo.id, thread_json=convo.thread_json()
                         )

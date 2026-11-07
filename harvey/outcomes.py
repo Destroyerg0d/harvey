@@ -53,7 +53,7 @@ def _their_messages(conversation: Conversation) -> list:
     (a thread an auto-reply opened is the person's once they write), else
     the automatic ones."""
     people = [m for m in conversation.thread if m.sender == "prospect"]
-    return people or [m for m in conversation.thread if m.sender != "harvey"]
+    return people or [m for m in conversation.thread if m.sender not in ("harvey", "you")]
 
 
 async def _one(db, sql: str, params) -> dict | None:

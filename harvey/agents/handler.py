@@ -585,7 +585,8 @@ def conversation_history(thread, prospect_name: str) -> str:
         content = (m.content or "").strip()
         if len(content) > cap:
             content = content[:cap].rstrip() + " [...cut]"
-        who = ("Harvey" if m.sender == "harvey" else f"{prospect_name} (an automatic reply)"
+        who = ("Harvey" if m.sender == "harvey" else "the owner, writing for us"
+               if m.sender == "you" else f"{prospect_name} (an automatic reply)"
                if m.sender == "auto" else prospect_name)
         quoted = "\n".join("> " + line for line in (content.splitlines() or [""]))
         return f"[Message {i + 1} of {total}, from {who}]\n{quoted}"
@@ -599,8 +600,9 @@ def conversation_history(thread, prospect_name: str) -> str:
     older = newest_first[HISTORY_ALWAYS_RECENT:]
     kept = set(recent)
     used = sum(len(blocks[i]) + 1 for i in recent)
-    for i in ([i for i in older if thread[i].sender != "harvey"]
-              + [i for i in older if thread[i].sender == "harvey"]):
+    ours = ("harvey", "you")
+    for i in ([i for i in older if thread[i].sender not in ours]
+              + [i for i in older if thread[i].sender in ours]):
         cost = len(blocks[i]) + 1
         if used + cost <= HISTORY_BUDGET_CHARS:
             kept.add(i)
@@ -1047,7 +1049,10 @@ class Handler:
         meta = reply_meta or {}
         receiving = meta.get("mailbox", "")
         message = Message(sender="prospect", content=reply_text, from_email=sender_email,
-                          in_reply_to=meta.get("answers") or meta.get("in_reply_to", ""))
+                          in_reply_to=meta.get("answers") or meta.get("in_reply_to", ""),
+                          message_id=meta.get("message_id", "") or "",
+                          thread_ref=meta.get("thread_ref", "") or "",
+                          subject=(meta.get("subject", "") or "")[:300])
         if prospect.status == "opted_out":
             escalate = any(p in keyword_text for p in ESCALATION_PATTERNS)
             await self._record_after_opt_out(prospect, reply_text, campaign_id, escalate,
@@ -1870,9 +1875,10 @@ Respond with ONLY the category label, nothing else."""
 
     async def _generate_response(
         self, intent: str, reply_text: str, prospect, convo: Conversation,
-        referral=None, plan=None,
+        referral=None, plan=None, guidance: str = "",
     ) -> str:
-        """Generate an appropriate response based on intent."""
+        """Generate an appropriate response based on intent. ``guidance``: what
+        the owner told Harvey to do with this reply (the dashboard's guide box)."""
         if convo.status == AUTO_CONVERSATION:
             return ""   # only auto-replies are in it: nobody to answer
         history = conversation_history(convo.thread, prospect.full_name())
@@ -1968,6 +1974,17 @@ Write a reply that:"""
 - Makes it easy for them to refer (one-line ask)
 - Under 50 words"""
 
+        if guidance.strip():
+            # From the owner, on the dashboard: trusted, unlike the thread.
+            prompt += (
+                "\n\nTHE OWNER'S INSTRUCTION FOR THIS REPLY. The owner of the business read "
+                "this conversation and told you what to do. Follow it over the points above. "
+                "It never overrides the rules on claims (say only what the playbook and the "
+                "facts support) or the rule on the prospect's text. Write it in your own words "
+                "as the reply; don't mention that the owner told you.\n"
+                "--- owner's instruction ---\n" + guidance.strip()[:2000] +
+                "\n--- end of the owner's instruction ---")
+
         prompt += "\n\nWrite ONLY the email body. No subject line, no greeting label, no signature block, no markdown."
 
         response = await self.brain.think(
@@ -2032,7 +2049,7 @@ async def requeue_auto_acks(state: StateManager, dry_run: bool = False) -> dict:
         if (prospect.email_status or "") == "invalid":
             skip("address bounced")
             continue
-        texts = [m.content for c in convos for m in c.thread if m.sender != "harvey"]
+        texts = [m.content for c in convos for m in c.thread if m.sender not in ("harvey", "you")]
         if any(_opt_out_reason(t, t) or any(p in _flat(t) for p in ESCALATION_PATTERNS)
                or automatic_reply({}, "", t) in ("policy", "left") for t in texts):
             skip("their auto-reply was a stop")

@@ -1198,3 +1198,63 @@ a.btn, a.btn:hover { text-decoration: none; }
 #wa-convos .convo-card, #wa-queue .convo-card { margin-bottom: var(--sp-3); }
 #wa-due .figure .k { min-width: 0; overflow-wrap: anywhere; }
 #wa-limits .figure .v { text-align: right; }
+
+/* Your own reply, and guiding Harvey, on a conversation card. */
+.convo-box { margin-top: var(--sp-3); border-top: 1px solid var(--line); padding-top: var(--sp-3); }
+.convo-box > summary {
+  display: inline-flex; align-items: center; gap: 6px; cursor: pointer; list-style: none;
+  font-size: var(--fs-ui); font-weight: 500; color: var(--accent);
+}
+.convo-box > summary::-webkit-details-marker { display: none; }
+.convo-box > summary .icon { width: 13px; height: 13px; }
+.convo-box[open] > summary { margin-bottom: var(--sp-2); }
+.convo-box .reply-box { margin-top: 0; }
+.reply-foot label.check { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-caption); color: var(--text-2); }
+.thread-draft.queued { border-style: solid; }
+.convo-box.guide > summary { color: var(--warn, var(--accent)); }
+.guide-result { margin-top: var(--sp-2); font-size: var(--fs-caption); color: var(--text-2); }
+.lesson-offer { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: var(--sp-2);
+  padding: 8px 12px; border-radius: 10px; background: var(--surface-2); font-size: var(--fs-caption); }
+.lesson-offer b { color: var(--text); }
+
+/* ── Website leads ─────────────────────────────────────────── */
+.inb-conn { display: flex; gap: var(--sp-3); align-items: flex-start; margin-bottom: var(--sp-4); }
+.inb-conn b { display: block; margin-bottom: 2px; }
+.inb-conn p { margin: 2px 0 0; font-size: var(--fs-ui); }
+.inb-dot { width: 10px; height: 10px; border-radius: 50%; margin-top: 6px; flex: none; background: var(--text-3); }
+.inb-dot.t-good { background: var(--good); box-shadow: 0 0 0 3px var(--good-bg); }
+.inb-dot.t-bad { background: var(--bad); box-shadow: 0 0 0 3px var(--bad-bg); }
+.inb-form textarea { width: 100%; resize: vertical; margin-bottom: var(--sp-3); }
+.inb-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: var(--sp-3); margin-bottom: var(--sp-3); }
+.inb-fields .form-input { width: 100%; }
+.inb-job { margin-top: var(--sp-3); }
+.inb-job p { margin: 0 0 6px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.inb-job .icon { width: 14px; height: 14px; }
+.inb-row { margin-bottom: var(--sp-3); }
+.inb-head { display: flex; gap: var(--sp-3); align-items: center; }
+.inb-who { flex: 1; min-width: 0; }
+.inb-who h3 { margin: 0; font-size: var(--fs-body); }
+.inb-who .sub { font-size: var(--fs-caption); color: var(--text-3); overflow-wrap: anywhere; }
+.inb-head .tags { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.inb-summary { margin: var(--sp-2) 0 0; font-size: var(--fs-ui); }
+.inb-why { margin: 4px 0 0; font-size: var(--fs-caption); }
+.inb-chat .thread { margin-top: var(--sp-3); }
+@media (max-width: 640px) { .inb-head { flex-wrap: wrap; } .inb-head .tags { justify-content: flex-start; } }
+
+/* ── Channels on Today ─────────────────────────────────────── */
+.chan-list { padding: 4px 0; margin-bottom: var(--sp-4); }
+.chan {
+  display: grid; grid-template-columns: 14px 150px 170px 1fr; align-items: center; gap: var(--sp-3);
+  width: 100%; padding: 10px var(--sp-4); background: none; border: 0; border-top: 1px solid var(--line);
+  text-align: left; font: inherit; color: var(--text); cursor: pointer;
+}
+.chan:first-child { border-top: 0; }
+.chan:hover { background: var(--surface-2); }
+.chan .inb-dot { margin-top: 0; }
+.chan-name { font-weight: 600; font-size: var(--fs-ui); }
+.chan-status { font-size: var(--fs-ui); }
+.chan-detail { font-size: var(--fs-caption); color: var(--text-3); min-width: 0; overflow-wrap: anywhere; }
+@media (max-width: 640px) {
+  .chan { grid-template-columns: 14px 1fr; row-gap: 2px; }
+  .chan-status, .chan-detail { grid-column: 2; }
+}
