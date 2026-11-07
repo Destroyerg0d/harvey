@@ -157,3 +157,21 @@ async def test_nothing_to_answer_or_an_opt_out_is_refused(state):
     await state.update_prospect_status(pid, "opted_out")
     with pytest.raises(ReplyRefused, match="opted out"):
         await G.start(state, cid, "Answer it.")
+
+
+@pytest.mark.asyncio
+async def test_a_refused_wording_gets_one_retry(state):
+    """Most refusals are wording ("we sign NDAs"): told why, the model writes it again."""
+    _, cid = await setup(state)
+    brain = Brain()
+    answers = iter(["We always sign an NDA when asked.", RULE])
+
+    async def think(prompt, task="", **kw):
+        brain.prompts.setdefault(task, []).append(prompt)
+        return brain.reply if task == "generate_response" else next(answers)
+    brain.think = think
+    begun = await G.start(state, cid, "Agree to their NDA and offer a call.")
+    row = await G.draft_from(state, handler(state, brain), begun["id"])
+    assert row["lesson_id"] and len(brain.prompts["guidance_lesson"]) == 2
+    assert "can't be kept" in brain.prompts["guidance_lesson"][1]
+    assert (await lessons.get_lesson(state, row["lesson_id"]))["text"] == RULE

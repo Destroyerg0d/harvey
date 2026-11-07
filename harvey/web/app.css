@@ -1258,3 +1258,5 @@ a.btn, a.btn:hover { text-decoration: none; }
   .chan { grid-template-columns: 14px 1fr; row-gap: 2px; }
   .chan-status, .chan-detail { grid-column: 2; }
 }
+.guide-result { display: flex; align-items: center; gap: 6px; }
+.guide-result .icon, .lesson-offer .icon { width: 13px; height: 13px; flex: none; }

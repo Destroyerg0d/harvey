@@ -203,12 +203,20 @@ The owner's instruction (trusted, from the owner):
 --- end ---
 
 What general rule does this instruction teach for similar replies in future? Write ONE rule
-of at most two sentences, in the imperative ("When someone ..., ..."), that would help with
-other people too. Leave out every name, company, number, price, date, link, email address
-and quotation, and claim nothing about our company. If the instruction only fits this one
-person (a one-off fact, a specific time, a personal favour), answer exactly {NO_RULE}.
+of at most two sentences, as an instruction to the assistant ("When someone ..., agree to ...,
+ask ..., offer ..."), that would help with other people too. Never use the words we, our,
+ours or us: say what to do, not what the company is or offers. Leave out every name,
+company, number, price, date, link, email address and quotation. If the instruction only
+fits this one person (a one-off fact, a specific time, a personal favour), answer exactly
+{NO_RULE}.
 
 Answer with the rule only, or {NO_RULE}."""
+
+
+def _again_prompt(first: str, problem: str) -> str:
+    return (f"This rule can't be kept because it {problem}:\n--- rule ---\n{first[:600]}\n--- end ---\n"
+            "Write the same rule again without that, as an instruction to the assistant, at most "
+            f"two sentences, never using we, our, ours or us. Answer with the rule only, or {NO_RULE}.")
 
 
 async def propose_lesson(state, brain, row: dict, convo=None, company: str = "") -> tuple[str, str]:
@@ -228,7 +236,15 @@ async def propose_lesson(state, brain, row: dict, convo=None, company: str = "")
             return "", "no lesson: this guidance fits only this conversation"
         problem = lesson_problem(rule)
         if problem:
-            return "", f"no lesson: the rule it drew {problem}"
+            # One more try, told why: most refusals are wording ("we sign NDAs").
+            again = await brain.think(_again_prompt(rule, problem), session_id="harvey-learner",
+                                      agent="learner", task="guidance_lesson")
+            again = (again or "").strip().strip('"').strip()
+            if not again or again.upper().startswith(NO_RULE):
+                return "", f"no lesson: the rule it drew {problem}"
+            rule, problem = again, lesson_problem(again)
+            if problem:
+                return "", f"no lesson: the rule it drew {problem}"
         lesson_id, _ = await propose(state, LESSON_KIND, rule, evidence={
             "source": "your guidance", "guidance_id": row["id"],
             "conversation_id": row["conversation_id"], "intent": row.get("intent", "")},

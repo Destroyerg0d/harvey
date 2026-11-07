@@ -4241,9 +4241,10 @@ const _inbJobs = {};   // paste jobs started from this page: id -> {result, form
 const INB_FILTERS = [
   ['all', 'All', () => true],
   ['emailed', 'Emailed', r => r.status === 'drafted' || r.status === 'sent'],
-  ['look', 'Worth a look', r => ['escalated', 'triage_failed', 'no_draft', 'unverified', 'invalid_address'].includes(r.status)
+  // What you can act on: passed to you, couldn't be read or drafted, or an email waiting for you.
+  ['look', 'Needs you', r => ['escalated', 'triage_failed', 'no_draft'].includes(r.status)
     || (r.outbox_status === 'pending_review')],
-  ['skipped', 'Skipped or not a lead', r => r.status === 'skipped' || r.status === 'not_project'],
+  ['skipped', 'Skipped or not a lead', r => ['skipped', 'not_project', 'invalid_address', 'unverified'].includes(r.status)],
 ];
 const INB_WHERE = [['website', 'Our website’s live chat'], ['whatsapp', 'WhatsApp'], ['email', 'Email'],
   ['call', 'A call or meeting (your notes)'], ['other', 'Somewhere else']];
@@ -4432,16 +4433,23 @@ function inboundRow(r) {
       convo + '</div><div class="inb-chat" id="inb-chat-' + key + '"></div></div>';
 }
 
+// A chat read once stays here, so the tab's refresh redraws it without asking the ERP again.
+const _inbChats = {};
+
 async function inboundShowChat(email, btn, keep) {
   const box = document.getElementById('inb-chat-' + email);
   if (!box) return;
   if (box.innerHTML && !keep) { box.innerHTML = ''; return; }
-  if (btn) btn.disabled = true;
-  box.innerHTML = '<p class="muted">Reading the chat from the ERP…</p>';
-  const data = await api('/api/inbound/chat', {
-    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({email: email}),
-  });
-  if (btn) btn.disabled = false;
+  let data = keep ? _inbChats[email] : null;
+  if (!data) {
+    if (btn) btn.disabled = true;
+    box.innerHTML = '<p class="muted">Reading the chat from the ERP…</p>';
+    data = await api('/api/inbound/chat', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({email: email}),
+    });
+    if (btn) btn.disabled = false;
+    if (data && data.success) _inbChats[email] = data;
+  }
   if (!(data && data.success)) { box.innerHTML = '<p class="muted">' + escHtml(failMsg(data, 'Couldn’t read the chat.')) + '</p>'; return; }
   if (!data.found) { box.innerHTML = '<p class="muted">The ERP has no chat for this address any more.</p>'; return; }
   const who = {visitor: escHtml(data.name || 'Them'), assistant: 'Our assistant', rep: 'Our team', notes: 'Notes'};
@@ -4763,6 +4771,7 @@ setInterval(() => {
 // ── Init & live refresh ──
 
 loadToday();
+loadChannels();
 loadTrend();
 loadFunnel();
 loadSetupStatus();
