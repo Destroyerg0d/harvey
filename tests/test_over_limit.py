@@ -60,3 +60,21 @@ async def test_under_the_limit_is_unchanged(monkeypatch, tmp_path):
     at_percent(monkeypatch, 40)
     await h.run_cycles(1)
     assert [m["to"] for m in h.mail.sent] == ["bob@beta.com"]
+
+
+@pytest.mark.asyncio
+async def test_over_its_own_call_count_with_no_reading_it_still_sends(monkeypatch, tmp_path):
+    """Seen 2026-11-08: the usage gauge's token had expired, so Harvey judged by
+    its own call count, was over it, and put the whole cycle to sleep: no sends,
+    no replies read, all evening. Only a real reading may do that."""
+    from harvey.brain import Brain
+    h = Harness(monkeypatch, tmp_path, provider="claude", model="")   # the gauge reads None
+    await h.state.init_db()
+    await _approved_item(h.state)
+
+    async def many_calls(_self):
+        return 10_000
+    monkeypatch.setattr(Brain, "check_usage", many_calls)
+    await h.run_cycles(1)
+    assert [m["to"] for m in h.mail.sent] == ["bob@beta.com"]
+    assert h.scout_runs == 0

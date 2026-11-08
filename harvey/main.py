@@ -524,9 +524,13 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
             over_limit = not await brain.is_within_budget(
                 max_calls, max_percent=config.usage.max_daily_claude_percent
             )
+            # The whole cycle sleeps only on a REAL reading near the end of the
+            # quota. On Harvey's own call count (no reading: the gauge was down,
+            # its token expired), sending and reading replies go on: they spend
+            # nothing, and the next reading may well say there's room.
             if over_limit and not await brain.is_within_budget(
                 max_calls, max_percent=max(HARD_STOP_PERCENT, config.usage.max_daily_claude_percent)
-            ):
+            ) and getattr(brain, "budget_source", "quota") != "calls":
                 logger.info(
                     f"{brain.provider_label} usage is nearly out "
                     f"({HARD_STOP_PERCENT}% of quota or {max_calls} calls). "

@@ -110,6 +110,9 @@ class Brain:
         # Calls that ended with no answer at all (every retry failed), so a
         # caller can tell "the call failed" from "the answer was unusable".
         self.failed_calls = 0
+        # What the last is_within_budget() judged by: "quota" (the real
+        # utilization) or "calls" (Harvey's own count, when no reading).
+        self.budget_source = ""
         self._usage_pause_recorded = False
         self._status_synced = False
         if self.provider == "codex":
@@ -711,8 +714,12 @@ class Brain:
                         f"{self.provider_label} quota gate: utilization {worst:.0f}% >= "
                         f"{max_percent:.0f}% limit. {resets}"
                     )
+                self.budget_source = "quota"
                 return within
 
+        # No reading: Harvey's own call count stands in. main.py never puts
+        # the whole cycle to sleep on this alone (budget_source "calls").
+        self.budget_source = "calls"
         calls = await self.check_usage()
         return calls < max_daily_calls
 

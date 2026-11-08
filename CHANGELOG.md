@@ -597,6 +597,12 @@ minor versions can still change behaviour.
 
 ### Fixed
 
+- **An expired Claude token no longer puts Harvey to sleep all evening.** The usage gauge's token
+  expired, the gauge answered 401, Harvey judged by its own call count, was over it, and slept the
+  whole cycle (no sends, no replies read), so nothing called the CLI that would renew the token. A
+  401 now has the CLI renew it with `claude auth status` (no model call) and the gauge is read
+  again; and only a real reading near the end of the quota puts the whole cycle to sleep. Over the
+  call-count fallback, sending and reading replies go on.
 - **Scout's company searches were unanswerable.** They quoted the whole ICP label and the company
   size ('"DTC Ecommerce (Shopify / Shopify Plus brands)" "United States" "5-200 employees"'),
   which no page contains, and only ever the first two industries. Now plain words, rotating

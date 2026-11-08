@@ -26,6 +26,8 @@ USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 OAUTH_BETA_HEADER = "oauth-2025-04-20"
 CACHE_TTL_OK = 300.0     # seconds to reuse a good response
 CACHE_TTL_FAIL = 60.0    # seconds to back off after a failure
+RENEW_EVERY = 600.0      # an expired token is renewed at most this often
+RENEW_TIMEOUT = 45.0
 REQUEST_TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
 
 # macOS keychain item Claude Code stores credentials under.
@@ -139,6 +141,35 @@ class QuotaClient:
         self._cache_at = 0.0
         self._cache_ttl = 0.0
         self._lock = asyncio.Lock()
+        self._renewed_at = 0.0
+
+    async def _renew_token(self) -> bool:
+        """Have the Claude CLI renew its expired access token: `claude auth
+        status` does, with no model call. Seen 2026-11-08: the token expired
+        while Harvey slept over a fallback limit, the gauge answered 401, and
+        nothing ever called the CLI to renew it. At most once every
+        RENEW_EVERY seconds. True when it ran."""
+        now = time.monotonic()
+        if self._renewed_at and now - self._renewed_at < RENEW_EVERY:
+            return False
+        self._renewed_at = now
+        try:
+            from harvey import claude_runtime
+            executable = await asyncio.to_thread(claude_runtime.check_cli)
+        except Exception as e:
+            logger.debug(f"Quota: no usable Claude CLI to renew the token: {e}")
+            return False
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                executable, "auth", "status",
+                stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL)
+            await asyncio.wait_for(proc.wait(), timeout=RENEW_TIMEOUT)
+        except Exception as e:
+            logger.debug(f"Quota: couldn't renew the CLI token: {e}")
+            return False
+        logger.info("Quota: the Claude sign-in token had expired; renewed it (no model call).")
+        return True
 
     async def get_utilization(self) -> Optional[dict]:
         """Return {'five_hour': {...}, 'seven_day': {...}} or None.
@@ -158,7 +189,7 @@ class QuotaClient:
             self._cache_ttl = CACHE_TTL_OK if result else CACHE_TTL_FAIL
             return result
 
-    async def _fetch(self) -> Optional[dict]:
+    async def _fetch(self, renewed: bool = False) -> Optional[dict]:
         token = await asyncio.get_event_loop().run_in_executor(None, get_oauth_token)
         if not token:
             logger.debug("Quota: no Claude OAuth token found; falling back.")
@@ -177,6 +208,10 @@ class QuotaClient:
             logger.debug(f"Quota fetch failed: {e}")
             return None
 
+        if resp.status_code == 401 and not renewed and await self._renew_token():
+            # The CLI's access token had expired: it renews it on a status
+            # check (no model call, nothing spent), so read once more.
+            return await self._fetch(renewed=True)
         if resp.status_code != 200:
             logger.debug(f"Quota endpoint returned {resp.status_code}.")
             return None
