@@ -1099,7 +1099,30 @@ class OpenStreetMap(DiscoveryProvider):
         "attorney": ['office=lawyer'],
         "contractor": ['craft=builder', 'office=construction_company'],
         "landscap": ['craft=gardener', 'shop=garden_centre'],
+        # Independent shops: the ones with their own website are the stores
+        # that sell online too (WooCommerce, an old cart, Shopify). Matched by
+        # the words an ecommerce ICP uses ("DTC Ecommerce", "Fashion, Apparel").
+        "jewel": ['shop=jewelry', 'shop=watches'],
+        "fragrance": ['shop=perfumery', 'shop=cosmetics'],
+        "beauty": ['shop=beauty', 'shop=cosmetics', 'shop=perfumery'],
+        "skincare": ['shop=cosmetics', 'shop=beauty'],
+        "fashion": ['shop=clothes', 'shop=shoes', 'shop=boutique', 'shop=bag'],
+        "apparel": ['shop=clothes', 'shop=shoes', 'shop=boutique', 'shop=sports'],
+        "sporting": ['shop=sports', 'shop=outdoor', 'shop=bicycle'],
+        "furniture": ['shop=furniture', 'shop=interior_decoration', 'shop=houseware'],
+        "decor": ['shop=interior_decoration', 'shop=furniture', 'shop=houseware', 'shop=gift'],
+        "coffee": ['shop=coffee', 'shop=tea', 'shop=beverages', 'shop=pet', 'shop=wine'],
+        "pet": ['shop=pet'],
+        "ecommerce": ['shop=clothes', 'shop=jewelry', 'shop=cosmetics', 'shop=gift',
+                      'shop=interior_decoration', 'shop=boutique', 'shop=shoes', 'shop=toys'],
+        "e-commerce": ['shop=clothes', 'shop=jewelry', 'shop=cosmetics', 'shop=gift',
+                       'shop=interior_decoration', 'shop=boutique', 'shop=shoes', 'shop=toys'],
+        "boutique": ['shop=boutique', 'shop=clothes'],
+        "gift": ['shop=gift', 'shop=craft', 'shop=art'],
     }
+    # Shops are only worth it with a website of their own (that's what Harvey
+    # sells to): for these tags the query asks Overpass for ones that have one.
+    WEBSITE_ONLY_KEYS = ("shop",)
 
     def _tags(self, term: str) -> list[str]:
         """The OSM tags that actually carry this kind of business, or none.
@@ -1130,11 +1153,12 @@ class OpenStreetMap(DiscoveryProvider):
                 f"listings or SERP provider for this one.")
         lat, lng, radius_km = (query.coordinate.split(",") + ["", "", ""])[:3]
         radius_m = int(float(radius_km or 25) * 1000)
-        clauses = "".join(
-            f'node[{tag.split("=")[0]}={tag.split("=")[1]}](around:{radius_m},{lat},{lng});'
-            f'way[{tag.split("=")[0]}={tag.split("=")[1]}](around:{radius_m},{lat},{lng});'
-            for tag in tags
-        )
+
+        def selector(tag: str) -> str:
+            key, value = tag.split("=")
+            site = '["website"]' if key in self.WEBSITE_ONLY_KEYS else ""
+            return f"[{key}={value}]{site}(around:{radius_m},{lat},{lng});"
+        clauses = "".join(f"node{selector(tag)}way{selector(tag)}" for tag in tags)
         body = (f"[out:json][timeout:{self.SERVER_TIMEOUT}];({clauses});"
                 f"out center {query.limit};")
 

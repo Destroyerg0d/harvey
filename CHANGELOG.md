@@ -9,6 +9,11 @@ minor versions can still change behaviour.
 
 ### Added
 
+- **Scout finds shops on the map when search engines refuse.** A free, keyless OpenStreetMap step
+  each cycle: the next (ICP industry, city) of a rotation over the big cities of each country in
+  `icp.geography`, asking only for shops with a website of their own. OpenStreetMap now maps an
+  ecommerce ICP's words (jewelry, fashion, beauty, furniture, coffee, ecommerce...) to shop tags.
+  The backfill then finds each shop's owner or published inbox.
 - **Every possible client from the website chat gets a follow-up** (`inbound.everyone`): short
   chats, chats a person on our side handled, leads triage couldn't place (`other`, also ones
   decided before it was turned on) and addresses the person typed that no verifier could check,
@@ -592,6 +597,10 @@ minor versions can still change behaviour.
 
 ### Fixed
 
+- **Scout's company searches were unanswerable.** They quoted the whole ICP label and the company
+  size ('"DTC Ecommerce (Shopify / Shopify Plus brands)" "United States" "5-200 employees"'),
+  which no page contains, and only ever the first two industries. Now plain words, rotating
+  through every industry and place.
 - **A spent Claude limit no longer loses website leads.** The Claude CLI reports its usage limit in
   the JSON on stdout and exits 1 with nothing on stderr, so Harvey saw a blank failure, kept calling,
   and the inbound triage counted each failed call as an unusable answer: three of them and the lead

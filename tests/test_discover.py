@@ -1731,3 +1731,30 @@ async def test_scavio_maps_resolves_coordinates_in_run(state, config, register, 
 @pytest.mark.parametrize("coordinate", ["nan,0,40", "0,inf,40", "91,0,40", "0,181,40", "bad,0,40"])
 def test_scavio_invalid_map_centers_fall_back_to_place_name(coordinate):
     assert D.ScavioMaps.map_center(coordinate) == ""
+
+
+# ── Shops with a website of their own (Scout's map step, 2026-11-08) ──
+
+@pytest.mark.asyncio
+async def test_osm_maps_an_ecommerce_icp_to_shops_and_asks_only_for_ones_with_a_website(monkeypatch):
+    monkeypatch.setattr(D.OpenStreetMap, "BACKOFF", 0.0)
+    provider = D.OpenStreetMap()
+    assert "shop=jewelry" in provider._tags("Luxury Fragrance & Jewelry")
+    assert "shop=clothes" in provider._tags("DTC Ecommerce (Shopify / Shopify Plus brands)")
+    assert provider._tags("Home Decor & Furniture")[0] == "shop=furniture"
+    seen = {}
+
+    def handler(request):
+        seen["body"] = request.content.decode()
+        return httpx.Response(200, json={"elements": [
+            {"type": "node", "id": 1, "tags": {"name": "Sample Jewels", "shop": "jewelry",
+                                              "website": "https://sample-jewels.example"}}]})
+
+    async with _client(handler) as client:
+        found = await provider.fetch(client, {}, D.DiscoveryQuery(
+            term="Luxury Fragrance & Jewelry", coordinate="51.5,-0.12,30"))
+    assert 'node[shop=jewelry]["website"](around:30000,51.5,-0.12);' in seen["body"]
+    assert found[0].domain == "sample-jewels.example" and found[0].category == "jewelry"
+    # Trades keep their old query: no website required.
+    assert '["website"]' not in "".join(
+        f"[{t}]" for t in provider._tags("roofer"))

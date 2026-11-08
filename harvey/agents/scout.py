@@ -31,6 +31,7 @@ import json
 import logging
 import random
 import re
+import time
 from datetime import datetime, timezone
 from urllib.parse import parse_qs, quote_plus, urlparse
 
@@ -104,6 +105,56 @@ INBOX_PREFERRED = ("owner", "office", "info", "contact", "contactus", "hello",
                    "team", "service", "sales", "estimates", "quotes",
                    "inquiries", "enquiries", "admin", "support")
 MAX_PROSPECTS_PER_CYCLE = 25
+
+# The map (OpenStreetMap): one (kind of shop, city) a cycle, rotating through
+# the ICP's industries and the big cities of each country in icp.geography.
+MAP_CURSOR_KEY = "scout:map_cursor"
+MAP_LIMIT = 80
+MAP_CITIES = {
+    "united states": ["New York, NY", "Los Angeles, CA", "Chicago, IL", "Houston, TX", "Austin, TX",
+                      "Dallas, TX", "Miami, FL", "Atlanta, GA", "Seattle, WA", "San Francisco, CA",
+                      "San Diego, CA", "Denver, CO", "Boston, MA", "Philadelphia, PA", "Phoenix, AZ",
+                      "Portland, OR", "Nashville, TN", "Minneapolis, MN", "Charlotte, NC", "Las Vegas, NV"],
+    "united kingdom": ["London", "Manchester", "Birmingham", "Leeds", "Glasgow", "Bristol",
+                       "Edinburgh", "Liverpool", "Brighton", "Nottingham"],
+    "european union": ["Dublin", "Amsterdam", "Berlin", "Paris", "Madrid", "Copenhagen",
+                       "Stockholm", "Milan", "Barcelona", "Vienna"],
+    "australia": ["Sydney", "Melbourne", "Brisbane", "Perth", "Adelaide"],
+    "canada": ["Toronto", "Vancouver", "Montreal", "Calgary", "Ottawa"],
+    "india": ["Mumbai", "Delhi", "Bengaluru", "Pune", "Hyderabad"],
+}
+
+
+def search_phrase(label: str) -> str:
+    """An ICP label written for people ("DTC Ecommerce (Shopify / Shopify Plus
+    brands)") as words a search engine can match: the part before any bracket,
+    slashes, ampersands and commas as spaces, no quotes."""
+    base = re.split(r"[(\[]", label or "")[0]
+    base = re.sub(r"[/&,|]+", " ", base)
+    return " ".join(base.split())
+
+
+def map_rotation(config, osm) -> list[tuple[str, str]]:
+    """Every (industry, city) the map can search: each city for every kind of
+    shop in turn, the cities taken round robin across the countries."""
+    icp = config.icp
+    terms = [t for t in (icp.industries or []) if osm._tags(t)]
+    if not terms:
+        return []
+    cities: list[list[str]] = []
+    for place in icp.geography or []:
+        known = MAP_CITIES.get(place.strip().lower())
+        cities.append(list(known) if known else [place.strip()])
+    flat, longest = [], max((len(c) for c in cities), default=0)
+    for i in range(longest):          # round robin over the countries
+        flat += [c[i] for c in cities if i < len(c)]
+    seen, ordered = set(), []
+    for city in flat:
+        if city not in seen:
+            seen.add(city)
+            ordered.append(city)
+    return [(terms[(i + j) % len(terms)], city)
+            for i, city in enumerate(ordered) for j in range(len(terms))]
 
 # Hunter domain-searches per heartbeat. The monthly budget itself is shared
 # with email-pattern lookups and set by HUNTER_MONTHLY_SEARCHES (see
@@ -237,6 +288,9 @@ class Scout:
         # the mercy of Serper/Bing flakiness — cheapest, most reliable win
         # available before spending any queries.
         strategies.append(("known_companies", self._prospect_via_known_companies))
+        # New companies from the map: free and keyless, so it works when every
+        # search engine refuses this PC (DuckDuckGo, Bing and Google all do).
+        strategies.append(("map", self._prospect_via_map))
         # The dashboard's LinkedIn switch can only take this away: off means off
         # everywhere, but turning it on there runs the channel through its own
         # signed-in profile, and isn't a yes to a password-based search as well.
@@ -728,6 +782,38 @@ class Scout:
                     return count
 
         return count
+
+    # ── Strategy 0b: Shops on the map (OpenStreetMap, free, no key) ──
+
+    async def _prospect_via_map(self) -> int:
+        """One OpenStreetMap search a cycle: shops of the ICP's kinds that have a
+        website of their own, in the next city of the rotation. Free, keyless and
+        not blocked the way search engines are from a desktop. Companies only:
+        the backfill finds each one's owner or published inbox afterwards."""
+        from harvey.collectors.discover import DiscoveryQuery, OpenStreetMap, run_discovery
+        pairs = map_rotation(self.config, OpenStreetMap())
+        if not pairs:
+            return 0
+        try:
+            cursor = int(await self.state.get_setting(MAP_CURSOR_KEY) or 0)
+        except (TypeError, ValueError):
+            cursor = 0
+        term, city = pairs[cursor % len(pairs)]
+        await self.state.set_setting(MAP_CURSOR_KEY, str(cursor + 1))
+        try:
+            report = await run_discovery(
+                self.state, self.config, "osm",
+                queries=[DiscoveryQuery(term=term, location=city, limit=MAP_LIMIT)], max_spend=0.0)
+        except Exception as e:
+            logger.info(f"Scout: the map search for {term!r} in {city} didn't run: {e}")
+            return 0
+        if report.errors:
+            logger.info(f"Scout: the map search for {term!r} in {city}: {report.errors[0][:160]}")
+        elif report.new_companies:
+            logger.info(f"Scout: the map found {report.new_companies} new shop"
+                        f"{'s' if report.new_companies != 1 else ''} with a website in {city} "
+                        f"({term}); the backfill finds who to write to.")
+        return 0
 
     # ── Strategy 0: Known companies with zero prospects ──
 
@@ -1278,27 +1364,29 @@ class Scout:
         return [d for d in domains if not (d in seen or seen.add(d))][:5]
 
     def _build_company_search_queries(self) -> list[str]:
-        """Build search queries to find ICP-matching companies."""
+        """Build search queries to find ICP-matching companies.
+
+        Plain words a search engine can match. The old form quoted the whole
+        industry label and the company size ('"DTC Ecommerce (Shopify / Shopify
+        Plus brands)" "United States" "5-200 employees" company'), which no page
+        contains, so every search came back empty. The industries and places
+        rotate every few minutes, so all of them get searched, not the first two."""
         queries = []
-        industries = self.config.icp.industries or [""]
-        geos = self.config.icp.geography or [""]
-        size = self.config.icp.company_size or ""
-
-        for industry in industries[:2]:
-            geo = geos[0] if geos else ""
-
-            parts = []
-            if industry:
-                parts.append(f'"{industry}"')
-            if geo:
-                parts.append(f'"{geo}"')
-            if size:
-                parts.append(f'"{size}"')
-            parts.append("company")
-            queries.append(" ".join(parts))
-
-            if geo and industry:
-                queries.append(f'top "{industry}" companies {geo}')
+        icp = self.config.icp
+        industries = [i for i in (icp.industries or []) if i] or [""]
+        geos = [g for g in (icp.geography or []) if g] or [""]
+        variants = getattr(icp, "keyword_variants", {}) or {}
+        turn = int(time.time() // 300)
+        for k in range(2):
+            industry = industries[(turn + k) % len(industries)]
+            geo = geos[(turn + k) % len(geos)]
+            phrase = search_phrase(industry)
+            extra = [search_phrase(v) for v in variants.get(industry, [])]
+            for term in [phrase, *extra][:2]:
+                if not term:
+                    continue
+                queries.append(f"{term} brand {geo}".strip())
+                queries.append(f"{term} online store {geo}".strip())
 
         # Drop empties / dupes, cap to budget.
         seen = set()
