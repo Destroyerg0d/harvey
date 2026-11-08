@@ -283,6 +283,15 @@ class InboundConfig(BaseModel):
     autopilot: bool = False
     # A person on our side wrote in the chat this recently: it's theirs.
     rep_active_days: int = 14
+    # Every possible client gets the follow-up: a chat too short to say what
+    # they want (the email asks, from the pages they read), one a person on our
+    # side already handled (the draft is told so), one triage couldn't place,
+    # and an address they typed themselves that no verifier could check
+    # (graded "given": only this follow-up goes there, never cold email).
+    # Job seekers, vendors, spam, our own staff, existing clients and addresses
+    # a verifier says don't exist are still left out. Anyone Harvey already
+    # emailed is never emailed again.
+    everyone: bool = False
     # The only amounts a written estimate may name, each with its currency
     # (harvey/money.py reads any common format). Empty: no estimates, and leads
     # ready for one get an ordinary email instead.

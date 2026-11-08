@@ -55,6 +55,9 @@ LAST_RUN_KEY = "whatsapp:last_run"
 RUNNING_KEY = "whatsapp:running"
 AUTOPILOT_KEY = "whatsapp:autopilot"
 ENABLED_KEY = "whatsapp:enabled"
+# Someone queued this recently just chatted with us: their first message goes
+# at once, whatever the hour where they are.
+FRESH_FIRST_HOURS = 3
 
 MAX_CHATS_PER_RUN = 12
 MAX_DRAFT_ATTEMPTS = 3
@@ -129,11 +132,13 @@ async def autopilot_on(state, config) -> bool:
 
 async def channel_on(state, config) -> bool:
     """WhatsApp on or off: the dashboard's switch once used, else the config.
-    Read every cycle, since the heartbeat only reads its config at startup."""
+    Read every cycle, since the heartbeat only reads its config at startup.
+    Autopilot means Harvey runs WhatsApp by itself, day after day (owner,
+    2026-11-08): with autopilot on it is on, unless you switched it off."""
     value = (await state.get_setting(ENABLED_KEY) or "").strip().lower()
     if value in ("on", "off"):
         return value == "on"
-    return bool(config.channels.whatsapp.enabled)
+    return bool(config.channels.whatsapp.enabled) or await autopilot_on(state, config)
 
 
 def next_due(contact: dict, rows: list[dict], cfg, now: datetime) -> tuple[str, datetime | None]:
@@ -247,13 +252,31 @@ class WhatsAppAgent:
     async def _recipient_open(self, contact: dict) -> bool:
         return self.pacing.recipient_open(await recipient_zones(self.state, contact, self.config))
 
+    def _fresh(self, contact: dict) -> bool:
+        """Queued in the last FRESH_FIRST_HOURS: they were just chatting with us, so
+        their first message goes at once, whatever the hour (owner, 2026-11-08)."""
+        added = _parse(contact.get("created_at"))
+        return bool(added) and timedelta(0) <= self.now() - added < timedelta(hours=FRESH_FIRST_HOURS)
+
+    async def _may_send(self, contact: dict, kind: str) -> bool:
+        if kind == "first" and self._fresh(contact) and not contact.get("last_outbound_at"):
+            return True
+        return await self._recipient_open(contact)
+
+    async def fresh_waiting(self) -> bool:
+        """Someone who just chatted is still owed a first message."""
+        for contact in await self.state.wa_contacts(stages=("queued",)):
+            if self._fresh(contact) and not contact.get("last_outbound_at"):
+                return True
+        return False
+
     async def sendable_now(self) -> bool:
         """Something approved can go right now: its recipient's hours are open
         and the caps have room. This is why a run can start at any hour of
         yours: WhatsApp goes by the recipient's clock."""
         for item in await self.state.wa_messages(statuses=("approved",), direction="out", limit=200):
             contact = await self.state.wa_get_contact(item["contact_id"])
-            if contact and await self._recipient_open(contact) and \
+            if contact and await self._may_send(contact, item["kind"]) and \
                     not await self.pacing.blocked(item["kind"]):
                 return True
         return False
@@ -276,7 +299,8 @@ class WhatsAppAgent:
             if started and self.now() - started < timedelta(minutes=self.cfg.run_every_minutes):
                 return (f"the last WhatsApp run started at {started:%H:%M} UTC; the next one "
                         f"waits {self.cfg.run_every_minutes} minutes")
-        if (send_only or not self.pacing.in_hours()) and not await self.sendable_now():
+        if ((send_only or not self.pacing.in_hours()) and not await self.sendable_now()
+                and not (not send_only and await self.fresh_waiting())):
             return f"nothing can go now, and it's outside WhatsApp hours ({self.pacing.hours_text()})"
         return ""
 
@@ -601,7 +625,10 @@ class WhatsAppAgent:
         first_room = caps["first_today"] - used["first_today"] - sum(m["kind"] == "first" for m in waiting)
         room = caps["messages_today"] - used["messages_today"] - len(waiting)
         now = self.now()
-        for contact in await self.state.wa_contacts(stages=("queued", "messaged"), oldest_first=True):
+        contacts = await self.state.wa_contacts(stages=("queued", "messaged"), oldest_first=True)
+        # Someone who just chatted is written to first; the backlog after.
+        contacts.sort(key=lambda c: not self._fresh(c))
+        for contact in contacts:
             if room <= 0 or not self._time_left() or self._brain_paused():
                 break
             which = await self._next_due(contact, now)
@@ -735,8 +762,11 @@ class WhatsAppAgent:
 
     async def send_approved(self):
         order = {"reply": 0, "follow_up": 1, "first": 2}
+        fresh = {c["id"] for c in await self.state.wa_contacts(stages=("queued",)) if self._fresh(c)}
+        # Replies first, then someone who just chatted, then the rest in order.
         items = sorted(await self.state.wa_messages(statuses=("approved",), direction="out"),
-                       key=lambda m: (order.get(m["kind"], 3), m["created_at"] or ""))
+                       key=lambda m: (0.5 if m["contact_id"] in fresh else order.get(m["kind"], 3),
+                                      m["created_at"] or ""))
         for item in items:
             if not self._time_left():
                 break
@@ -756,7 +786,7 @@ class WhatsAppAgent:
             if why:
                 await self.state.wa_skip(item["id"], why)
                 continue
-            if not await self._recipient_open(contact):
+            if not await self._may_send(contact, item["kind"]):
                 continue
             blocked = await self.pacing.blocked(item["kind"])
             if blocked:

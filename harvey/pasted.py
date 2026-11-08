@@ -329,11 +329,13 @@ async def _whatsapp(state, config, lead: InboundLead, triaged) -> str:
     whatsapp = getattr(getattr(config, "channels", None), "whatsapp", None)
     if not getattr(whatsapp, "number", ""):
         return "not queued: no WhatsApp number is set up for Harvey"
+    from harvey import inbound as I
     from harvey.inbound import how_they_reached_us
     from harvey.whatsapp.contacts import queue_contact
     try:
         result = await queue_contact(state, phone=lead.phone, name=lead.name, email=lead.email,
-                                     context=triaged.summary, source=how_they_reached_us(lead),
+                                     context=I._whatsapp_context(lead, triaged),
+                                     source=how_they_reached_us(lead),
                                      country=lead.country, config=config)
     except ValueError as e:
         return f"not queued: {e}"

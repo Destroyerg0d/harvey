@@ -77,6 +77,7 @@ class InboundLead:
     has_whatsapp: bool = False
     country: str = ""
     city: str = ""
+    region: str = ""             # state or province, when the chat knew it
     directory: str = ""          # clutch, themanifest, ... when they came from one
     referrer: str = ""
     intent: str = ""
@@ -96,6 +97,12 @@ class InboundLead:
     website: str = ""
     origin: str = "website_chat"
     source_label: str = ""
+    # Their visit, from the chat widget's own record of it (crm_guest_sessions.source):
+    # the pages they read in order ("/path (Title)"), the page they opened the
+    # chat on, and the campaign tags they arrived with ("source/medium/campaign").
+    trail: list[str] = field(default_factory=list)
+    opened_on: str = ""
+    utm: str = ""
     # A chat you pasted (harvey/pasted.py): what their website shows, from
     # Harvey's profiler, and your note for Harvey on this email.
     site_facts: str = ""
@@ -136,11 +143,31 @@ def directory_in(*texts) -> str:
     return next((d for d in DIRECTORIES if d in flat), "")
 
 
+TRAIL_MAX = 15
+
+
+def _page(path, title="") -> str:
+    path = str(path or "").strip()[:160]
+    title = " ".join(str(title or "").split())[:90]
+    return f"{path} ({title})" if path and title else path
+
+
+def _utm_text(utm) -> str:
+    if not isinstance(utm, dict):
+        return ""
+    parts = [str(utm.get(k) or "").strip()[:60] for k in ("utm_source", "utm_medium", "utm_campaign",
+                                                           "source", "medium", "campaign")]
+    return "/".join(p for p in parts if p)[:160]
+
+
 def parse_source(raw) -> dict:
-    """``crm_guest_sessions.source`` as {referrer, intent, directory, entry_path}.
-    Usually JSON (or already a dict); a bare string like "marketing-site" is
-    kept as what it is. Anything unreadable gives empty fields."""
-    out = {"referrer": "", "intent": "", "directory": "", "entry_path": ""}
+    """``crm_guest_sessions.source`` as {referrer, intent, directory, entry_path,
+    trail, opened_on, utm}. Usually JSON (or already a dict); a bare string like
+    "marketing-site" is kept as what it is. Anything unreadable gives empty fields.
+    The chat widget writes ``path`` (the entry page), ``trail`` ([{p, t}], the
+    pages read in order), ``openedPath``/``openedTitle`` and ``utm``."""
+    out = {"referrer": "", "intent": "", "directory": "", "entry_path": "", "trail": [],
+           "opened_on": "", "utm": ""}
     data = raw
     if isinstance(raw, str):
         text = raw.strip()
@@ -164,7 +191,20 @@ def parse_source(raw) -> dict:
         if ("entry" in lowered or "landing" in lowered) and isinstance(value, str) and value.strip():
             out["entry_path"] = value.strip()[:200]
             break
+    if not out["entry_path"] and isinstance(data.get("path"), str):
+        out["entry_path"] = data["path"].strip()[:200]
+    trail = data.get("trail")
+    if isinstance(trail, list):
+        out["trail"] = [p for p in (_page(s.get("p"), s.get("t")) for s in trail if isinstance(s, dict)) if p]
+    out["opened_on"] = _page(data.get("openedPath"), data.get("openedTitle"))
+    out["utm"] = _utm_text(utm)
     return out
+
+
+def parse_region(value) -> str:
+    """The middle part of ``preferred_language`` ("CC|Region|City")."""
+    parts = [p.strip() for p in str(value or "").split("|")]
+    return parts[1][:80] if len(parts) >= 3 else ""
 
 
 def parse_place(value) -> tuple[str, str]:
@@ -279,6 +319,7 @@ def build_leads(threads: list[dict], sessions: list[dict], messages: list[dict])
         latest = pairs[0][0]
         country, city = parse_place(latest.get("preferred_language"))
         lead = InboundLead(email=email, country=country, city=city,
+                           region=parse_region(latest.get("preferred_language")),
                            ai_stage=str(latest.get("ai_stage") or "").strip(),
                            rep_name=str(latest.get("handling_rep_name") or "").strip(),
                            thread_ids=[str(t.get("id")) for t, _ in pairs if t.get("id")])
@@ -289,8 +330,12 @@ def build_leads(threads: list[dict], sessions: list[dict], messages: list[dict])
             lead.phone = lead.phone or str(session.get("phone") or "").strip()
             lead.converted = lead.converted or bool(session.get("is_converted"))
             source = parse_source(session.get("source"))
-            for name in ("referrer", "intent", "directory", "entry_path"):
+            for name in ("referrer", "intent", "directory", "entry_path", "opened_on", "utm"):
                 setattr(lead, name, getattr(lead, name) or source[name])
+            # The newest visit first (pairs are newest first): every page once.
+            for page in source["trail"]:
+                if page not in lead.trail and len(lead.trail) < TRAIL_MAX:
+                    lead.trail.append(page)
             rows += by_thread.get(str(thread.get("id") or ""), [])
             at = parse_time(thread.get("last_message_at"))
             if at and (newest is None or at > newest):

@@ -384,6 +384,10 @@ async def whatsapp_autopilot(request: Request):
     state = _state()
     await state.init_db()
     await state.set_setting(AUTOPILOT_KEY, "on" if mode == "autopilot" else "off")
+    if mode == "autopilot":
+        # Autopilot is Harvey running WhatsApp by itself: it switches the channel on too.
+        from harvey.agents.whatsapp_agent import ENABLED_KEY
+        await state.set_setting(ENABLED_KEY, "on")
     requeued = await state.wa_requeue_autopilot() if mode == "approval" else 0
     await state.log_action("whatsapp_mode", "dashboard", {"mode": mode, "requeued": requeued})
     return {"success": True, "mode": mode, "requeued": requeued}

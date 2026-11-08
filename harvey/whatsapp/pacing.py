@@ -71,6 +71,14 @@ async def recipient_zones(state, contact: dict, config=None) -> list[str]:
     return []
 
 
+
+# A cap of 0 means none. Kept a number so "cap - used" stays arithmetic.
+NO_CAP = 1_000_000
+
+
+def _cap(value: int) -> int:
+    return NO_CAP if not value else int(value)
+
 class WhatsAppPacing(Pacing):
     """``cfg`` is channels.whatsapp. Hours, delays and sleeping are LinkedIn's."""
 
@@ -100,10 +108,12 @@ class WhatsAppPacing(Pacing):
         return now - linked < timedelta(days=self.cfg.new_number_days)
 
     async def caps(self) -> dict:
+        """A cap of 0 in the config is no cap (NO_CAP, so the arithmetic still works):
+        for a number that is already warmed up and trusted."""
         c = self.cfg
         first = c.max_daily_first_messages_new if await self.is_new_number() else c.max_daily_first_messages
-        return {"first_today": first, "messages_today": c.max_daily_messages,
-                "messages_hour": c.max_messages_per_hour}
+        return {"first_today": _cap(first), "messages_today": _cap(c.max_daily_messages),
+                "messages_hour": _cap(c.max_messages_per_hour)}
 
     async def blocked(self, kind: str) -> str:
         """Why one more message of this kind can't go now, or ""."""

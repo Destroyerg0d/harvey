@@ -95,11 +95,13 @@ async def autopilot_on(state, config) -> bool:
 
 async def channel_on(state, config) -> bool:
     """LinkedIn on or off: the dashboard's switch once used, else the config.
-    Read every cycle, since the heartbeat only reads its config at startup."""
+    Read every cycle, since the heartbeat only reads its config at startup.
+    Autopilot means Harvey runs LinkedIn by itself, day after day (owner,
+    2026-11-08): with autopilot on it is on, unless you switched it off."""
     value = (await state.get_setting(ENABLED_KEY) or "").strip().lower()
     if value in ("on", "off"):
         return value == "on"
-    return bool(config.channels.linkedin.enabled)
+    return bool(config.channels.linkedin.enabled) or await autopilot_on(state, config)
 
 
 class SwitchedOff(Exception):

@@ -182,9 +182,10 @@ def test_source_as_json_text_a_dict_or_a_bare_string():
     assert from_text["referrer"] == "https://clutch.co/profile/x"
     assert from_text["entry_path"] == "/services/x/"
     assert parse_source({"utm": {"source": "the-manifest"}, "openedIntent": "Careers"}) == {
-        "referrer": "", "intent": "Careers", "directory": "themanifest", "entry_path": ""}
+        "referrer": "", "intent": "Careers", "directory": "themanifest", "entry_path": "",
+        "trail": [], "opened_on": "", "utm": "the-manifest"}
     assert parse_source("marketing-site") == {"referrer": "", "intent": "", "directory": "",
-                                              "entry_path": ""}
+                                              "entry_path": "", "trail": [], "opened_on": "", "utm": ""}
     assert parse_source("designrush")["directory"] == "designrush"
     for junk in (None, 7, "{not json", [], ""):
         assert parse_source(junk)["directory"] == ""
@@ -387,3 +388,17 @@ def test_known_people_reads_staff_and_clients_and_skips_a_table_it_cant_read(mon
     assert asyncio.run(client.known_people()) == {"staff@ours.example"}
     assert {table for _, table in seen} == {"profiles", "clients", "client_accounts"}
     assert {method for method, _ in seen} == {"GET"}
+
+
+def test_the_visit_is_read_from_the_widgets_source_record():
+    from harvey.collectors.erp_chat import parse_region, parse_source
+    source = {"path": "/", "openedPath": "/services/shopify/", "openedTitle": "Shopify builds",
+              "trail": [{"p": "/", "t": "Home"}, {"p": "/services/shopify/", "t": "Shopify builds"}],
+              "utm": {"utm_source": "google", "utm_medium": "cpc", "utm_campaign": "brand"},
+              "referrer": "https://www.google.com/"}
+    out = parse_source(source)
+    assert out["entry_path"] == "/"
+    assert out["trail"] == ["/ (Home)", "/services/shopify/ (Shopify builds)"]
+    assert out["opened_on"] == "/services/shopify/ (Shopify builds)"
+    assert out["utm"] == "google/cpc/brand"
+    assert parse_region("US|Texas|Austin") == "Texas" and parse_region("US") == ""

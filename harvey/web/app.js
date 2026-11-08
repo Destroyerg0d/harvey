@@ -3289,6 +3289,35 @@ const _chSeen = {linkedin: '', whatsapp: ''};
 const _chShown = {linkedin: CH_PAGE, whatsapp: CH_PAGE};
 const _chOpen = new Set();      // conversations showing all their messages
 
+// Tags for a LinkedIn or WhatsApp conversation, like the email tab's filters:
+// from the latest reply's intent, the person's stage and any draft waiting.
+const _chTag = {linkedin: 'all', whatsapp: 'all'};
+const chIntent = c => ((c.latest_in || {}).intent || '').toLowerCase();
+const chStage = c => ((c.lead || c.contact || {}).stage || '').toLowerCase();
+const chOursLast = c => { const t = c.thread || []; return !t.length || t[t.length - 1].direction !== 'in'; };
+const CH_TAGS = [
+  ['all', 'All', () => true],
+  ['needs', 'Needs you', c => (c.draft && c.draft.status === 'draft') || chIntent(c) === 'escalate' ||
+    chStage(c) === 'needs_review'],
+  ['interested', 'Interested', c => chIntent(c) === 'interested' || chStage(c) === 'warm'],
+  ['question', 'Question', c => chIntent(c) === 'question'],
+  ['objection', 'Objection', c => chIntent(c) === 'objection'],
+  ['meeting', 'Meeting', c => chStage(c) === 'meeting'],
+  ['not', 'Not interested', c => ['not_interested', 'unsubscribe'].includes(chIntent(c)) || chStage(c) === 'declined'],
+  ['wrong', 'Wrong person', c => chIntent(c) === 'wrong_person'],
+  ['replied', 'Replied', c => !!c.latest_in],
+  ['awaiting', 'Awaiting reply', c => chOursLast(c) && chStage(c) !== 'declined'],
+];
+
+function chSetTag(ch, tag) { _chTag[ch] = tag; _chShown[ch] = CH_PAGE; chDrawConvos(ch); }
+
+// The badges a card shows: its tags, other than All, Replied and Awaiting.
+function chTagBadges(c) {
+  return CH_TAGS.filter(t => !['all', 'replied', 'awaiting'].includes(t[0]) && t[2](c))
+    .map(t => '<span class="badge t-' + ({needs: 'waiting', interested: 'good', meeting: 'good', not: 'idle'}[t[0]] || 'note') +
+      '">' + escHtml(t[1]) + '</span>').join('');
+}
+
 function chLoad(ch) { return ch === 'linkedin' ? loadLinkedIn() : loadWhatsApp(); }
 function chData(ch) { return ch === 'linkedin' ? _li : _wa; }
 
@@ -3505,8 +3534,17 @@ function chDrawConvos(ch) {
       if (t === document.activeElement) focus = {id: t.id, start: t.selectionStart, end: t.selectionEnd};
     });
   }
-  const convos = data.conversations || [];
-  liEl(id, (ch === 'linkedin' ? liConvosHtml : waConvosHtml)(convos.slice(0, _chShown[ch])) + chMoreHtml(ch, convos.length));
+  const all = data.conversations || [];
+  const tag = CH_TAGS.find(t => t[0] === _chTag[ch]) || CH_TAGS[0];
+  const convos = all.filter(tag[2]);
+  const bar = '<div class="toolbar"><div class="segmented" role="group" aria-label="Filter conversations">' +
+    CH_TAGS.map(t => {
+      const n = all.filter(t[2]).length;
+      if (!n && t[0] !== 'all' && t[0] !== tag[0]) return '';
+      return '<button class="' + (t[0] === tag[0] ? 'on' : '') + '" aria-pressed="' + (t[0] === tag[0]) +
+        '" onclick="chSetTag(' + jsq(ch) + ',' + jsq(t[0]) + ')">' + t[1] + ' <span class="n">' + n + '</span></button>';
+    }).join('') + '</div></div>';
+  liEl(id, bar + (ch === 'linkedin' ? liConvosHtml : waConvosHtml)(convos.slice(0, _chShown[ch])) + chMoreHtml(ch, convos.length));
   Object.entries(kept).forEach(([key, value]) => {
     const t = document.getElementById(key);
     if (t && !t.disabled) t.value = value;
@@ -3682,7 +3720,7 @@ function liConvosHtml(convos) {
         '<button class="btn btn-ghost btn-sm" onclick="liStage(' + jsq(l.id) + ',\'declined\')">They said no</button>';
     return '<div class="convo-card"><div class="convo-head"><div><h3>' + liLeadLine(l) + '</h3>' +
       '<div class="sub">' + escHtml(l.headline || '') + (inbound ? ' · wrote ' + relTime(inbound.at) : '') + '</div></div>' +
-      '<div class="tags">' + (inbound && inbound.intent ? badge(inbound.intent) : '') + '</div></div>' +
+      '<div class="tags">' + (chTagBadges(c) || (inbound && inbound.intent ? badge(inbound.intent) : '')) + '</div></div>' +
       '<div class="thread">' + thread + draft + '</div>' +
       chReplyHtml('linkedin', l.id, c.reply_blocked, 'It goes through the queue, inside LinkedIn hours and the limits.') +
       '<div class="convo-actions">' + stageBtns + '</div></div>';
@@ -3927,10 +3965,10 @@ function waSummaryHtml(d) {
     card('Phone', d.linked ? 'Linked' : 'Not linked',
       (d.number ? '<b>' + escHtml(d.number) + '</b>' : 'no number set') +
       (d.linked ? ' since ' + relTime(d.linked_at) : '')) +
-    card('First messages today', mbxNum(u.first_today) + '<small> / ' + mbxNum(c.first_today) + '</small>',
-      d.new_number ? 'new number: the low limit for ' + mbxNum(d.new_number_days) + ' days' : 'after the ramp') +
-    card('All messages today', mbxNum(u.messages_today) + '<small> / ' + mbxNum(c.messages_today) + '</small>',
-      '<b>' + mbxNum(u.messages_hour) + '</b> of ' + mbxNum(c.messages_hour) + ' this hour') +
+    card('First messages today', mbxNum(u.first_today) + '<small> / ' + waCap(c.first_today) + '</small>',
+      d.new_number ? 'new number: the low limit for ' + mbxNum(d.new_number_days) + ' days' : 'no ramp') +
+    card('All messages today', mbxNum(u.messages_today) + '<small> / ' + waCap(c.messages_today) + '</small>',
+      '<b>' + mbxNum(u.messages_hour) + '</b> this hour' + (waCap(c.messages_hour) === 'no cap' ? '' : ' of ' + waCap(c.messages_hour))) +
     card('Waiting for you', mbxNum((d.drafts_waiting || 0) + (d.maybe_sent || 0)),
       d.maybe_sent ? mbxNum(d.maybe_sent) + ' may have gone out' : 'drafts to approve, edit or skip') +
     card('Last run', last.started ? relTime(last.started) : '&ndash;',
@@ -4034,7 +4072,7 @@ function waConvosHtml(convos) {
         '<button class="btn btn-ghost btn-sm" onclick="waStage(' + jsq(l.id) + ',\'declined\')">They said no</button>';
     return '<div class="convo-card"><div class="convo-head"><div><h3>' + waContactLine(l) + '</h3>' +
       '<div class="sub">' + escHtml(l.source || '') + (inbound ? ' · wrote ' + relTime(inbound.at) : '') + '</div></div>' +
-      '<div class="tags">' + (inbound && inbound.intent ? badge(inbound.intent) : '') + '</div></div>' +
+      '<div class="tags">' + (chTagBadges(c) || (inbound && inbound.intent ? badge(inbound.intent) : '')) + '</div></div>' +
       '<div class="thread">' + thread + draft + '</div>' +
       chReplyHtml('whatsapp', l.id, c.reply_blocked,
         'Under 80 words, no price, emoji or dash. It goes through the queue, inside their hours and the limits.') +
@@ -4085,13 +4123,16 @@ function waFunnelHtml(f) {
     'numbers to check: ' + mbxNum(f.needs_review) + '.</p>';
 }
 
+// A cap of 0 in the config is no cap: the server sends a very large number.
+function waCap(n) { return Number(n) >= 1000000 ? 'no cap' : mbxNum(n); }
+
 function waLimitsHtml(d) {
   const u = d.used || {}, c = d.caps || {}, last = d.last_run || {};
   const row = (k, v) => '<div class="figure"><span class="k">' + k + '</span><span class="v">' + v + '</span></div>';
   return '<div class="figures">' +
-    row('First messages today', mbxNum(u.first_today) + ' / ' + mbxNum(c.first_today)) +
-    row('All messages today', mbxNum(u.messages_today) + ' / ' + mbxNum(c.messages_today)) +
-    row('Messages this hour', mbxNum(u.messages_hour) + ' / ' + mbxNum(c.messages_hour)) +
+    row('First messages today', mbxNum(u.first_today) + ' / ' + waCap(c.first_today)) +
+    row('All messages today', mbxNum(u.messages_today) + ' / ' + waCap(c.messages_today)) +
+    row('Messages this hour', mbxNum(u.messages_hour) + ' / ' + waCap(c.messages_hour)) +
     row('When they go', 'their own daytime; unknown: ' + escHtml(d.hours) +
       (d.in_hours ? '' : ' <small class="muted">(outside now)</small>')) +
     row('Last run', last.started ? formatDate(last.started) : '&ndash;') +
@@ -4453,10 +4494,16 @@ async function inboundShowChat(email, btn, keep) {
   if (!(data && data.success)) { box.innerHTML = '<p class="muted">' + escHtml(failMsg(data, 'Couldn’t read the chat.')) + '</p>'; return; }
   if (!data.found) { box.innerHTML = '<p class="muted">The ERP has no chat for this address any more.</p>'; return; }
   const who = {visitor: escHtml(data.name || 'Them'), assistant: 'Our assistant', rep: 'Our team', notes: 'Notes'};
-  const meta = [data.city, data.country].filter(Boolean).join(', ') +
-    (data.entry_path ? ' · started on ' + data.entry_path : '') + (data.referrer ? ' · from ' + data.referrer : '');
+  const meta = [data.city, data.region, data.country].filter(Boolean).join(', ') +
+    (data.referrer ? ' · came from ' + data.referrer : '') + (data.utm ? ' · campaign ' + data.utm : '');
+  // Their visit, in order: what Harvey writes from.
+  const trail = (data.trail || []).length
+    ? '<div class="inb-trail"><b>Pages they read, in order</b><ol>' +
+      data.trail.map(p => '<li>' + escHtml(p) + '</li>').join('') + '</ol>' +
+      (data.opened_on ? '<p class="muted">Opened the chat on ' + escHtml(data.opened_on) + '</p>' : '') + '</div>'
+    : '';
   box.innerHTML = '<div class="thread inb-chat-lines" data-email="' + escHtml(email) + '">' +
-    (meta ? '<p class="muted">' + escHtml(meta) + '</p>' : '') +
+    (meta ? '<p class="muted">' + escHtml(meta) + '</p>' : '') + trail +
     (data.lines || []).map(l => '<div class="thread-msg ' + (l.who === 'visitor' ? 'received' : 'sent') + '"><div class="sender">' +
       (who[l.who] || escHtml(l.who)) + (l.at ? ' &middot; ' + relTime(l.at) : '') + '</div>' + escHtml(l.text) + '</div>').join('') +
     '</div>';

@@ -126,7 +126,8 @@ async def chat(env, email: str) -> dict:
     if lead is None:
         return {"found": False, "lines": []}
     return {"found": True, "name": lead.name, "phone": lead.phone, "country": lead.country,
-            "city": lead.city, "directory": lead.directory, "referrer": lead.referrer,
+            "city": lead.city, "region": lead.region, "trail": lead.trail, "opened_on": lead.opened_on,
+            "utm": lead.utm, "directory": lead.directory, "referrer": lead.referrer,
             "entry_path": lead.entry_path, "rep_name": lead.rep_name,
             "last_message_at": lead.last_message_at,
             "lines": [{"who": line.who, "text": line.text, "at": line.at} for line in lead.transcript]}

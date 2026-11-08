@@ -64,7 +64,7 @@ from harvey.collectors.erp_chat import (
 )
 from harvey.config import inbound_of, live_do_not_contact, operator_timezone
 from harvey.gate import (
-    MAX_BODY_WORDS, MAX_ESTIMATE_BODY_WORDS, allowed_link_domains, autopilot_review,
+    GIVEN, MAX_BODY_WORDS, MAX_ESTIMATE_BODY_WORDS, allowed_link_domains, autopilot_review,
     do_not_contact_match, pre_send_check,
 )
 from harvey.integrations.email_finder import verify_published_address
@@ -215,9 +215,11 @@ def _when(value) -> float:
 # ── The prefilter ──
 
 def prefilter(lead: InboundLead, own_domains=(), do_not_contact=(), rep_active_days: int = 14,
-              now: datetime | None = None) -> str:
+              now: datetime | None = None, everyone: bool = False) -> str:
     """Why this lead gets nothing, or "". Deterministic, and it costs nothing,
-    so it runs every time a lead is read. Reasons name no message text."""
+    so it runs every time a lead is read. Reasons name no message text.
+    ``everyone`` (inbound.everyone): a short chat and one a person on our side
+    handled are no longer reasons."""
     now = now or _utcnow()
     if _ours(_email_domain(lead.email), own_domains):
         return "our own domain"
@@ -230,14 +232,20 @@ def prefilter(lead: InboundLead, own_domains=(), do_not_contact=(), rep_active_d
     referrer = (lead.referrer or "").lower()
     if any(board in referrer for board in _JOB_BOARDS):
         return "looking for a job (came from a job board)"
-    if lead.visitor_words < MIN_VISITOR_WORDS:
+    if lead.visitor_words < MIN_VISITOR_WORDS and not everyone:
         return f"wrote under {MIN_VISITOR_WORDS} words"
     if lead.converted:
         return "already converted"
     last = parse_time(lead.last_human_at)
-    if last and now - last < timedelta(days=rep_active_days):
+    if last and now - last < timedelta(days=rep_active_days) and not everyone:
         return f"a person on our side was active in the last {rep_active_days} days"
     return ""
+
+
+# Triage categories that get the follow-up: a project, and with inbound.everyone
+# one triage couldn't place.
+def _emailed_categories(everyone: bool) -> tuple[str, ...]:
+    return ("project", "other") if everyone else ("project",)
 
 
 async def already_dealt_with(state, lead: InboundLead) -> str:
@@ -451,8 +459,9 @@ def _facts(lead: InboundLead, triaged: Triage) -> str:
              f"- What they want: {triaged.summary or 'see the conversation'}"]
     if lead.company:
         facts.append(f"- Company: {lead.company}")
-    if lead.city or lead.country:
-        facts.append(f"- Where they are: {', '.join(x for x in (lead.city, lead.country) if x)}")
+    if lead.city or lead.region or lead.country:
+        facts.append(f"- Where they are: {', '.join(x for x in (lead.city, lead.region, lead.country) if x)}")
+    facts += journey_facts(lead)
     if triaged.missing:
         facts.append(f"- What we still need to know: {triaged.missing}")
     if lead.entry_path:
@@ -469,6 +478,48 @@ def _facts(lead: InboundLead, triaged: Triage) -> str:
         # Yours, from the dashboard: trusted, unlike the conversation.
         facts.append(f"- The owner's note for this email (follow it): {lead.owner_note}")
     return "\n".join(facts)
+
+
+def journey_facts(lead: InboundLead) -> list[str]:
+    """Their visit, for the draft: how they found us and what they read, in
+    order. Pages are ours, so naming the one they read is fair; say it plainly
+    ("you were reading about ..."), never as surveillance."""
+    out = []
+    found = [x for x in (lead.directory and f"the {lead.directory} directory",
+                         lead.referrer and f"a link on {_host(lead.referrer)}",
+                         lead.utm and f"a campaign tagged {lead.utm}") if x]
+    if found:
+        out.append("- How they found us: " + "; ".join(found))
+    if lead.trail:
+        out.append("- Pages of our site they read, in order: " + " -> ".join(lead.trail))
+    if lead.opened_on:
+        out.append(f"- The page they were on when they opened the chat: {lead.opened_on}")
+    return out
+
+
+def journey_note(lead: InboundLead) -> str:
+    """One short line of the same, for the prospect's notes and WhatsApp."""
+    parts = []
+    if lead.trail:
+        pages = [p.split(" (")[0] for p in lead.trail]
+        parts.append(f"read {len(pages)} page{'s' if len(pages) != 1 else ''}: " + ", ".join(pages[:6]))
+    if lead.opened_on:
+        parts.append("opened the chat on " + lead.opened_on.split(" (")[0])
+    place = ", ".join(x for x in (lead.city, lead.region, lead.country) if x)
+    if place:
+        parts.append("in " + place)
+    return "; ".join(parts)[:300]
+
+
+def _host(url: str) -> str:
+    host = re.sub(r"^[a-z]+://", "", str(url or "").strip().lower()).split("/")[0]
+    return host.removeprefix("www.") or str(url)[:60]
+
+
+def _whatsapp_context(lead: InboundLead, triaged: Triage) -> str:
+    """What the WhatsApp draft knows about them: what they want, and their visit."""
+    visit = journey_note(lead)
+    return (triaged.summary or "") + (f" ({visit})" if visit else "")
 
 
 def _skills_with_private(brain) -> str:
@@ -632,15 +683,22 @@ class Plan:
 async def prepare_lead(state, brain, config, env, lead: InboundLead, triaged: Triage,
                        skills: str = "", check_address: bool = True) -> Plan:
     """Grade the address and write the email. Stores nothing (the free tiers'
-    counters aside); raises BrainUnavailable when the provider is down."""
+    counters aside); raises BrainUnavailable when the provider is down. With
+    inbound.everyone, an address they typed themselves that no verifier could
+    check is graded "given" and written to; one a verifier says doesn't exist
+    never is."""
     plan = Plan(lead=lead, triaged=triaged)
     plan.existing = await state.get_prospect_by_email(lead.email)
     allow_risky = bool(getattr(config.channels.email, "send_to_risky", False))
     sendable = ("verified", "risky") if allow_risky else ("verified",)
+    if inbound_of(config).everyone:
+        sendable += (GIVEN,)
     if plan.existing is not None and plan.existing.email_status in sendable:
         plan.grade = plan.existing.email_status
     elif check_address:
         plan.grade = await verify(lead, env, state)
+        if plan.grade == "guess" and GIVEN in sendable:
+            plan.grade = GIVEN
     if check_address and plan.grade not in sendable:
         if plan.grade == "invalid":
             plan.status, plan.why = INVALID, "the verifier says this address doesn't exist"
@@ -674,8 +732,9 @@ def _notes(lead: InboundLead, triaged: Triage) -> str:
     at = parse_time(lead.fingerprint)
     how = how_they_reached_us(lead)
     start = how[0].upper() + how[1:]
+    visit = journey_note(lead)
     return (f"{start}" + (f", {at:%Y-%m-%d}" if at else "") + ": "
-            + (triaged.summary or "see the Outbox draft"))[:500]
+            + (triaged.summary or "see the Outbox draft") + (f" ({visit})" if visit else ""))[:500]
 
 
 async def _set_notes(state, prospect_id: str, notes: str):
@@ -875,7 +934,8 @@ class InboundPipeline:
             return "one of our staff or an existing client"
         return prefilter(lead, own_domains=allowed_link_domains(self.config),
                          do_not_contact=live_do_not_contact(self.config),
-                         rep_active_days=self.settings.rep_active_days, now=self.now())
+                         rep_active_days=self.settings.rep_active_days, now=self.now(),
+                         everyone=self.settings.everyone)
 
     @property
     def skills(self) -> str:
@@ -997,10 +1057,13 @@ class InboundPipeline:
             return ("triage", None) if attempts < MAX_ATTEMPTS else ("done", None)
         if status == NO_DRAFT:
             return ("draft", Triage.from_record(record)) if attempts < MAX_ATTEMPTS else ("done", None)
-        if status == UNVERIFIED and retry_addresses:
+        if status == UNVERIFIED and (retry_addresses or self.settings.everyone):
             return "draft", Triage.from_record(record)
         if status == SKIPPED:     # whatever skipped them has passed
             return "triage", None
+        if (status == NOT_PROJECT and (record or {}).get("category") in
+                _emailed_categories(self.settings.everyone)):
+            return "draft", Triage.from_record(record)    # inbound.everyone was turned on since
         return "done", None
 
     async def _triage_one(self, lead: InboundLead, record: dict | None, report: dict,
@@ -1019,7 +1082,7 @@ class InboundPipeline:
                                   why="the model gave no usable answer")
             return None, attempts >= MAX_ATTEMPTS
         common = dict(last_message_at=lead.fingerprint, outbox_id="", attempts=0, **result.fields())
-        if result.category == "project":
+        if result.category in _emailed_categories(self.settings.everyone):
             report["triaged"] += 1
             if not dry_run:
                 await save_record(self.state, lead.email, now, status=TRIAGED, why="", **common)
@@ -1049,7 +1112,7 @@ class InboundPipeline:
         try:
             result = await queue_contact(
                 self.state, phone=lead.phone, name=lead.name, email=lead.email,
-                context=triaged.summary, source=how_they_reached_us(lead),
+                context=_whatsapp_context(lead, triaged), source=how_they_reached_us(lead),
                 country=lead.country, config=self.config)
         except Exception as e:
             logger.warning(f"Inbound: couldn't queue {lead.email} for WhatsApp: {e}")

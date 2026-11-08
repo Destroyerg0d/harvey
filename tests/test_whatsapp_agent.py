@@ -1164,3 +1164,49 @@ def test_the_learner_counts_whatsapp_results(tmp_path):
     assert data["groups"]["whatsapp.message"]["ok"] is True
     evidence, why = check_evidence("whatsapp", {"cells": ["whatsapp.message:first", "whatsapp.message:follow_up"]}, data)
     assert why == "" and evidence
+
+
+# ── Owner 2026-11-08: a warmed-up number, no caps, new chats at once ──
+
+def _added(w, contact_id, at):
+    async def go():
+        async with w.state._connect() as db:
+            await db.execute("UPDATE whatsapp_contacts SET created_at = ? WHERE id = ?",
+                             (naive(at).isoformat(), contact_id))
+            await db.commit()
+    run(go())
+
+
+def test_a_cap_of_zero_is_no_cap(tmp_path):
+    people = [Person(phone=f"+44770090010{i}") for i in range(7)]
+    w = World(tmp_path, people, max_daily_first_messages_new=0, max_daily_messages=0,
+              max_messages_per_hour=0)
+    for p in people:
+        w.approved(w.contact(phone=p.phone, name=""))
+    assert w.go()["sent"] == 7
+    assert run(w.agent().pacing.blocked("first")) == ""
+
+
+def test_someone_who_just_chatted_gets_their_first_message_at_any_hour(tmp_path):
+    w = World(tmp_path, [Person(phone=RAVI)])            # 00:00 in India
+    c = w.contact(phone=RAVI, country="IN", name="")
+    _added(w, c, OPEN - timedelta(minutes=20))
+    m = w.approved(c)
+    assert w.go()["sent"] == 1 and w.get(m)["status"] == "sent"
+
+
+def test_an_older_lead_still_waits_for_their_daytime(tmp_path):
+    w = World(tmp_path, [Person(phone=RAVI)])
+    c = w.contact(phone=RAVI, country="IN", name="")
+    _added(w, c, OPEN - timedelta(days=2))
+    m = w.approved(c)
+    assert w.go()["sent"] == 0 and w.get(m)["status"] == "approved"
+
+
+def test_a_fresh_lead_starts_a_run_outside_your_hours(tmp_path):
+    night = datetime(2026, 11, 4, 22, 0, tzinfo=timezone.utc)   # shut in London
+    w = World(tmp_path, [jane()], at=night)
+    c = w.contact()
+    assert "nothing can go" in run(w.agent().why_not_now())
+    _added(w, c, night - timedelta(minutes=10))
+    assert run(w.agent().why_not_now()) == ""

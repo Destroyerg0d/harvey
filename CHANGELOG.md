@@ -9,6 +9,27 @@ minor versions can still change behaviour.
 
 ### Added
 
+- **Every possible client from the website chat gets a follow-up** (`inbound.everyone`): short
+  chats, chats a person on our side handled, leads triage couldn't place (`other`, also ones
+  decided before it was turned on) and addresses the person typed that no verifier could check,
+  graded `given` (the gate lets only that follow-up through; cold staging never picks one). Job
+  seekers, vendors, spam, staff, clients and addresses that don't exist still don't; anyone
+  already emailed is held.
+- **The visitor's journey reaches the draft.** From the chat widget's record in the ERP
+  (`crm_guest_sessions.source`): the pages read in order with their titles, the page the chat was
+  opened on, campaign tags, and the region beside city and country. The follow-up's facts, the
+  prospect's notes and the WhatsApp context carry it, and View chat shows it. The entry page was
+  never read before (the widget calls it `path`).
+- **Autopilot runs LinkedIn and WhatsApp by itself.** With autopilot on, a channel is on unless you
+  switched it off, and turning autopilot on from the dashboard switches it on too.
+- **WhatsApp: a cap of 0 is no cap, and a new chat is messaged at once.** For a warmed-up number;
+  the tab and `harvey whatsapp status` say "no cap". Someone queued in the last 3 hours gets
+  their first message whatever the hour, drafted and sent before the backlog, and can start a run
+  outside the channel's hours.
+- **Tags on LinkedIn and WhatsApp conversations**, as on email: Needs you, Interested, Question,
+  Objection, Meeting, Not interested, Wrong person, Replied and Awaiting reply, each a filter with
+  its count and a badge on the card.
+
 - **Write your own email on any conversation, and Harvey sends it in the same thread.** A box on
   every Conversations card (`POST /api/conversations/{id}/reply`, `harvey/owner_reply.py`): it goes
   out from the conversation's mailbox with the thread's Gmail id and In-Reply-To the latest message

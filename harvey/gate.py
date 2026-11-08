@@ -38,6 +38,7 @@ MERGE_TAG_RE = re.compile(r"\{\{\s*\w+\s*\}\}|\{\s*\w+\s*\}(?!\})")
 URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 
 DELIVERABLE_STATUSES = {"verified", "risky"}
+GIVEN = "given"   # typed to us by the person themselves; no verifier could say
 
 
 @dataclass
@@ -203,7 +204,10 @@ def pre_send_check(
     if prospect is not None:
         if (prospect.email or "").strip().lower() != to_email:
             reasons.append("recipient does not match the prospect record")
-        allowed = DELIVERABLE_STATUSES if allow_risky else {"verified"}
+        # "given": an address the person typed to us themselves (the website
+        # chat) that no verifier could check. Only the inbound follow-up grades
+        # an address so, and cold staging never picks one (sender.py).
+        allowed = (DELIVERABLE_STATUSES if allow_risky else {"verified"}) | {GIVEN}
         # Replies go back to someone who emailed US — deliverability proven.
         if kind == "sequence" and (prospect.email_status or "guess") not in allowed:
             reasons.append(

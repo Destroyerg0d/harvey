@@ -199,3 +199,21 @@ def test_nobody_knows_where_they_are_so_the_channels_hours_apply(state):
     assert not pacing(state, at=shut).recipient_open([])
     ist = {"start": "10:00", "end": "19:00", "timezone": "Asia/Kolkata"}
     assert not pacing(state, hours=ist).recipient_open([])
+
+
+def test_no_cap_reads_as_none_and_never_blocks():
+    import asyncio
+    import tempfile
+    from pathlib import Path
+    from harvey.state import StateManager
+    from harvey.whatsapp.pacing import NO_CAP, WhatsAppPacing
+    from tests.whatsapp_fakes import make_config
+    with tempfile.TemporaryDirectory() as tmp:
+        state = StateManager(str(Path(tmp) / "h.db"))
+        asyncio.run(state.init_db())
+        cfg = make_config(max_daily_first_messages_new=0, max_daily_first_messages=0,
+                          max_daily_messages=0, max_messages_per_hour=0).channels.whatsapp
+        pacing = WhatsAppPacing(state, cfg)
+        caps = asyncio.run(pacing.caps())
+        assert set(caps.values()) == {NO_CAP}
+        assert asyncio.run(pacing.blocked("first")) == ""

@@ -648,7 +648,9 @@ def test_a_whatsapp_reply_of_yours_goes_through_the_whole_recipe(tmp_path):
 
 
 def test_a_whatsapp_reply_of_yours_waits_at_the_cap(tmp_path):
-    w, _, m = _wa_world_with_reply(tmp_path, max_daily_messages=0)
+    # A cap of 0 is no cap now (a warmed-up number), so spend a cap of 1 first.
+    w, _, m = _wa_world_with_reply(tmp_path, max_daily_messages=1)
+    run(w.agent().pacing.record("first"))
     w.go()
     assert w.get(m)["status"] == "approved" and w.driver.enter_presses == 0
 

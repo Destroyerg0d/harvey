@@ -1260,3 +1260,8 @@ a.btn, a.btn:hover { text-decoration: none; }
 }
 .guide-result { display: flex; align-items: center; gap: 6px; }
 .guide-result .icon, .lesson-offer .icon { width: 13px; height: 13px; flex: none; }
+.inb-trail { font-size: var(--fs-caption); color: var(--text-2); padding: 8px 12px; border-radius: 10px; background: var(--surface-2); }
+.inb-trail b { color: var(--text); }
+.inb-trail ol { margin: 4px 0 0 18px; padding: 0; }
+.inb-trail li { margin: 1px 0; overflow-wrap: anywhere; }
+.inb-trail p { margin: 6px 0 0; }

@@ -105,7 +105,7 @@ async def _add(args, config, state):
 async def _status(args, config, state):
     from harvey.agents.whatsapp_agent import LAST_RUN_KEY, autopilot_on, channel_on
     from harvey.whatsapp import guards
-    from harvey.whatsapp.pacing import WhatsAppPacing
+    from harvey.whatsapp.pacing import NO_CAP, WhatsAppPacing
     await state.init_db()
     cfg = config.channels.whatsapp
     pacing = WhatsAppPacing(state, cfg)
@@ -129,9 +129,11 @@ async def _status(args, config, state):
     if pause:
         print(f"  PAUSED: {pause.get('reason')}"
               + (f" (until {str(pause['until'])[:16]} UTC)" if pause.get("until") else ""))
-    print(f"  Today: {used['first_today']}/{caps['first_today']} first messages, "
-          f"{used['messages_today']}/{caps['messages_today']} in total, "
-          f"{used['messages_hour']}/{caps['messages_hour']} this hour")
+    def cap(n):
+        return "no cap" if n >= NO_CAP else n
+    print(f"  Today: {used['first_today']}/{cap(caps['first_today'])} first messages, "
+          f"{used['messages_today']}/{cap(caps['messages_today'])} in total, "
+          f"{used['messages_hour']}/{cap(caps['messages_hour'])} this hour")
     print(f"  Funnel: {funnel['contacts']} contacts, {funnel['messaged']} messaged, {funnel['replied']} replied, "
           f"{funnel['positive']} positive, {funnel['meetings']} meetings, {funnel['declined']} declined, "
           f"{funnel['no_whatsapp']} not on WhatsApp, {funnel['needs_review']} numbers to check")

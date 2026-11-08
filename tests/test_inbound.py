@@ -1423,3 +1423,80 @@ async def test_if_the_staff_list_cant_be_read_the_run_carries_on(state):
 
     pipe = I.InboundPipeline(Brain(), state, config(), None, reader=Broken([lead()]), now=lambda: NOW)
     assert (await pipe.run())["drafted"] == 1
+
+
+# ── inbound.everyone (owner 2026-11-08: every possible client gets the follow-up) ──
+
+def test_everyone_lets_short_and_rep_handled_chats_through_but_not_job_seekers():
+    short = lead(text="hi")
+    assert I.prefilter(short, now=NOW).startswith("wrote under")
+    assert I.prefilter(short, now=NOW, everyone=True) == ""
+    handled = lead(last_human_at=(NOW - timedelta(days=1)).isoformat())
+    assert I.prefilter(handled, now=NOW).startswith("a person on our side")
+    assert I.prefilter(handled, now=NOW, everyone=True) == ""
+    job = lead(intent="I want to get hired")
+    assert I.prefilter(job, now=NOW, everyone=True).startswith("looking for a job")
+
+
+@pytest.mark.asyncio
+async def test_everyone_emails_a_short_chat_and_one_triage_couldnt_place(state):
+    cfg = config(everyone=True)
+    report = await pipeline(state, [lead(text="hi")], cfg=cfg).run()
+    assert report["drafted"] == 1
+    other = await pipeline(state, [lead(email="bo@other-shop.example")], cfg=cfg,
+                           brain=Brain(triage={**TRIAGE, "category": "other"})).run()
+    assert other["drafted"] == 1
+    vendor = await pipeline(state, [lead(email="v@vendor-shop.example")], cfg=cfg,
+                            brain=Brain(triage={**TRIAGE, "category": "vendor"})).run()
+    assert vendor["drafted"] == 0 and vendor["not_project"] == 1
+
+
+@pytest.mark.asyncio
+async def test_without_everyone_a_short_chat_is_still_skipped(state):
+    report = await pipeline(state, [lead(text="hi")]).run()
+    assert report["drafted"] == 0
+
+
+@pytest.mark.asyncio
+async def test_turning_everyone_on_picks_up_leads_triage_couldnt_place(state):
+    brain = Brain(triage={**TRIAGE, "category": "other"})
+    await pipeline(state, [lead()], brain=brain).run()
+    assert (await I.get_record(state, BUSINESS))["status"] == I.NOT_PROJECT
+    report = await pipeline(state, [lead()], brain=brain, cfg=config(everyone=True)).run()
+    assert report["drafted"] == 1 and brain.calls("inbound_triage") == 1    # not triaged again
+
+
+@pytest.mark.asyncio
+async def test_an_address_no_verifier_could_check_is_given_and_written_to(state, verified):
+    verified.grade = "guess"
+    report = await pipeline(state, [lead()], cfg=config(everyone=True)).run()
+    assert report["drafted"] == 1
+    assert (await state.get_prospect_by_email(BUSINESS)).email_status == "given"
+    verified.grade = "invalid"
+    bad = await pipeline(state, [lead(email="no@nowhere-shop.example")], cfg=config(everyone=True)).run()
+    assert bad["drafted"] == 0 and bad["invalid"] == 1
+
+
+def test_the_gate_sends_to_a_given_address():
+    from harvey.gate import pre_send_check
+    person = SimpleNamespace(email=BUSINESS, email_status="given")
+    ok = pre_send_check(BUSINESS, "your new shop", GOOD_EMAIL["body"], prospect=person)
+    assert not any("not deliverable" in r for r in ok.reasons)
+    person.email_status = "guess"
+    assert any("not deliverable" in r for r in pre_send_check(
+        BUSINESS, "your new shop", GOOD_EMAIL["body"], prospect=person).reasons)
+
+
+# ── Their visit, from the ERP ──
+
+def test_the_draft_is_told_where_they_came_from_and_what_they_read(state):
+    visitor = lead(city="Austin", region="Texas", country="US", referrer="https://www.google.com/",
+                   utm="google/cpc/brand", trail=["/ (Home)", "/services/shopify/ (Shopify builds)"],
+                   opened_on="/services/shopify/ (Shopify builds)")
+    triaged = I.Triage.from_answer(TRIAGE)
+    facts = I._facts(visitor, triaged)
+    assert "Austin, Texas, US" in facts
+    assert "a link on google.com" in facts and "google/cpc/brand" in facts
+    assert "/ (Home) -> /services/shopify/ (Shopify builds)" in facts
+    assert "opened the chat: /services/shopify/" in facts
+    assert "read 2 pages: /, /services/shopify/" in I._notes(visitor, triaged)

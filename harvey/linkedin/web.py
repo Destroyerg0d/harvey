@@ -372,6 +372,10 @@ async def linkedin_autopilot(request: Request):
     state = _state()
     await state.init_db()
     await state.set_setting(AUTOPILOT_KEY, "on" if mode == "autopilot" else "off")
+    if mode == "autopilot":
+        # Autopilot is Harvey running LinkedIn by itself: it switches the channel on too.
+        from harvey.agents.linkedin_agent import ENABLED_KEY
+        await state.set_setting(ENABLED_KEY, "on")
     requeued = await state.li_requeue_autopilot() if mode == "approval" else 0
     await state.log_action("linkedin_mode", "dashboard", {"mode": mode, "requeued": requeued})
     return {"success": True, "mode": mode, "requeued": requeued}
