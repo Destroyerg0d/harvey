@@ -100,8 +100,18 @@ def signed_in_from(url: str, html: str) -> bool:
     if first in SIGNED_OUT_PATHS or first == "checkpoint":
         return False
     s = soup_of(html)
-    return bool(s.select_one("#global-nav, .global-nav, .global-nav__me, "
-                             "[data-test-global-nav-link], header.global-nav__content"))
+    if s.select_one("#global-nav, .global-nav, .global-nav__me, "
+                    "[data-test-global-nav-link], header.global-nav__content"):
+        return True
+    # LinkedIn's newer layout (seen 2026-11-08) has none of those: its top bar
+    # still links to My Network and Messaging, which a signed-out page doesn't,
+    # and no sign-in form is on the page.
+    if s.select_one(LOGIN_FORM):
+        return False
+    return bool(s.select_one("a[href*='/mynetwork/']") and s.select_one("a[href*='/messaging/']"))
+
+
+LOGIN_FORM = "form.login__form, input#username, input[name='session_key'], input[name='session_password']"
 
 
 # ── Messaging ──

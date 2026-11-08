@@ -121,3 +121,37 @@ def test_slugs_and_signed_in():
     assert not pages.signed_in_from("https://www.linkedin.com/feed/", "<form class='login__form'></form>")
     # A profile whose slug starts with "login" is still a profile.
     assert pages.signed_in_from("https://www.linkedin.com/in/loginov/", nav)
+
+
+# LinkedIn's newer layout (seen 2026-11-08): no #global-nav, but its top bar links
+# to My Network and Messaging. The old check kept a signed-in owner "waiting".
+NEW_TOP_BAR = ("<header><nav><a href='https://www.linkedin.com/feed/'>Home</a>"
+               "<a href='https://www.linkedin.com/mynetwork/'>My Network</a>"
+               "<a href='https://www.linkedin.com/messaging/'>Messaging</a></nav></header>")
+
+
+def test_the_newer_layout_counts_as_signed_in():
+    assert pages.signed_in_from("https://www.linkedin.com/feed/foryou/", NEW_TOP_BAR)
+    assert not pages.signed_in_from("https://www.linkedin.com/login", NEW_TOP_BAR)
+    with_form = NEW_TOP_BAR + "<form><input name='session_key'></form>"
+    assert not pages.signed_in_from("https://www.linkedin.com/feed/", with_form)
+    assert not pages.signed_in_from("https://www.linkedin.com/feed/", "<a href='/mynetwork/'>x</a>")
+
+
+def test_the_session_cookie_settles_a_layout_harvey_doesnt_know():
+    import asyncio
+    from types import SimpleNamespace
+    from harvey.linkedin.session import is_signed_in
+
+    def driver(url, cookies):
+        async def html():
+            return "<main>a page Harvey has never seen</main>"
+        async def cookie_list(_url):
+            return cookies
+        return SimpleNamespace(url=url, html=html,
+                               page=SimpleNamespace(context=SimpleNamespace(cookies=cookie_list)))
+    signed = [{"name": "li_at", "value": "x"}]
+    assert asyncio.run(is_signed_in(driver("https://www.linkedin.com/feed/", signed)))
+    assert not asyncio.run(is_signed_in(driver("https://www.linkedin.com/feed/", [])))
+    assert not asyncio.run(is_signed_in(driver("https://www.linkedin.com/checkpoint/challenge", signed)))
+    assert not asyncio.run(is_signed_in(driver("https://www.linkedin.com/login", signed)))

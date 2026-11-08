@@ -22,7 +22,7 @@ import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from harvey.linkedin.pages import LOGIN_URL, signed_in_from
+from harvey.linkedin.pages import LOGIN_URL, SIGNED_OUT_PATHS, path_segments, signed_in_from
 from harvey.paths import PROJECT_ROOT
 
 logger = logging.getLogger("harvey.linkedin")
@@ -238,10 +238,30 @@ async def open_session(cfg, headless: bool | None = None, **context_options):
         await pw.stop()
 
 
-async def is_signed_in(driver) -> bool:
-    """Whether the profile is signed in, judged from the page it is on."""
+async def has_session_cookie(driver) -> bool:
+    """LinkedIn's own session cookie (li_at) is in the profile: it exists only
+    while signed in, whatever the page looks like."""
+    page = getattr(driver, "page", None)
+    if page is None:
+        return False
     try:
-        return signed_in_from(driver.url, await driver.html())
+        cookies = await page.context.cookies("https://www.linkedin.com")
+    except Exception:
+        return False
+    return any(c.get("name") == "li_at" and c.get("value") for c in cookies)
+
+
+async def is_signed_in(driver) -> bool:
+    """Whether the profile is signed in: the page is LinkedIn's signed-in app,
+    or (a layout Harvey doesn't know) the session cookie is there and the page
+    isn't a sign-in, sign-up or challenge page."""
+    try:
+        if signed_in_from(driver.url, await driver.html()):
+            return True
+        first, _ = path_segments(driver.url)
+        if first in SIGNED_OUT_PATHS or first in ("checkpoint", "challenge"):
+            return False
+        return await has_session_cookie(driver)
     except Exception:
         return False
 

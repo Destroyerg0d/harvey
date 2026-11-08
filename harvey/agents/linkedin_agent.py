@@ -298,7 +298,8 @@ class LinkedInAgent:
 
     async def _check_signed_in(self):
         html = await self._visit(FEED_URL, pause=False)
-        if not signed_in_from(self.driver.url, html):
+        from harvey.linkedin.session import has_session_cookie
+        if not signed_in_from(self.driver.url, html) and not await has_session_cookie(self.driver):
             breaker = guards.Breaker("signed_out", guards.REASONS["signed_out"], self.driver.url)
             await guards.trip(self.state, breaker)
             raise BreakerTripped(breaker)
