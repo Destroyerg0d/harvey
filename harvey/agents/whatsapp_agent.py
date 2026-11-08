@@ -44,8 +44,8 @@ from harvey.whatsapp.guards import Breaker, BreakerTripped, active_pause, detect
 from harvey.whatsapp.numbers import digits_of
 from harvey.whatsapp.pacing import WhatsAppPacing, recipient_zones
 from harvey.whatsapp.pages import (
-    CHAT_LIST, COMPOSER, HOME_URL, app_ready, chat_is_for, chat_open, invalid_number,
-    parse_chat_list, parse_messages, send_url,
+    CHAT_LIST, COMPOSER, HOME_URL, POPOVER_CLOSE, app_ready, chat_is_for, chat_open, invalid_number,
+    parse_chat_list, parse_messages, send_url, tip_showing,
 )
 from harvey.whatsapp.store import HELD_FOR_REVIEW, HOLDING_STATUSES
 
@@ -415,6 +415,14 @@ class WhatsAppAgent:
                 await self.driver.wait(self.rng.uniform(2, 4))
                 html = await self.driver.html()
                 await self._guard(html)
+                if tip_showing(html) and hasattr(self.driver, "click"):
+                    # A new-feature tip: close it, so nothing floats over what is typed.
+                    await self.driver.click(POPOVER_CLOSE)
+                    await self.driver.wait(self.rng.uniform(0.8, 1.6))
+                    html = await self.driver.html()
+                    await self._guard(html)
+                    if not chat_open(html):
+                        continue
                 return "open", html
             await self.driver.wait(2)
         return "timeout", html

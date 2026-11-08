@@ -30,6 +30,13 @@ CHAT_LIST = "#pane-side"
 QR_CODE = "canvas[aria-label*='QR' i], [data-testid='qrcode'], [data-ref] canvas, div[data-ref]"
 # A modal on top of everything ("Starting chat...", the invalid-number notice).
 DIALOG = "[role='dialog'], [role='alertdialog'], [data-animate-modal-popup='true']"
+# WhatsApp's tips and new-feature notes ("Now you can make voice and video calls
+# on WhatsApp Web") float in their own layer, anchored to a button. They are
+# role=dialog too, but cover nothing: seen live 2026-11-08, it made every chat
+# look blocked. They have a Close button, which Harvey presses before typing.
+POPOVERS_ID = "wa-popovers-bucket"
+POPOVER_CLOSE = (f"#{POPOVERS_ID} [role='dialog'] button[aria-label='Close'], "
+                 f"#{POPOVERS_ID} [role='dialog'] [data-testid$='-close']")
 # The open chat.
 CHAT_PANE = "#main"
 CHAT_FOOTER = "#main footer"
@@ -99,11 +106,21 @@ def invalid_number(html: str) -> bool:
     return False
 
 
+def blocking_dialogs(soup) -> list:
+    """Dialogs that can be on top of the chat: every one but a tip in the popover layer."""
+    return [d for d in soup.select(DIALOG) if not d.find_parent(id=POPOVERS_ID)]
+
+
 def chat_open(html: str) -> bool:
     """A chat is open and nothing is on top of it: no dialog ("Starting
-    chat..." or anything else), and the composer is there."""
+    chat..." or anything else but a tip), and the composer is there."""
     s = soup_of(html)
-    return not s.select_one(DIALOG) and bool(s.select_one(COMPOSER))
+    return not blocking_dialogs(s) and bool(s.select_one(COMPOSER))
+
+
+def tip_showing(html: str) -> bool:
+    """A tip with a Close button is up (it's closed before anything is typed)."""
+    return bool(soup_of(html).select_one(POPOVER_CLOSE))
 
 
 # ── Which chat is this? ──

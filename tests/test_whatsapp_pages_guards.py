@@ -250,3 +250,19 @@ def test_a_pause_expires_and_clearing_starts_the_failure_count_again(tmp_path):
     assert asyncio.run(guards.clear_pause(state))
     assert asyncio.run(state.get_setting(guards.FAILED_KEY)) == "0"
     assert asyncio.run(guards.active_pause(state)) is None
+
+
+TIP = ('<div id="wa-popovers-bucket"><div><div data-testid="voip-calling-nux-tooltip" role="dialog">'
+       '<div><div>Now you can make voice and video calls on WhatsApp</div>'
+       '<button role="button" aria-label="Close" data-testid="voip-calling-nux-close"></button>'
+       '</div></div></div></div>')
+
+
+def test_a_new_feature_tip_doesnt_block_the_chat_but_a_real_dialog_still_does():
+    """Seen live 2026-11-08: WhatsApp Web's calling tip is role=dialog in its popover
+    layer, and made every chat look blocked. It covers nothing; it is closed first."""
+    from harvey.whatsapp.pages import tip_showing
+    page = chat(extra=TIP)
+    assert chat_open(page) and tip_showing(page)
+    assert not chat_open(chat(extra=TIP + '<div role="dialog">Starting chat</div>'))
+    assert not tip_showing(chat())
