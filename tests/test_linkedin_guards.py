@@ -84,3 +84,28 @@ def test_signed_out_waits_for_a_sign_in_and_login_clears_only_that(tmp_path):
     assert not asyncio.run(guards.clear_pause(state, kinds=("signed_out",)))
     assert asyncio.run(guards.active_pause(state))["kind"] == "challenge"
     assert asyncio.run(guards.clear_pause(state))
+
+
+# Seen live 2026-11-08: LinkedIn's messaging pages carry Google's invisible reCAPTCHA,
+# which paused LinkedIn for 48 hours on an ordinary thread.
+INVISIBLE_RECAPTCHA = (
+    "<iframe title='reCAPTCHA' src='https://www.google.com/recaptcha/enterprise/anchor?ar=1&k=x&size=invisible'>"
+    "</iframe><div class='grecaptcha-badge' style='display: none;'><div class='grecaptcha-logo'></div>"
+    "<div class='grecaptcha-error'></div><textarea id='g-recaptcha-response-100000' "
+    "class='g-recaptcha-response'></textarea></div>")
+
+
+def test_the_invisible_recaptcha_is_not_a_security_check():
+    from harvey.linkedin.guards import detect_breaker
+    assert detect_breaker("https://www.linkedin.com/messaging/thread/x/", INVISIBLE_RECAPTCHA) is None
+
+
+def test_a_check_someone_has_to_pass_still_stops_it():
+    from harvey.linkedin.guards import detect_breaker
+    thread = "https://www.linkedin.com/messaging/thread/x/"
+    for page in (INVISIBLE_RECAPTCHA + "<iframe src='https://www.google.com/recaptcha/enterprise/bframe?k=x'></iframe>",
+                 "<iframe src='https://www.google.com/recaptcha/api2/anchor?k=x&size=normal'></iframe>",
+                 "<div id='captcha-internal'></div>",
+                 "<iframe src='https://client-api.arkoselabs.com/fc/x'></iframe>"):
+        breaker = detect_breaker(thread, page)
+        assert breaker is not None and breaker.kind == "challenge", page[:60]

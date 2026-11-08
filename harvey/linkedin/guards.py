@@ -74,6 +74,30 @@ def _breaker(kind: str, url: str, detail: str = "") -> Breaker:
     return Breaker(kind=kind, reason=reason, url=url)
 
 
+# Google's invisible reCAPTCHA, on LinkedIn's messaging pages since late 2026
+# (seen live 2026-11-08, where it paused LinkedIn for 48 hours on an ordinary
+# thread): a background score with nothing to solve. Its anchor frame
+# (size=invisible), hidden badge and response field are plumbing, not a check.
+_RECAPTCHA_PLUMBING = {"grecaptcha-badge", "grecaptcha-logo", "grecaptcha-error", "g-recaptcha-response"}
+# A check someone has to pass: the image challenge frame, LinkedIn's own, Arkose.
+_REAL_CHECK = ("#captcha-internal, iframe[src*='challenge'], iframe[src*='bframe'], "
+               "iframe[src*='arkoselabs'], iframe[src*='funcaptcha']")
+
+
+def _captcha_on_page(s) -> bool:
+    if s.select_one(_REAL_CHECK):
+        return True
+    for el in s.select("iframe[src*='captcha'], [id*='captcha'], [class*='captcha']"):
+        if set(el.get("class") or []) & _RECAPTCHA_PLUMBING or el.find_parent(class_="grecaptcha-badge"):
+            continue
+        if str(el.get("id") or "").startswith("g-recaptcha-response"):
+            continue
+        if el.name == "iframe" and "size=invisible" in str(el.get("src") or ""):
+            continue
+        return True       # a visible checkbox, or a captcha Harvey doesn't know: stop
+    return False
+
+
 def detect_breaker(url: str, html: str) -> Breaker | None:
     """The breaker this page is, or None."""
     first, segments = path_segments(url)
@@ -83,8 +107,7 @@ def detect_breaker(url: str, html: str) -> Breaker | None:
         return _breaker("signed_out", url)
 
     s = soup_of(html)
-    if s.select_one("iframe[src*='captcha'], #captcha-internal, [id*='captcha'], "
-                    "[class*='captcha'], iframe[src*='challenge']"):
+    if _captcha_on_page(s):
         return _breaker("challenge", url)
     for el in s.select(_USER_TEXT):
         el.decompose()
