@@ -63,3 +63,32 @@ async def test_each_cycle_searches_the_next_pair(monkeypatch):
         await s._prospect_via_map()
     assert calls == [("osm", "Home Decor & Furniture", "London", 0.0),
                      ("osm", "Home Decor & Furniture", "Manchester", 0.0)]
+
+
+@pytest.mark.asyncio
+async def test_web_discovery_drops_directories_before_looking_for_contacts(monkeypatch):
+    s = S.Scout.__new__(S.Scout)
+    s.config = cfg(["Home Decor & Furniture"], ["United Kingdom"])
+    looked = []
+
+    async def found():
+        return [{"domain": "f6s.com", "name": "F6S"}, {"domain": "sample-shop.example", "name": "Sample"}]
+
+    async def none():
+        return []
+
+    async def ensure(**kw):
+        looked.append(kw["domain"])
+        return "c1"
+
+    async def contacts(**kw):
+        return []
+    s._find_companies_via_search, s._find_companies_via_directories = found, none
+    s._ensure_company = ensure
+    s._contacts_from_company = contacts
+    monkeypatch.setattr(S.Scout, "_domain_to_name", lambda self, d: d, raising=False)
+    try:
+        await s._prospect_via_company_discovery()
+    except Exception:
+        pass
+    assert "f6s.com" not in looked and "sample-shop.example" in looked

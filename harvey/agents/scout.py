@@ -1063,6 +1063,11 @@ class Scout:
             if not domain or domain in seen:
                 continue
             seen.add(domain)
+            # Directories, marketplaces, startup databases and press are never a
+            # prospect (discover.is_junk); seen live 2026-11-08, one got as far
+            # as a verified inbox, spending a check the month can't spare.
+            if is_junk(domain, c.get("name") or ""):
+                continue
             unique.append(c)
         companies = unique[:MAX_COMPANIES_PER_CYCLE]
 
