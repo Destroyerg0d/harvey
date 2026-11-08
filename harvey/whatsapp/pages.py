@@ -52,6 +52,13 @@ COMPOSER = ("#main footer [contenteditable='true'][role='textbox'], "
 MESSAGE = "#main [data-id]"
 MESSAGE_OUT = ".message-out"
 MESSAGE_IN = ".message-in"
+# WhatsApp Web's newer layout (seen live 2026-11-08) has no message-in/out
+# classes and a bare hex data-id. Ours carry a hidden "You:" label (and the first
+# of a run a tail-out icon); theirs the sender's own label, or a tail-in icon.
+MESSAGE_OUT_MARK = "span[aria-label='You:'], [data-icon='tail-out'], [data-testid='tail-out']"
+MESSAGE_IN_MARK = "[data-icon='tail-in'], [data-testid='tail-in']"
+SENDER_LABEL = "[data-testid='msg-container'] span[aria-label]"
+SYSTEM_MESSAGE = "[data-testid='system_message']"
 MESSAGE_TEXT = "[data-testid='selectable-text'], span.selectable-text"
 MESSAGE_QUOTE = "[data-testid='quoted-message'], .quoted-mention"
 MESSAGE_PENDING = "[data-icon='msg-time']"
@@ -163,6 +170,15 @@ class ChatMessage:
     text: bool = True      # False: a photo, voice note or file with no text
 
 
+def _their_label(row) -> bool:
+    """The bubble's hidden sender label is someone else's ("Jane:", "+44 ...:")."""
+    for el in row.select(SENDER_LABEL):
+        label = clean_text(el.get("aria-label") or "")
+        if label.endswith(":") and label != "You:":
+            return True
+    return False
+
+
 def _body_of(element) -> str:
     for quote in element.select(MESSAGE_QUOTE):
         quote.decompose()
@@ -183,8 +199,12 @@ def parse_messages(html: str) -> list[ChatMessage]:
         if row.find_parent(attrs={"data-id": True}) is not None:
             continue
         wa_id = row.get("data-id") or ""
-        is_out = bool(row.select_one(MESSAGE_OUT)) or "message-out" in (row.get("class") or [])
-        is_in = bool(row.select_one(MESSAGE_IN)) or "message-in" in (row.get("class") or [])
+        if row.select_one(SYSTEM_MESSAGE):
+            continue      # WhatsApp's own notices (encryption, missed calls)
+        is_out = (bool(row.select_one(MESSAGE_OUT)) or "message-out" in (row.get("class") or [])
+                  or bool(row.select_one(MESSAGE_OUT_MARK)))
+        is_in = (bool(row.select_one(MESSAGE_IN)) or "message-in" in (row.get("class") or [])
+                 or bool(row.select_one(MESSAGE_IN_MARK)) or _their_label(row))
         if is_out == is_in:
             continue
         pending = bool(row.select_one(MESSAGE_PENDING))

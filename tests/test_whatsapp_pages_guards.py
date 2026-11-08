@@ -266,3 +266,33 @@ def test_a_new_feature_tip_doesnt_block_the_chat_but_a_real_dialog_still_does():
     assert chat_open(page) and tip_showing(page)
     assert not chat_open(chat(extra=TIP + '<div role="dialog">Starting chat</div>'))
     assert not tip_showing(chat())
+
+
+# WhatsApp Web's newer bubbles (seen live 2026-11-08): a bare hex data-id, no
+# message-in/out classes; ours carry a hidden "You:" label and a tail-out icon.
+NEW_OUT = ('<div data-id="3EB0AAAA1111" data-testid="conv-msg-3EB0AAAA1111">'
+           '<div data-testid="msg-container"><span data-testid="tail-out" data-icon="tail-out"></span>'
+           '<span aria-label="You:"></span><div class="copyable-text">'
+           '<span data-testid="selectable-text" class="selectable-text copyable-text"><span>{text}</span></span>'
+           '</div><div data-testid="msg-meta"><span aria-label=" Sent "></span></div></div></div>')
+NEW_IN = ('<div data-id="3EB0BBBB2222"><div data-testid="msg-container">'
+          '<span aria-label="Jane Doe:"></span><div class="copyable-text">'
+          '<span data-testid="selectable-text" class="selectable-text"><span>{text}</span></span>'
+          '</div></div></div>')
+SYSTEM = ('<div data-id="3EB0CCCC3333"><div><div data-testid="msg-notification-container">'
+          '<span data-testid="system_message"><span dir="ltr">Messages are end-to-end encrypted.</span>'
+          '</span></div></div></div>')
+
+
+def test_the_newer_bubbles_are_read_by_their_labels():
+    page = chat(rows=SYSTEM + NEW_IN.format(text="Is it still available?") + NEW_OUT.format(text="Yes, it is."))
+    msgs = parse_messages(page)
+    assert [(m.direction, m.body, m.pending) for m in msgs] == [
+        ("in", "Is it still available?", False), ("out", "Yes, it is.", False)]
+    assert msgs[1].wa_id == "3EB0AAAA1111"
+
+
+def test_a_newer_bubble_with_no_label_is_left_out():
+    unlabelled = ('<div data-id="3EB0DDDD4444"><div data-testid="msg-container"><span data-testid='
+                  '"selectable-text" class="selectable-text"><span>who wrote this?</span></span></div></div>')
+    assert parse_messages(chat(rows=unlabelled)) == []
