@@ -201,3 +201,22 @@ compliance:
 # every email to 220 words and one link. skills/email_rules.md is gitignored.
 # writer:
 #   email_rules: "skills/email_rules.md"
+
+# Someone who writes about a job, on any channel, gets one short reply naming
+# these and nothing after it; someone selling to you gets no reply at all
+# (harvey/careers.py). Both empty: job seekers get no reply either.
+careers:
+  email: ""            # e.g. "hr@yourcompany.example"
+  linkedin_url: ""     # e.g. "https://www.linkedin.com/company/yourcompany"
+
+# The site review someone gets when they say yes to "want me to write up the
+# changes I'd make first?" (harvey/site_review.py): their home page tested in
+# headless Chrome as a phone on 4G, two or three fixes with the measured
+# numbers, and a 15-minute call link (product.offer.booking_url). Each waits
+# for your approval until you turn on reviews autopilot on the Outbox tab.
+# PAGESPEED_API_KEY in .env (free) adds Google PageSpeed Insights scores and
+# real-visitor data; without a key that API is usually over its shared quota.
+site_review:
+  enabled: true
+  pagespeed: true
+  timeout_seconds: 90

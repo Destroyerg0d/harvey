@@ -1130,6 +1130,70 @@ async def set_sending_mode(request: Request):
     return out
 
 
+@app.get("/api/reviews")
+async def get_reviews():
+    """Site reviews (harvey/site_review.py): whether they go on their own, and
+    how many wait for you, went out, or couldn't be written."""
+    from harvey.site_review import REVIEW_ANGLE, REVIEW_AUTOPILOT_KEY
+    state = _state()
+    await state.init_db()
+    async with aiosqlite.connect(state.db_path, timeout=30) as db:
+        async with db.execute("SELECT status, COUNT(*) FROM outbox WHERE angle = ? GROUP BY status",
+                              (REVIEW_ANGLE,)) as cursor:
+            email = {status: n for status, n in await cursor.fetchall()}
+        async with db.execute(
+                "SELECT details_json FROM actions WHERE action_type = 'site_review' "
+                "ORDER BY created_at DESC LIMIT 200") as cursor:
+            logged = [r[0] for r in await cursor.fetchall()]
+    failed = 0
+    for raw in logged:
+        try:
+            failed += not json.loads(raw or "{}").get("ok")
+        except ValueError:
+            pass
+    return {"autopilot": (await state.get_setting(REVIEW_AUTOPILOT_KEY) or "") == "on",
+            "email": {"waiting": email.get("pending_review", 0), "approved": email.get("approved", 0),
+                      "sent": email.get("sent", 0)},
+            "not_written": failed}
+
+
+@app.post("/api/reviews/autopilot")
+async def set_reviews_autopilot(request: Request):
+    """{"on": true, "confirm": "reviews"} lets site reviews go without your
+    approval (still checked for planted links); {"on": false} holds them again,
+    and sends back to you any that autopilot approved and hasn't sent."""
+    from harvey.site_review import HELD_REASON, REVIEW_ANGLE, REVIEW_AUTOPILOT, REVIEW_AUTOPILOT_KEY
+    from harvey.state import HELD_FOR_REVIEW
+    try:
+        body = await request.json()
+    except ValueError:
+        body = None
+    if not isinstance(body, dict) or not isinstance(body.get("on"), bool):
+        return _refuse('expected {"on": false} or {"on": true, "confirm": "reviews"}', 400)
+    if body["on"] and body.get("confirm") != "reviews":
+        return _refuse('Type "reviews" to confirm: site reviews will go out without you reading them.', 400)
+    state = _state()
+    await state.init_db()
+    requeued = 0
+    if body["on"]:
+        await state.set_setting(REVIEW_AUTOPILOT_KEY, "on")
+    else:
+        await state.delete_setting(REVIEW_AUTOPILOT_KEY)
+        async with aiosqlite.connect(state.db_path, timeout=30) as db:
+            cursor = await db.execute(
+                "UPDATE outbox SET status = 'pending_review', approved_by = '', error = ? "
+                "WHERE angle = ? AND status = 'approved' AND approved_by = ?",
+                ((HELD_FOR_REVIEW + HELD_REASON)[:300], REVIEW_ANGLE, REVIEW_AUTOPILOT))
+            requeued = cursor.rowcount
+            await db.execute(
+                "UPDATE linkedin_messages SET status = 'draft', approved_by = '', error = ? "
+                "WHERE status = 'approved' AND approved_by = ?",
+                ((HELD_FOR_REVIEW + HELD_REASON)[:300], REVIEW_AUTOPILOT))
+            await db.commit()
+    await state.log_action("reviews_autopilot", "dashboard", {"on": body["on"], "requeued": requeued})
+    return {"success": True, "autopilot": body["on"], "requeued": requeued}
+
+
 @app.post("/api/outbox/approve-all")
 async def outbox_approve_all():
     try:

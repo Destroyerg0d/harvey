@@ -9,6 +9,29 @@ minor versions can still change behaviour.
 
 ### Added
 
+- **A yes to "want me to write up the changes?" gets the review itself.** Harvey used to promise
+  a write-up "within two working days" that nothing wrote. Now it tests their home page in
+  headless Chrome as a mid-range phone on 4G (largest element, layout shift, page weight, the
+  heaviest images, scripts that hold up the first paint, images without alt text or a size,
+  title, description, headings, structured data, the Shopify theme) and writes two or three
+  numbered fixes from those numbers, closing with a 15-minute call and the booking link. A check
+  refuses any number the test didn't measure, any link but the booking page and their own site,
+  and "free". Every review waits for your approval (Held in the Outbox, a draft on the LinkedIn
+  tab) until you turn on reviews autopilot on the Outbox tab; a site that can't be measured goes
+  to Needs you instead of a promise. `PAGESPEED_API_KEY` (free) adds Google PageSpeed Insights.
+  `harvey reviews promised|write|measure` lists and writes the ones already promised.
+- **Job seekers are pointed to HR, on every channel, once.** Email, WhatsApp and LinkedIn
+  replies have two new intents: `job_seeker` gets one fixed reply naming `careers.email` and
+  `careers.linkedin_url` (sent without waiting, being our own text), and then nothing more;
+  `vendor` (selling to us) gets no reply. Both close the conversation and stop any pitch.
+- **Someone who writes to us first is sorted, and a potential client gets an answer.** The
+  website-chat triage reads the email: a project gets Harvey's reply in their thread under the
+  email approval rules; a job seeker the HR reply; a vendor is kept closed with no reply; spam is
+  left out; a client, support or anything unclear still goes to Needs you.
+- **A helpdesk that says it passed your email on is an automatic reply** ("we'll forward your
+  email to the respective team and they will reach out if necessary"), no longer a "wrong
+  person" on Needs you.
+
 - **An email from someone new reaches you.** Someone Harvey never wrote to, at no company it
   wrote to, used to be dropped with a log line. A person's email now lands on Conversations under
   Needs you, with its thread kept so the reply box answers in it; they become a contact who is

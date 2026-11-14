@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 
 from harvey.brain import Brain
+from harvey.careers import CAREERS_APPROVED, is_careers_reply
+from harvey.site_review import HELD_REASON as REVIEW_HELD_REASON, REVIEW_AUTOPILOT, reviews_autopilot
 from harvey.config import (
     HarveyConfig, EnvConfig, WarmupConfig, cold_daily_cap, compliance_footer_lines,
     compliance_notice, compliance_of, inbound_of, live_do_not_contact, operator_timezone,
@@ -1124,15 +1126,20 @@ class Sender:
         # it came to be marked approved: it quotes a price.
         if item.get("angle") == INBOUND_ESTIMATE_ANGLE and item.get("approved_by") != "you":
             return "pending_review", HELD_FOR_REVIEW + ESTIMATE_HELD_REASON
+        if item.get("approved_by") == REVIEW_AUTOPILOT and not await reviews_autopilot(self.state):
+            return "pending_review", HELD_FOR_REVIEW + REVIEW_HELD_REASON
         if item.get("approved_by") == INBOUND_AUTOPILOT and not inbound_of(self.config).autopilot:
             return "pending_review", (HELD_FOR_REVIEW + "channels.email.inbound.autopilot was "
                                       "turned off before it went out")
         sample = await self._segment_sample(item, prospect)
         if sample:
             return sample
-        if item.get("approved_by") != "you":
+        careers = (item.get("approved_by") == CAREERS_APPROVED
+                   and is_careers_reply(item.get("body") or "", self.config))
+        if item.get("approved_by") != "you" and not careers:
             # Nobody approved this one (autopilot): what a planted
-            # instruction would add sends it back to you instead.
+            # instruction would add sends it back to you instead. (The one
+            # fixed reply pointing a job seeker to HR is our own text.)
             held = autopilot_review(item["subject"], self._outgoing_body(item), self.config,
                                     recipient=item["to_email"])
             if mailbox is not None:

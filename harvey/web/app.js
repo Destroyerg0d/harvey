@@ -103,6 +103,8 @@ const STATUS = {
   auto_ack:       ['Auto-acknowledgement', 'idle'],
   left_company:   ['Left the company', 'bad'],
   wrong_person:   ['Wrong person', 'waiting'],
+  job_seeker:     ['Job seeker: sent to HR', 'idle'],
+  vendor:         ['Selling to us', 'idle'],
   unsubscribe:    ['Unsubscribed', 'bad'],
   escalate:       ['Needs a human', 'bad'],
   needs_human:    ['Needs you', 'waiting'],
@@ -1678,7 +1680,81 @@ async function loadUsage() {
 // the approval ladder exists to prevent. One email fills the pane; the rest
 // wait in the rail.
 
+// Site reviews (harvey/site_review.py): each waits for you until you turn on
+// reviews autopilot here. It is its own switch: email autopilot doesn't touch it.
+let _reviews = null, _reviewsArmed = false, _reviewsBusy = false;
+
+function reviewsCard(r) {
+  if (!r || r.error) return '';
+  const e = r.email || {};
+  const counts = [
+    e.waiting ? e.waiting + ' waiting for you' : '',
+    e.sent ? e.sent + ' sent' : '',
+    r.not_written ? r.not_written + ' couldn’t be written (on Needs you)' : '',
+  ].filter(Boolean).join(' · ');
+  let html = '<div class="card mode-card reviews-card"><h3>Site reviews: ' +
+    (r.autopilot ? 'go on their own' : 'wait for you') + '</h3>' +
+    '<p>When someone says yes to “want me to write up the changes?”, Harvey tests their home page on a phone ' +
+    'and writes the two or three fixes with the measured numbers, plus a 15-minute call link. ' +
+    (r.autopilot ? 'They go out without you reading them (still held if one links somewhere that isn’t yours).'
+                 : 'Each one waits here, marked Held, until you approve it. LinkedIn ones wait on the LinkedIn tab.') +
+    '</p>' + (counts ? '<p class="muted">' + escHtml(counts) + '</p>' : '');
+  if (r.autopilot) {
+    html += '<div class="convo-actions"><button class="btn btn-secondary btn-sm" onclick="setReviewsAutopilot(false)"' +
+      (_reviewsBusy ? ' disabled' : '') + '>Hold reviews for me again</button></div>';
+  } else if (_reviewsArmed) {
+    html += '<div class="convo-actions mode-confirm"><span class="muted">Type <b>reviews</b> to let them go on their own.</span>' +
+      '<input class="form-input" id="reviews-confirm" autocomplete="off" aria-label="Type reviews to confirm" ' +
+        'oninput="document.getElementById(\'reviews-go\').disabled = this.value.trim().toLowerCase() !== \'reviews\'">' +
+      '<button class="btn btn-primary btn-sm" id="reviews-go" disabled onclick="setReviewsAutopilot(true)">Turn on</button>' +
+      '<button class="btn btn-ghost btn-sm" onclick="_reviewsArmed=false;renderReviewsCard()">Cancel</button></div>';
+  } else {
+    html += '<div class="convo-actions"><button class="btn btn-secondary btn-sm" ' +
+      'onclick="_reviewsArmed=true;renderReviewsCard()">Let reviews go on their own…</button></div>';
+  }
+  return html + '</div>';
+}
+
+function renderReviewsCard() {
+  const el = document.getElementById('reviews-card');
+  if (el) el.innerHTML = reviewsCard(_reviews);
+  const input = document.getElementById('reviews-confirm');
+  if (input) input.focus();
+}
+
+async function loadReviewsCard() {
+  _reviews = await api('/api/reviews');
+  renderReviewsCard();
+}
+
+async function setReviewsAutopilot(on) {
+  if (_reviewsBusy) return;
+  const body = {on};
+  if (on) {
+    const input = document.getElementById('reviews-confirm');
+    body.confirm = input ? input.value.trim().toLowerCase() : '';
+  }
+  _reviewsBusy = true;
+  try {
+    const res = await api('/api/reviews/autopilot', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body),
+    });
+    if (res && res.success) {
+      _reviewsArmed = false;
+      showToast(on ? 'Site reviews now go out on their own.'
+                   : 'Site reviews wait for you again' + (res.requeued ? '; ' + res.requeued + ' came back to the Outbox.' : '.'),
+                'success');
+    } else {
+      showToast(failMsg(res, 'Couldn’t change it.'), 'error');
+    }
+  } finally {
+    _reviewsBusy = false;
+  }
+  loadOutbox();       // redraws this card too
+}
+
 async function loadOutbox() {
+  loadReviewsCard();
   const [data, mode] = await Promise.all([api('/api/outbox'), api('/api/sending-mode')]);
   _sendingMode = mode && !mode.error ? mode : null;
   const banner = document.getElementById('outbox-banner');
@@ -2540,6 +2616,7 @@ const CONVO_FILTERS = [
   ['open', 'Open', c => c.status !== 'closed' && c.status !== 'awaiting_reply' && c.status !== 'auto'],
   ['awaiting', 'Awaiting reply', c => c.status === 'awaiting_reply'],
   ['closed', 'Closed', c => c.status === 'closed'],
+  ['notclient', 'Not a client', c => ['job_seeker', 'vendor'].includes(c.intent)],
   ['all', 'All', () => true],
 ];
 
@@ -3305,6 +3382,7 @@ const CH_TAGS = [
   ['meeting', 'Meeting', c => chStage(c) === 'meeting'],
   ['not', 'Not interested', c => ['not_interested', 'unsubscribe'].includes(chIntent(c)) || chStage(c) === 'declined'],
   ['wrong', 'Wrong person', c => chIntent(c) === 'wrong_person'],
+  ['notclient', 'Not a client', c => ['job_seeker', 'vendor'].includes(chIntent(c))],
   ['replied', 'Replied', c => !!c.latest_in],
   ['awaiting', 'Awaiting reply', c => chOursLast(c) && chStage(c) !== 'declined'],
 ];

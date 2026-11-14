@@ -2033,6 +2033,16 @@ class StateManager(LinkedInStateMixin, WhatsAppStateMixin):
                 row = await cursor.fetchone()
                 return dict(row) if row else None
 
+    async def has_outbox_angle(self, prospect_id: str, angle: str) -> bool:
+        """An email of this angle (a site review, say) is queued or sent for
+        them. A cancelled or failed one doesn't count."""
+        async with self._connect() as db:
+            async with db.execute(
+                "SELECT 1 FROM outbox WHERE prospect_id = ? AND angle = ? "
+                "AND status NOT IN ('cancelled', 'failed') LIMIT 1", (prospect_id, angle)
+            ) as cursor:
+                return await cursor.fetchone() is not None
+
     # ── Signal vocabulary (governed; user-confirmed before collection) ──
 
     async def upsert_signal_code(

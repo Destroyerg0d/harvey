@@ -366,7 +366,16 @@ harvey lessons [--approve|--reject|--retire ID] [--run]  # Lessons the learner p
 harvey inbound status        # Website chat follow-ups: counts only
 harvey inbound run [--limit N] [--dry-run]  # The backlog, resumable; --dry-run prints a few drafts and stores nothing
 harvey inbound import FILE [--source NAME]  # The same from a CSV or XLSX of leads (--limit, --dry-run too)
+harvey reviews measure URL   # What the site-review test finds on a home page (nothing is stored or sent)
+harvey reviews promised      # Who a sent reply promised a write-up to and hasn't had one
+harvey reviews write [NAME]  # Write those reviews; each waits for approval (unless reviews autopilot is on)
 ```
+
+Site reviews and job seekers (harvey/site_review.py, harvey/careers.py): a yes to the
+write-up offer gets the review itself, measured in headless Chrome, never a promise of one,
+and it waits for approval until reviews autopilot is on (its own switch on the Outbox tab).
+A job seeker on any channel gets one fixed reply naming `careers.email` and
+`careers.linkedin_url`, then nothing; someone selling to us gets no reply.
 
 ### Common Issues
 - **"command not found: harvey"**: Activate venv first: `source .venv/bin/activate`

@@ -32,6 +32,8 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from harvey import channel_login
+from harvey.careers import CAREERS_APPROVED, JOB_SEEKER, NOT_A_CLIENT, careers_reply
+from harvey.site_review import HELD_REASON as REVIEW_HELD_REASON, REVIEW_AUTOPILOT, reviews_autopilot
 from harvey.linkedin import guards
 from harvey.linkedin.guards import BreakerTripped, active_pause, detect_breaker
 from harvey.linkedin.pacing import Pacing, wait_unless
@@ -50,6 +52,8 @@ logger = logging.getLogger("harvey.linkedin")
 LAST_RUN_KEY = "linkedin:last_run"
 RUNNING_KEY = "linkedin:running"
 AUTOPILOT_KEY = "linkedin:autopilot"
+# A site review was written for this lead (harvey/site_review.py): one each.
+REVIEWED_KEY = "linkedin:reviewed:"
 ENABLED_KEY = "linkedin:enabled"
 NOTES_OFF_KEY = "linkedin:notes_unavailable_until"
 
@@ -466,6 +470,10 @@ class LinkedInAgent:
                 continue
             if lead["stage"] == "declined":
                 continue
+            if intent in NOT_A_CLIENT:
+                await self.not_a_client(lead, intent, thread_url=message.get("thread_url") or "")
+                latest.pop(lead["id"], None)
+                continue
             if intent == "interested":
                 await self.state.li_set_stage(lead["id"], "warm")
             if intent in REPLY_INTENTS or intent == "escalate":
@@ -483,10 +491,18 @@ class LinkedInAgent:
                 continue          # answered already (by you, on LinkedIn)
             if await self.state.li_pending_for(lead_id, kinds=("reply",)):
                 continue
+            hold = []
+            if await self.wants_site_review(message["intent"], lead, history):
+                # A yes to the write-up we offered: the reply is the review.
+                review = await self.site_review(lead, message["body"])
+                if review.body:
+                    await self.add_review(lead, review.body, thread_url=message.get("thread_url") or "")
+                    continue
+                hold.append(f"they said yes to the site review, and Harvey couldn't write it: "
+                            f"{review.why}")
             body = await self.draft(lead, "reply", intent=message["intent"], history=history,
                                     note=message.get("referral_note") or "")
             if body:
-                hold = []
                 if asks_if_automated(message["body"]):
                     hold.append("they asked whether this is automated")
                 await self.add_draft(lead, "reply", body, hold=hold,
@@ -508,6 +524,80 @@ class LinkedInAgent:
                 "prospect_id": prospect_id, "rule": "linkedin", "matched": intent,
                 "why": "They said no on LinkedIn.", "message": (text or "")[:1000],
                 "linkedin_lead_id": lead["id"]})
+
+    async def wants_site_review(self, intent: str, lead: dict, history) -> bool:
+        """A yes to the write-up one of our messages offered, and no review
+        written for them yet (harvey/site_review.py)."""
+        from harvey.site_review import REVIEW_INTENTS, offered_review
+        if (intent not in REVIEW_INTENTS or self.dry_run
+                or not getattr(getattr(self.config, "site_review", None), "enabled", False)):
+            return False
+        ours = [m["body"] for m in history or [] if m["direction"] == "out" and m["status"] == "sent"]
+        if not offered_review(ours):
+            return False
+        return not await self.state.get_setting(REVIEWED_KEY + lead["id"])
+
+    async def site_review(self, lead: dict, their_words: str):
+        from harvey.site_review import make_review, site_for
+        prospect = await self.state.get_prospect(lead["prospect_id"]) if lead.get("prospect_id") else None
+        site = await site_for(self.state, prospect=prospect, company_id=lead.get("company_id") or "")
+        name = lead.get("first_name") or (lead.get("name") or "").split(" ")[0]
+        return await make_review(self.state, self.brain, self.config, getattr(self, "env", None),
+                                 site=site, name=name, their_words=their_words, channel="linkedin")
+
+    async def add_review(self, lead: dict, body: str, thread_url: str = "") -> str | None:
+        """A review waits for you, unless reviews autopilot is on (then the
+        autopilot review for planted links still applies)."""
+        from harvey.gate import autopilot_review
+        from harvey.site_review import HELD_REASON, REVIEW_AUTOPILOT, reviews_autopilot, tidy
+        body = _clean_draft(tidy(body)) or body
+        status, approved_by, error = "draft", "", HELD_FOR_REVIEW + HELD_REASON
+        if await reviews_autopilot(self.state):
+            reasons = autopilot_review("", body, self.config)
+            if reasons:
+                error = HELD_FOR_REVIEW + "; ".join(reasons)
+            else:
+                status, approved_by, error = "approved", REVIEW_AUTOPILOT, ""
+        message_id = await self.state.li_add_message(
+            lead["id"], direction="out", kind="reply", body=body, status=status, error=error[:300],
+            approved_by=approved_by, thread_url=thread_url, dedupe=False)
+        await self.state.set_setting(REVIEWED_KEY + lead["id"], self.now().isoformat())
+        self.report["drafted"] = self.report.get("drafted", 0) + 1
+        return message_id
+
+    async def not_a_client(self, lead: dict, intent: str, thread_url: str = ""):
+        """A job seeker or someone selling to us (harvey/careers.py). A job
+        seeker gets the one fixed reply pointing to HR, approved at once (our
+        text, not a model's); LinkedIn stops for them once it has gone
+        (send_approved). Someone selling gets nothing and stops now."""
+        for m in await self.state.li_pending_for(lead["id"]):
+            await self.state.li_skip(m["id"])
+        await self.stop_email_pitch(lead)
+        body = careers_reply(self.config, lead.get("first_name") or (lead.get("name") or "").split(" ")[0]) \
+            if intent == JOB_SEEKER else ""
+        if not body:
+            await self.stop_for_good(lead)
+            return
+        if any(m["approved_by"] == CAREERS_APPROVED and m["status"] in ("approved", "sent")
+               for m in await self.state.li_messages(lead_id=lead["id"])):
+            return
+        await self.state.li_add_message(
+            lead["id"], direction="out", kind="reply", body=body,
+            status="draft" if self.dry_run else "approved",
+            approved_by="" if self.dry_run else CAREERS_APPROVED,
+            thread_url=thread_url, dedupe=False)
+        self.report["drafted"] = self.report.get("drafted", 0) + 1
+
+    async def stop_for_good(self, lead: dict):
+        """Not a client: declined on LinkedIn, and their email side lost."""
+        await self.state.li_set_stage(lead["id"], "declined")
+        for m in await self.state.li_pending_for(lead["id"]):
+            await self.state.li_skip(m["id"])
+        self.report["declined"] = self.report.get("declined", 0) + 1
+        prospect_id = lead.get("prospect_id") or ""
+        prospect = await self.state.get_prospect(prospect_id) if prospect_id else None
+        if prospect is not None and prospect.status in (*EMAIL_PITCHABLE, "replied"):
+            await self.state.update_prospect_status(prospect_id, "lost")
 
     async def stop_email_pitch(self, lead: dict, keep=()):
         """They're talking on LinkedIn: no cold email pitch on top of it.
@@ -882,6 +972,11 @@ FACTS about them:
                 await self.state.li_update_message(item["id"], status="skipped",
                                                    error="they declined")
                 continue
+            if item.get("approved_by") == REVIEW_AUTOPILOT and not await reviews_autopilot(self.state):
+                # Reviews autopilot was turned off before it went: back to you.
+                await self.state.li_update_message(item["id"], status="draft", approved_by="",
+                                                   error=HELD_FOR_REVIEW + REVIEW_HELD_REASON)
+                continue
             # What you approved or wrote yourself is held to the same stop rules.
             if item["kind"] != "invite_note":
                 why = await said_no(self.state, self.config, lead)
@@ -926,6 +1021,8 @@ FACTS about them:
             if ok:
                 await self.pacing.record(kind)
                 self.report["sent_invites" if kind == "invite" else "sent_messages"] += 1
+                if item.get("approved_by") == CAREERS_APPROVED:
+                    await self.stop_for_good(lead)     # pointed to HR: nothing more
             elif detail:
                 self._failed_leads.add(lead["id"])
                 self.report["failed"] += 1

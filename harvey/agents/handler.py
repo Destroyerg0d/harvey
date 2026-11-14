@@ -16,6 +16,10 @@ from datetime import date, datetime, timedelta, timezone
 from email.utils import parseaddr, parsedate_to_datetime
 
 from harvey.brain import Brain, BrainUnavailable
+from harvey.careers import (
+    CAREERS_APPROVED, CLASSIFIER_LINES, JOB_SEEKER, NOT_A_CLIENT, STOPPED_JOB, STOPPED_VENDOR, VENDOR,
+    careers_reply,
+)
 from harvey.config import (
     DEFAULT_OPT_OUT_LINE, HarveyConfig, EnvConfig, compliance_of, legacy_sending_held,
     live_do_not_contact,
@@ -39,10 +43,14 @@ from harvey.referrals import (
     their_own_words,
 )
 from harvey.state import (
-    AUTO_CONVERSATION, AUTOMATIC_INTENTS, COLLEAGUE_REPLIED, FREE_MAIL_DOMAINS, LEFT_THE_COMPANY,
-    POLICY_AUTO_REPLY, REVIEW_NEXT_REPLY_KEY, STOP_ON_REPLY, StateManager,
+    AUTO_CONVERSATION, AUTOMATIC_INTENTS, COLLEAGUE_REPLIED, FREE_MAIL_DOMAINS, HELD_FOR_REVIEW,
+    LEFT_THE_COMPANY, POLICY_AUTO_REPLY, REVIEW_NEXT_REPLY_KEY, STOP_ON_REPLY, StateManager,
 )
 from harvey.sending_mode import sync_sending_mode
+from harvey.site_review import (
+    HELD_REASON, REVIEW_ANGLE, REVIEW_AUTOPILOT, REVIEW_INTENTS, make_review, offered_review,
+    reviews_autopilot, site_for,
+)
 from harvey.startups import startup_facts
 from harvey.untrusted import UNTRUSTED_RULE, fence
 
@@ -75,13 +83,15 @@ INTENT_LABELS = {
     "question",
     "unsubscribe",
     "escalate",
+    JOB_SEEKER,   # pointed to HR once, then nothing (harvey/careers.py)
+    VENDOR,       # selling to us: no reply
 }
 
 # Intents that get an automated reply. Everything else is closed,
 # deferred, or escalated to a human.
 AUTO_REPLY_INTENTS = {"interested", "objection", "question", "wrong_person"}
 # Replies that don't stop the cold email to the rest of their company.
-NO_COMPANY_STOP_INTENTS = {"ooo", "wrong_person", *AUTOMATIC_INTENTS}
+NO_COMPANY_STOP_INTENTS = {"ooo", "wrong_person", JOB_SEEKER, *AUTOMATIC_INTENTS}
 # Automatic replies, told apart without the model (see automatic_reply).
 AUTO_ACK = "auto_ack"
 LEFT_COMPANY = "left_company"
@@ -346,6 +356,17 @@ _ACK_TEXT_RE = re.compile(
     r"(?:response|reply|message|e-?mail|acknowledge?ment|notification)\b"
     r"|\bthis\s+(?:message|e-?mail|response|reply)\s+(?:is|was|has\s+been)\s+"
     r"(?:sent|generated)\s+automatically\b")
+# A helpdesk's "we'll forward your email to the respective team, they'll reach
+# out when necessary" (seen 2026-11-08, read as "wrong person" and handed to the
+# owner). A template, not an answer: no reply, and the sequence carries on.
+_FORWARD_ACK_RE = re.compile(
+    r"\bwe(?:'ll|\s+will|\s+have|'ve)?\s+(?:forward(?:ed)?|pass(?:ed)?(?:\s+on)?|share(?:d)?|direct(?:ed)?)\s+"
+    r"(?:your|this)\s+(?:e-?mail|message|enquiry|inquiry|request|query)\s+(?:on\s+)?to\s+(?:the|our)\s+"
+    r"(?:respective|relevant|right|appropriate|concerned|correct|proper)\s+"
+    r"(?:team|department|person|people)\b"
+    r"|\b(?:they|someone|a\s+member\s+of\s+(?:our|the)\s+team|the\s+team)\s+will\s+(?:surely\s+)?"
+    r"(?:reach\s+out|get\s+back|be\s+in\s+touch|contact\s+you)\b[^.]{0,30}?"
+    r"\b(?:when|if)\s+(?:necessary|needed|required|relevant|appropriate)\b")
 # "We have received your request" counts only with a reference number.
 _RECEIVED_RE = re.compile(
     r"\bwe(?:'ve|\s+have)\s+(?:received|got)\s+your\s+"
@@ -447,7 +468,7 @@ def automatic_reply(headers, subject: str, text: str, own_words: str = "",
     flat = _flat(text)
     subject = _flat(subject)
     machine = (_auto_submitted(headers) or bool(_AUTO_SUBJECT_RE.search(subject))
-               or bool(_ACK_TEXT_RE.search(flat))
+               or bool(_ACK_TEXT_RE.search(flat)) or bool(_FORWARD_ACK_RE.search(flat))
                or bool(_RECEIVED_RE.search(flat) and _REFERENCE_RE.search(flat)))
     closed = bool(_CLOSED_TEXT_RE.search(flat))
     if _POLICY_RE.search(flat) or ((machine or closed) and _PLEASE_REMOVE_RE.search(flat)):
@@ -956,38 +977,94 @@ class Handler:
                          "conversation_id": convo.id})
         return result
 
+    async def _sort_new_sender(self, msg, text: str):
+        """What someone who wrote to us first wants: the website-chat triage
+        (harvey/inbound.py), read over their email. None when the model gave
+        no usable answer; raises BrainUnavailable when it is down, so the
+        email is read again next cycle."""
+        from harvey.collectors.erp_chat import VISITOR, ChatLine, InboundLead
+        from harvey.inbound import triage
+        lead = InboundLead(email=msg.from_email, origin="email", source_label="email",
+                           transcript=[ChatLine(who=VISITOR, text=(
+                               f"Subject: {msg.subject or '(none)'}\n{text}")[:4000])])
+        try:
+            return await triage(self.brain, lead, self.config.persona.company or "")
+        except BrainUnavailable:
+            raise
+        except Exception as e:
+            logger.warning(f"Handler: couldn't sort the email from {msg.from_email}: {e}")
+            return None
+
     async def _from_someone_new(self, msg, text: str) -> bool:
         """An email from someone Harvey never wrote to, at no company it wrote to.
 
         Machines (no-reply and notification senders, bulk mail, auto-replies,
-        our own mailboxes) are left out as before. A person's email is kept:
-        they become a contact who is never cold-emailed (status replied), and
-        the email a conversation on Needs you, for you to answer in its thread.
-        Harvey drafts nothing on it. Returns True when it was kept."""
+        our own mailboxes) are left out as before. A person's email is sorted
+        (owner, 2026-11-14: "read all the mail inboxes ... filter those and
+        make sure to talk to any potential clients"):
+
+        - a potential client (a project, a quote, our services): Harvey
+          answers in their thread like any reply, under the email approval
+          rules (channels.email.require_approval);
+        - a job seeker: the one reply pointing to HR (harvey/careers.py);
+        - someone selling to us: kept, closed, no reply; spam: left out;
+        - an existing client, a support matter, anything else, or no usable
+          answer from the model: Needs you, for you to answer in its thread.
+
+        Either way they become a contact who is never cold-emailed. Returns
+        True when the email was kept."""
         own = set(allowed_link_domains(self.config)) | {
             (m.email or "").split("@")[-1].lower() for m in configured_mailboxes(self.config)}
         why = automated_sender(msg, own_domains=own)
         if why:
             logger.info(f"Handler: left out an email from {msg.from_email} ({why}).")
             return False
+        sorted_as = await self._sort_new_sender(msg, text)
+        category = sorted_as.category if sorted_as is not None else ""
+        if category == "spam":
+            logger.info(f"Handler: left out an email from {msg.from_email} (spam).")
+            return False
         name_part = parseaddr(str((msg.headers or {}).get("from", "")))[0]
         first, last = clean_name(name_part)
         domain = msg.from_email.split("@")[-1].lower()
         company = "" if domain in FREE_MAIL_DOMAINS else domain.split(".")[0].replace("-", " ").title()
+        subject = (msg.subject or "(no subject)")[:120]
+        notes = f"Wrote to us first by email, with no earlier email from us. Subject: {subject}"
+        if sorted_as is not None and sorted_as.summary:
+            notes += f". What they want: {sorted_as.summary}"
         prospect_id = await self.state.add_prospect(Prospect(
             first_name=first, last_name=last, email=msg.from_email, email_status=GIVEN,
             company=company, source=NEW_SENDER_SOURCE, status="replied",
-            mailbox=msg.mailbox or "",
-            personalization_notes=f"Wrote to us first: {(msg.subject or '(no subject)')[:120]}"))
-        await self.state.add_conversation(Conversation(
-            id="", prospect_id=prospect_id, channel="email", stage="engaged",
-            status="needs_human", mailbox=msg.mailbox or "",
+            mailbox=msg.mailbox or "", personalization_notes=notes))
+        await self.state.log_action("new_sender", "handler", {
+            "from": msg.from_email, "mailbox": msg.mailbox or "", "subject": subject,
+            "sorted_as": category or "unsorted"})
+        meta = {"thread_ref": msg.thread_ref, "message_id": msg.message_id, "subject": msg.subject,
+                **({"mailbox": msg.mailbox} if msg.mailbox else {})}
+        if category == "project" and self.is_native:
+            prospect = await self.state.get_prospect(prospect_id)
+            logger.info(f"Handler: {msg.from_email} wrote to us first about a project; "
+                        "answering it like a reply.")
+            await self._process_reply(msg.from_email, text, reply_uuid="", reply_meta=meta,
+                                      headers=getattr(msg, "headers", None) or {},
+                                      prospect=prospect)
+            return True
+        intent = {"hiring": JOB_SEEKER, "vendor": VENDOR}.get(category, "")
+        convo_id = await self.state.add_conversation(Conversation(
+            id="", prospect_id=prospect_id, channel="email",
+            stage="closed_lost" if intent else "engaged",
+            status="closed" if intent else "needs_human", mailbox=msg.mailbox or "",
+            intent=intent,
             thread=[Message(sender="prospect", content=text, from_email=msg.from_email,
                             message_id=msg.message_id or "", thread_ref=msg.thread_ref or "",
                             subject=(msg.subject or "")[:300])]))
-        await self.state.log_action("new_sender", "handler", {
-            "from": msg.from_email, "mailbox": msg.mailbox or "", "subject": (msg.subject or "")[:120]})
-        logger.info(f"Handler: {msg.from_email} wrote to us first; it's on Conversations, Needs you.")
+        if intent:
+            prospect = await self.state.get_prospect(prospect_id)
+            convo = await self.state.get_conversation(convo_id)
+            await self._not_a_client(intent, prospect, convo, meta)
+            return True
+        logger.info(f"Handler: {msg.from_email} wrote to us first ({category or 'unsorted'}); "
+                    "it's on Conversations, Needs you.")
         return True
 
     async def _match_sender(self, msg):
@@ -1224,10 +1301,19 @@ class Handler:
         # Someone outside the company, or several addresses: yours to decide.
         referral_for_you = referral is not None and referral.kind in (OUTSIDE, SEVERAL)
         response = ""
+        review = None
         if (not automatic and intent in AUTO_REPLY_INTENTS and not held and not listed
                 and not handed_off and not other_sender and not referral_for_you):
-            response = await self._generate_response(intent, reply_text, prospect, convo,
-                                                     referral=referral, plan=plan)
+            if await self._wants_site_review(intent, prospect):
+                # A yes to "want me to write up the changes?": the reply is
+                # the review itself, measured, not a promise of one.
+                review = await self._site_review(prospect, convo, reply_text)
+                response = review.body
+                if response:
+                    convo.stage = "presenting"
+            else:
+                response = await self._generate_response(intent, reply_text, prospect, convo,
+                                                         referral=referral, plan=plan)
 
         # 2c. Store the conversation in one write.
         if stored is None:
@@ -1318,6 +1404,10 @@ class Handler:
         if plan is not None:
             await self._store_referral(plan, prospect, company, convo)
 
+        if intent in NOT_A_CLIENT:
+            await self._not_a_client(intent, prospect, convo, reply_meta or {}, other_sender)
+            return
+
         if intent == "not_interested":
             await self.state.update_conversation(convo.id, status="closed", stage="closed_lost")
             await self.state.update_prospect_status(prospect.id, "lost")
@@ -1357,6 +1447,20 @@ class Handler:
             )
             return
 
+        if review is not None and not response:
+            # They said yes to the review and Harvey couldn't write it: you
+            # answer, rather than Harvey promising one that never comes.
+            await self.state.update_conversation(convo.id, status="needs_human")
+            await self.state.log_action(
+                action_type="escalation", agent="handler",
+                details={"prospect_email": lead_email, "conversation_id": convo.id,
+                         "reason": "they said yes to the site review, and Harvey couldn't write "
+                                   f"it: {review.why}",
+                         "reply_preview": reply_text[:200]})
+            logger.info(f"Handler: {lead_email} said yes to the review; it couldn't be written "
+                        f"({review.why}). Handed to you.")
+            return
+
         # For interested, objection, question, wrong_person — the reply drafted above
         if not response:
             # No usable draft from a working provider: hand it to a human
@@ -1378,7 +1482,7 @@ class Handler:
         # or immediately via Instantly (legacy).
         if self.is_native:
             await self._queue_native_reply(
-                response, prospect, convo, reply_meta or {}, intent
+                response, prospect, convo, reply_meta or {}, intent, review=review is not None
             )
         elif await self.state.get_setting(REVIEW_NEXT_REPLY_KEY + prospect.id):
             # You undid their opt-out, and Instantly can't hold a reply for
@@ -1796,14 +1900,69 @@ class Handler:
             await self.state.set_setting(KILL_SWITCH_KEY, reason)
             logger.error(f"Handler: KILL SWITCH ENGAGED — {reason}")
 
+    async def _not_a_client(self, intent: str, prospect, convo, reply_meta: dict,
+                            other_sender: str = "") -> str:
+        """A job seeker or someone selling to us (harvey/careers.py): the
+        conversation closes and they get no sales email again. A job seeker
+        gets the one fixed reply pointing to HR, sent without waiting for
+        approval (it's our text, not a model's); someone selling gets none.
+        Returns the outbox id of that reply, or ""."""
+        job = intent == JOB_SEEKER
+        why = STOPPED_JOB if job else STOPPED_VENDOR
+        await self.state.update_conversation(convo.id, status="closed", stage="closed_lost")
+        await self.state.update_prospect_status(prospect.id, "lost")
+        body = careers_reply(self.config, getattr(prospect, "first_name", "")) if job else ""
+        item_id = ""
+        if body and self.is_native and not other_sender:
+            subject = reply_meta.get("subject", "") or ""
+            if subject and not subject.lower().startswith("re:"):
+                subject = f"Re: {subject}"
+            item_id = await self.state.add_outbox_item(
+                prospect_id=prospect.id, conversation_id=convo.id, kind="reply",
+                to_email=prospect.email, subject=subject or "Re: your note", body=body,
+                send_at=datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
+                status="approved", provider=self.provider.name if self.provider else "",
+                thread_ref=reply_meta.get("thread_ref", ""),
+                in_reply_to=reply_meta.get("message_id", ""),
+                approved_by=CAREERS_APPROVED, mailbox=reply_meta.get("mailbox") or None,
+            ) or ""
+        await self.state.log_action("not_a_client", "handler", {
+            "prospect_email": prospect.email, "intent": intent, "why": why,
+            "conversation_id": convo.id, "replied": bool(item_id)})
+        logger.info(f"Handler: {prospect.email}: {why}."
+                    + (" Pointed them to HR." if item_id else " No reply."))
+        return item_id
+
+    async def _wants_site_review(self, intent: str, prospect) -> bool:
+        """A yes to the write-up we offered (harvey/site_review.py), and no
+        review written for them yet."""
+        if (intent not in REVIEW_INTENTS or not self.is_native
+                or not getattr(getattr(self.config, "site_review", None), "enabled", False)):
+            return False
+        if not offered_review(await self.state.get_texts_for_prospect(prospect.id)):
+            return False
+        return not await self.state.has_outbox_angle(prospect.id, REVIEW_ANGLE)
+
+    async def _site_review(self, prospect, convo, reply_text: str):
+        site = await site_for(self.state, prospect=prospect)
+        sender = mailbox_for(self.config, convo.mailbox) if is_multi(self.config) else None
+        return await make_review(
+            self.state, self.brain, self.config, self.env, site=site,
+            name=getattr(prospect, "first_name", "") or "", their_words=reply_text,
+            channel="email", mailbox_name=sender.first_name if sender else "")
+
     async def _queue_native_reply(
-        self, response: str, prospect, convo, reply_meta: dict, intent: str
+        self, response: str, prospect, convo, reply_meta: dict, intent: str, review: bool = False,
     ):
-        """Route Harvey's reply through the outbox (approval ladder applies)."""
+        """Route Harvey's reply through the outbox (approval ladder applies).
+        ``review``: it is a site review, which waits for you unless reviews
+        autopilot is on, whatever the email approval setting says."""
         await sync_sending_mode(self.config, self.state)
         require_approval = getattr(
             self.config.channels.email, "require_approval", True
         )
+        if review:
+            require_approval = not await reviews_autopilot(self.state)
         # The first reply since you undid their opt-out waits for you, even
         # on autopilot: the undo panel promises it.
         review_key = REVIEW_NEXT_REPLY_KEY + prospect.id
@@ -1825,11 +1984,15 @@ class Handler:
             provider=self.provider.name if self.provider else "",
             thread_ref=reply_meta.get("thread_ref", ""),
             in_reply_to=reply_meta.get("message_id", ""),
-            approved_by="" if require_approval else "autopilot",
+            approved_by="" if require_approval else (REVIEW_AUTOPILOT if review else "autopilot"),
             # Several mailboxes: answered from the one it arrived in, in that
             # mailbox's thread. Otherwise the prospect's, as before.
             mailbox=reply_meta.get("mailbox") or None,
+            angle=REVIEW_ANGLE if review else "",
         )
+        if item_id and review and require_approval:
+            # Approve-all skips it: each review is read and approved on its own.
+            await self.state.update_outbox_item(item_id, error=(HELD_FOR_REVIEW + HELD_REASON)[:300])
         if item_id:
             await self.state.delete_setting(review_key)
             mode = "queued for your approval" if require_approval else "queued to send"
@@ -1859,6 +2022,7 @@ class Handler:
 - "ooo" — out of office / auto-reply (one saying "for urgent matters contact ..." is still "ooo")
 - "wrong_person" — not the right contact, suggests someone else
 - "question" — asking for more information before deciding
+{CLASSIFIER_LINES}
 
 When in doubt between "not_interested" and "unsubscribe", choose "unsubscribe".
 When in doubt between anything and "escalate", choose "escalate".
@@ -1900,7 +2064,7 @@ Respond with ONLY the category label, nothing else."""
         text_lower = reply_text.lower()
 
         # Terminal states
-        if intent in ("not_interested", "unsubscribe"):
+        if intent in ("not_interested", "unsubscribe") or intent in NOT_A_CLIENT:
             return "closed_lost"
 
         if intent == "escalate":

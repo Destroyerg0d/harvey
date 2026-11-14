@@ -30,6 +30,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from harvey import channel_login
+from harvey.careers import CAREERS_APPROVED, NOT_A_CLIENT, STOPPED_JOB
 from harvey.agents.linkedin_agent import (
     DECLINE_INTENTS, REPLY_INTENTS, SwitchedOff, _clean_draft, asks_if_automated,
 )
@@ -542,6 +543,10 @@ class WhatsAppAgent:
                 continue
             if contact["stage"] == "declined":
                 continue
+            if intent in NOT_A_CLIENT:
+                await self.not_a_client(contact, intent)
+                latest.pop(contact["id"], None)
+                continue
             if intent == "wrong_person":
                 # The number isn't whom we were given it for: never again on
                 # WhatsApp, though it says nothing about their email.
@@ -610,6 +615,39 @@ class WhatsAppAgent:
             "prospect_id": prospect.id, "rule": "whatsapp", "matched": intent,
             "why": "They said no on WhatsApp.", "message": (text or "")[:1000],
             "whatsapp_contact_id": contact["id"]})
+
+    async def not_a_client(self, contact: dict, intent: str):
+        """A job seeker or someone selling to us (harvey/careers.py). A job
+        seeker gets the one fixed reply pointing to HR, approved at once (our
+        text, not a model's); WhatsApp stops for them once it has gone
+        (_after_send). Someone selling gets nothing and stops now. Either way
+        their email side gets no pitch."""
+        from harvey.careers import CAREERS_APPROVED, JOB_SEEKER, STOPPED_VENDOR, careers_reply
+        await self._skip_waiting(contact, "they aren't a potential client")
+        await self.stop_email_pitch(contact)
+        body = careers_reply(self.config, (contact.get("name") or "").split(" ")[0]) \
+            if intent == JOB_SEEKER else ""
+        if not body:
+            await self._stop_whatsapp(contact, STOPPED_VENDOR if intent != JOB_SEEKER
+                                      else "they asked about a job (no careers contact is set)")
+            await self._mark_lost(contact)
+            return
+        sent_before = [m for m in await self.state.wa_messages(contact_id=contact["id"], direction="out")
+                       if m["approved_by"] == CAREERS_APPROVED and m["status"] in ("approved", "sent")]
+        if sent_before:
+            return
+        await self.state.wa_add_message(
+            contact["id"], direction="out", kind="reply", body=body,
+            status="draft" if self.dry_run else "approved",
+            approved_by="" if self.dry_run else CAREERS_APPROVED)
+        self.report["drafted"] = self.report.get("drafted", 0) + 1
+
+    async def _mark_lost(self, contact: dict):
+        """Not a client: their email side is closed too (status lost)."""
+        from harvey.agents.linkedin_agent import EMAIL_PITCHABLE
+        prospect = await self._prospect_of(contact)
+        if prospect is not None and prospect.status in (*EMAIL_PITCHABLE, "replied"):
+            await self.state.update_prospect_status(prospect.id, "lost")
 
     async def stop_email_pitch(self, contact: dict):
         """They're talking on WhatsApp: no cold email pitch on top of it."""
@@ -828,6 +866,10 @@ class WhatsAppAgent:
         if outcome == "sent":
             self.report["sent"] += 1
             await self.state.set_setting(guards.FAILED_KEY, "0")
+            if item.get("approved_by") == CAREERS_APPROVED:
+                # Pointed to HR: nothing more from Harvey on WhatsApp.
+                await self._stop_whatsapp(contact, STOPPED_JOB)
+                await self._mark_lost(contact)
             return
         if outcome in ("no_whatsapp", "held"):
             return

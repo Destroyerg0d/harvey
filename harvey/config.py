@@ -1116,6 +1116,25 @@ def load_email_rules(config) -> str:
     return text
 
 
+class CareersConfig(BaseModel):
+    """Where someone looking for a job is pointed (harvey/careers.py). Harvey
+    doesn't talk hiring on any channel: a job seeker gets one short reply
+    naming these, and nothing after it. Both empty: they get no reply at all."""
+    email: str = ""          # the HR team's address
+    linkedin_url: str = ""   # the company's LinkedIn page
+
+
+class SiteReviewConfig(BaseModel):
+    """The site review Harvey writes when someone says yes to "want me to send
+    the changes?" (harvey/site_review.py). Every review waits for your
+    approval until you turn on reviews autopilot on the dashboard."""
+    enabled: bool = True
+    # Google PageSpeed Insights, mobile. Free and works without a key at a
+    # low rate; PAGESPEED_API_KEY in .env raises it.
+    pagespeed: bool = True
+    timeout_seconds: int = 90
+
+
 class HarveyConfig(BaseModel):
     persona: PersonaConfig
     product: ProductConfig
@@ -1125,6 +1144,8 @@ class HarveyConfig(BaseModel):
     brain: BrainConfig = BrainConfig()
     compliance: ComplianceConfig = ComplianceConfig()
     writer: WriterConfig = WriterConfig()
+    careers: CareersConfig = CareersConfig()
+    site_review: SiteReviewConfig = SiteReviewConfig()
     # The file it was loaded from, so a running Harvey can re-read the
     # sending mode from that same file (refresh_sending_mode).
     _source_path: str | None = PrivateAttr(default=None)
@@ -1189,6 +1210,9 @@ class EnvConfig(BaseModel):
     # Optional: the website chat's Supabase, read-only (harvey/collectors/erp_chat.py).
     erp_supabase_url: str = ""
     erp_supabase_key: str = ""
+    # Optional, free: Google PageSpeed Insights for site reviews
+    # (harvey/site_review.py). Without it the API still answers, at a lower rate.
+    pagespeed_api_key: str = ""
 
 
 def _format_validation_error(e: ValidationError) -> str:
@@ -1315,6 +1339,7 @@ def load_env() -> EnvConfig:
         precleared_api_key=os.getenv("PRECLEARED_API_KEY", "").strip(),
         erp_supabase_url=os.getenv("ERP_SUPABASE_URL", "").strip(),
         erp_supabase_key=os.getenv("ERP_SUPABASE_KEY", "").strip(),
+        pagespeed_api_key=os.getenv("PAGESPEED_API_KEY", "").strip(),
     )
     return env
 
