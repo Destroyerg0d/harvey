@@ -9,6 +9,11 @@ minor versions can still change behaviour.
 
 ### Added
 
+- **An email from someone new reaches you.** Someone Harvey never wrote to, at no company it
+  wrote to, used to be dropped with a log line. A person's email now lands on Conversations under
+  Needs you, with its thread kept so the reply box answers in it; they become a contact who is
+  never cold-emailed, and Harvey drafts nothing. Machine mail is still left out: no-reply and
+  notification senders, mailing lists and bulk mail, auto-replies, your own mailboxes.
 - **Scout finds shops on the map when search engines refuse.** A free, keyless OpenStreetMap step
   each cycle: the next (ICP industry, city) of a rotation over the big cities of each country in
   `icp.geography`, asking only for shops with a website of their own. OpenStreetMap now maps an

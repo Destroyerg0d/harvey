@@ -13,14 +13,14 @@ import logging
 import math
 import re
 from datetime import date, datetime, timedelta, timezone
-from email.utils import parsedate_to_datetime
+from email.utils import parseaddr, parsedate_to_datetime
 
 from harvey.brain import Brain, BrainUnavailable
 from harvey.config import (
     DEFAULT_OPT_OUT_LINE, HarveyConfig, EnvConfig, compliance_of, legacy_sending_held,
     live_do_not_contact,
 )
-from harvey.gate import autopilot_review, do_not_contact_match, pre_send_check
+from harvey.gate import GIVEN, allowed_link_domains, autopilot_review, do_not_contact_match, pre_send_check
 from harvey.humanize import humanize, humanizer_enabled
 from harvey.integrations.instantly import InstantlyClient
 from harvey.lessons import lessons_block
@@ -32,8 +32,9 @@ from harvey.mailboxes import (
     is_multi, mailbox_for, normalize, paused_key, primary_mailbox, read_ok_key,
 )
 from harvey.models.conversation import Conversation, Message
+from harvey.models.prospect import Prospect
 from harvey.referrals import (
-    ADDRESS, LINKEDIN, NAME, NONE, OUTSIDE, SENDABLE_GRADES, SEVERAL, company_domains,
+    ADDRESS, LINKEDIN, NAME, NONE, OUTSIDE, SENDABLE_GRADES, SEVERAL, clean_name, company_domains,
     find_referral, prepare_referral, registrable_domain, reply_guidance, store_referral,
     their_own_words,
 )
@@ -461,6 +462,35 @@ def automatic_reply(headers, subject: str, text: str, own_words: str = "",
             _OOO_BOILERPLATE_RE.search(flat) and "?" not in (own_words or text))):
         return "ooo"
     return "ack" if machine else ""
+
+
+# Someone who wrote to a mailbox first, with no prospect or company Harvey knew.
+NEW_SENDER_SOURCE = "inbox"
+# Mail that no person wrote: the sender's own address says so, or bulk headers do.
+_MACHINE_SENDER_RE = re.compile(
+    r"(^|[._+-])(no-?reply|do-?not-?reply|donotreply|mailer-daemon|postmaster|bounces?|"
+    r"notifications?|notify|alerts?|newsletters?|news|updates|digest|mailer|automated|system)"
+    r"([._+-]|$)", re.IGNORECASE)
+
+
+def automated_sender(msg, own_domains=()) -> str:
+    """Why this email is a machine's or our own, or "" (a person may have written it)."""
+    address = (msg.from_email or "").lower()
+    local, _, domain = address.partition("@")
+    if not local or not domain:
+        return "no sender"
+    if any(domain == d or domain.endswith("." + d) for d in own_domains if d):
+        return "one of our own addresses"
+    if _MACHINE_SENDER_RE.search(local):
+        return "an automated sender"
+    h = {str(k).strip().lower(): str(v or "").strip().lower() for k, v in (msg.headers or {}).items()}
+    if "list-unsubscribe" in h or "list-id" in h:
+        return "a mailing list or newsletter"
+    if h.get("precedence", "").split(";")[0].strip() in ("bulk", "list", "junk"):
+        return "bulk mail"
+    if automatic_reply(msg.headers or {}, msg.subject or "", msg.body or ""):
+        return "an automatic reply"
+    return ""
 
 
 def left_in_auto_reply(text: str) -> bool:
@@ -925,6 +955,40 @@ class Handler:
                                    "Harvey couldn't write a first email to them: yours to write",
                          "conversation_id": convo.id})
         return result
+
+    async def _from_someone_new(self, msg, text: str) -> bool:
+        """An email from someone Harvey never wrote to, at no company it wrote to.
+
+        Machines (no-reply and notification senders, bulk mail, auto-replies,
+        our own mailboxes) are left out as before. A person's email is kept:
+        they become a contact who is never cold-emailed (status replied), and
+        the email a conversation on Needs you, for you to answer in its thread.
+        Harvey drafts nothing on it. Returns True when it was kept."""
+        own = set(allowed_link_domains(self.config)) | {
+            (m.email or "").split("@")[-1].lower() for m in configured_mailboxes(self.config)}
+        why = automated_sender(msg, own_domains=own)
+        if why:
+            logger.info(f"Handler: left out an email from {msg.from_email} ({why}).")
+            return False
+        name_part = parseaddr(str((msg.headers or {}).get("from", "")))[0]
+        first, last = clean_name(name_part)
+        domain = msg.from_email.split("@")[-1].lower()
+        company = "" if domain in FREE_MAIL_DOMAINS else domain.split(".")[0].replace("-", " ").title()
+        prospect_id = await self.state.add_prospect(Prospect(
+            first_name=first, last_name=last, email=msg.from_email, email_status=GIVEN,
+            company=company, source=NEW_SENDER_SOURCE, status="replied",
+            mailbox=msg.mailbox or "",
+            personalization_notes=f"Wrote to us first: {(msg.subject or '(no subject)')[:120]}"))
+        await self.state.add_conversation(Conversation(
+            id="", prospect_id=prospect_id, channel="email", stage="engaged",
+            status="needs_human", mailbox=msg.mailbox or "",
+            thread=[Message(sender="prospect", content=text, from_email=msg.from_email,
+                            message_id=msg.message_id or "", thread_ref=msg.thread_ref or "",
+                            subject=(msg.subject or "")[:300])]))
+        await self.state.log_action("new_sender", "handler", {
+            "from": msg.from_email, "mailbox": msg.mailbox or "", "subject": (msg.subject or "")[:120]})
+        logger.info(f"Handler: {msg.from_email} wrote to us first; it's on Conversations, Needs you.")
+        return True
 
     async def _match_sender(self, msg):
         """Who a message is from: the prospect at its address; else the one
@@ -1436,7 +1500,7 @@ class Handler:
             # the thread or the company's domain, never dropped unread.
             prospect, answers = await self._match_sender(msg)
             if prospect is None:
-                logger.warning(f"Handler: No prospect found for {msg.from_email}")
+                await self._from_someone_new(msg, text)
                 return
             await self._process_reply(
                 msg.from_email,

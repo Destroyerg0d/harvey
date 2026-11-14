@@ -161,7 +161,10 @@ async def test_the_company_domain_matches_exactly_and_only_someone_emailed(state
     never = await person(state, "ann@other.example")          # never emailed
     await run(state, message("x@mail.shop.example", "Tell me more.", n=1),
               message("y@other.example", "Tell me more.", n=2))
-    assert await conversations(state) == []
+    # Neither is taken for someone Harvey emailed: each is someone new, on Needs you.
+    found = await conversations(state)
+    assert {c.prospect_id for c in found}.isdisjoint({pid, never})
+    assert all(c.status == "needs_human" for c in found)
     assert (await state.get_prospect(pid)).status == "contacted"
     assert (await state.get_prospect(never)).status == "contacted"
 
@@ -174,7 +177,8 @@ async def test_a_free_mail_domain_is_never_a_company(state):
     await run(state, message("stranger@gmail.com", "Please remove me from your list."))
     assert (await state.get_prospect(pid)).status == "contacted"
     assert (await row(state, follow_up))["status"] == "approved"
-    assert await conversations(state) == []
+    # The stranger is someone new (on Needs you), never Jane.
+    assert all(c.prospect_id != pid and c.status == "needs_human" for c in await conversations(state))
 
 
 @pytest.mark.asyncio
