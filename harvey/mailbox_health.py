@@ -54,7 +54,7 @@ GLOBAL_BOUNCE_KEY = "bounce_count"
 CONTACTED_STATUSES = ("contacted", "replied", "meeting", "closed", "lost", "opted_out")
 WROTE_BACK_STATUSES = ("replied", "meeting", "closed", "lost", "opted_out")
 # Addresses the Writer may write to (state.WRITABLE_EMAIL_STATUSES).
-SENDABLE_EMAIL_STATUSES = ("verified", "risky")
+SENDABLE_EMAIL_STATUSES = ("verified", "risky", "published")
 # Waiting to go out: to approve, approved, going out now.
 QUEUED_STATUSES = ("pending_review", "approved", "sending")
 

@@ -9,6 +9,14 @@ minor versions can still change behaviour.
 
 ### Added
 
+- **Cold email keeps going when the verifier credits run out** (`channels.email.send_published`,
+  off by default). An address the company prints on its own website, an info@ or a person's own
+  address on their team page, with a working mail server, that no verifier could judge is graded
+  `published` instead of `guess`, and the gate and the Sender let it through while the switch is
+  on. A verifier's verdict still wins, and guessed patterns (which bounced 22 to 44%) never go.
+- **Scout's map leans to where cold email can go.** The United States gets three cities a round
+  (`MAP_WEIGHT`), every other country one: no consent check holds US business email, while
+  Precleared holds most EU and Australian addresses. No country is dropped.
 - **A WhatsApp alert to your own phone when a meeting is close.** On email, LinkedIn, WhatsApp
   and the website chat, a positive message that talks about a call, a meeting, a day or a time
   gets one model read of the conversation; when a meeting really is close, Harvey messages

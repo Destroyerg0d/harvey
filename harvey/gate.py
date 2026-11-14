@@ -39,6 +39,11 @@ URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 
 DELIVERABLE_STATUSES = {"verified", "risky"}
 GIVEN = "given"   # typed to us by the person themselves; no verifier could say
+# Printed on the company's own website (an info@, a person's own address on
+# their team page) with a working mail server, that no verifier could judge
+# (no key, or the credits ran out). Sent only while channels.email.send_published
+# is on: in production these bounced 6 of 418 (owner, 2026-11-14).
+PUBLISHED = "published"
 
 
 @dataclass
@@ -180,6 +185,7 @@ def pre_send_check(
     postal_address: str = "",
     do_not_contact=(),
     max_words: int = MAX_BODY_WORDS,
+    allow_published: bool = False,
 ) -> GateResult:
     """Run every deterministic check. Returns ok=False with reasons on any hit.
 
@@ -208,6 +214,8 @@ def pre_send_check(
         # chat) that no verifier could check. Only the inbound follow-up grades
         # an address so, and cold staging never picks one (sender.py).
         allowed = (DELIVERABLE_STATUSES if allow_risky else {"verified"}) | {GIVEN}
+        if allow_published:
+            allowed = allowed | {PUBLISHED}
         # Replies go back to someone who emailed US — deliverability proven.
         if kind == "sequence" and (prospect.email_status or "guess") not in allowed:
             reasons.append(

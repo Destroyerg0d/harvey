@@ -36,6 +36,16 @@ def test_the_map_rotates_shop_kinds_and_cities_and_skips_what_it_cant_map():
     assert len(pairs) == 2 * (len(S.MAP_CITIES["united kingdom"]) + len(S.MAP_CITIES["australia"]))
 
 
+def test_the_us_gets_three_cities_a_round_where_cold_email_needs_no_consent_check():
+    pairs = S.map_rotation(cfg(["Home Decor & Furniture"], ["European Union", "United States"]),
+                           OpenStreetMap())
+    cities = [c for _, c in pairs]
+    us = S.MAP_CITIES["united states"]
+    assert cities[:4] == ["Dublin", us[0], us[1], us[2]]
+    assert cities[4:8] == ["Amsterdam", us[3], us[4], us[5]]
+    assert len(cities) == len(S.MAP_CITIES["european union"]) + len(us)       # nobody dropped
+
+
 def test_a_city_named_in_the_geography_is_searched_as_it_is():
     pairs = S.map_rotation(cfg(["Home Decor & Furniture"], ["Austin, TX"]), OpenStreetMap())
     assert pairs == [("Home Decor & Furniture", "Austin, TX")]

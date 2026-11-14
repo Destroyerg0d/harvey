@@ -2434,9 +2434,9 @@ async def get_live_status():
         k = (p.get("email_status") or "guess").lower()
         by_status[k] = by_status.get(k, 0) + 1
     deliverable = {p["id"] for p in with_email
-                   if (p.get("email_status") or "") in ("verified", "risky")}
+                   if (p.get("email_status") or "") in ("verified", "risky", "published")}
     unconfirmed = sum(n for k, n in by_status.items()
-                      if k not in ("verified", "risky", "invalid"))
+                      if k not in ("verified", "risky", "published", "invalid"))
 
     # Drafts are counted per person, not per campaign: one campaign can cover many.
     drafted: set[str] = set()

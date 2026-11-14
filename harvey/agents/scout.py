@@ -134,20 +134,31 @@ def search_phrase(label: str) -> str:
     return " ".join(base.split())
 
 
+# Cities a country gets per round of the map: more where cold email can go
+# without a consent check (owner, 2026-11-14: "utilize the mailing capacity to
+# the fullest"; Precleared holds most EU and Australian addresses).
+MAP_WEIGHT = {"united states": 3}
+
+
 def map_rotation(config, osm) -> list[tuple[str, str]]:
     """Every (industry, city) the map can search: each city for every kind of
-    shop in turn, the cities taken round robin across the countries."""
+    shop in turn, the cities taken round robin across the countries, MAP_WEIGHT
+    cities a round for a country listed there (one for the rest)."""
     icp = config.icp
     terms = [t for t in (icp.industries or []) if osm._tags(t)]
     if not terms:
         return []
     cities: list[list[str]] = []
+    weights: list[int] = []
     for place in icp.geography or []:
         known = MAP_CITIES.get(place.strip().lower())
         cities.append(list(known) if known else [place.strip()])
-    flat, longest = [], max((len(c) for c in cities), default=0)
-    for i in range(longest):          # round robin over the countries
-        flat += [c[i] for c in cities if i < len(c)]
+        weights.append(max(1, MAP_WEIGHT.get(place.strip().lower(), 1)))
+    flat, taken = [], [0] * len(cities)
+    while any(t < len(c) for t, c in zip(taken, cities)):     # round robin
+        for k, c in enumerate(cities):
+            flat += c[taken[k]:taken[k] + weights[k]]
+            taken[k] += weights[k]
     seen, ordered = set(), []
     for city in flat:
         if city not in seen:
@@ -1426,6 +1437,7 @@ class Scout:
                 known_emails=evidence.get("known") or None,
                 default_pattern=evidence.get("default", DEFAULT_PATTERN),
                 other_people=evidence.get("people") or None,
+                published=self._published_grade(),
             )
         except Exception as e:
             logger.debug(f"find_email failed for {domain}: {e}")
@@ -1905,7 +1917,7 @@ Respond ONLY with the JSON array."""
         # only a guess (never sent). A named person found here who is
         # already a prospect (a revisit), or anyone already on file from
         # another source, means the company is covered.
-        reachable = any(c.email_status in ("verified", "risky") for c in contacts)
+        reachable = any(c.email_status in ("verified", "risky", "published") for c in contacts)
         if not reachable and (contacts or not named_on_site) \
                 and await self._company_uncontacted(company_id):
             inbox = await self._company_inbox_prospect(
@@ -1950,6 +1962,13 @@ Respond ONLY with the JSON array."""
             logger.debug(f"Contact lookup failed for company {company_id}: {e}")
             return False
 
+    def _published_grade(self) -> str:
+        """What an address printed on the company's own site is graded when no
+        verifier can judge it: "published" while channels.email.send_published
+        lets those go, else an honest "guess"."""
+        email = getattr(getattr(getattr(self, "config", None), "channels", None), "email", None)
+        return "published" if getattr(email, "send_published", False) else "guess"
+
     async def _company_inbox_prospect(
         self, company_id: str, domain: str, company_name: str,
         industry: str, signal_note: str = "",
@@ -1966,7 +1985,8 @@ Respond ONLY with the JSON array."""
             return None
         try:
             status = await verify_published_address(
-                email, env=self.env, state=getattr(self, "state", None))
+                email, env=self.env, state=getattr(self, "state", None),
+                unverified=self._published_grade())
         except Exception as e:
             logger.debug(f"Inbox verification failed for {email}: {e}")
             status = "guess"

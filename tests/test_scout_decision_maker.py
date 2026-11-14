@@ -86,8 +86,8 @@ def no_network(monkeypatch):
                  "_hunter_domain_pattern"):
         monkeypatch.setattr(ef, name, boom)
 
-    async def unverified(email, env=None, state=None):
-        return "guess"
+    async def unverified(email, env=None, state=None, unverified="guess"):
+        return unverified
 
     monkeypatch.setattr(scout_mod, "verify_published_address", unverified)
 

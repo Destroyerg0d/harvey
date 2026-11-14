@@ -149,7 +149,7 @@ async def test_no_usable_address_means_no_inbox():
 
 @pytest.mark.asyncio
 async def test_inbox_prospect_carries_its_verification(monkeypatch):
-    async def graded(email, env=None, state=None):
+    async def graded(email, env=None, state=None, unverified="guess"):
         return "verified"
 
     monkeypatch.setattr(scout_mod, "verify_published_address", graded)

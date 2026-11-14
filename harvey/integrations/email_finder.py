@@ -1286,14 +1286,16 @@ async def _verify_candidate(email: str, mx_type: str, env, state=None) -> tuple[
     return status, catch_all_seen or seen
 
 
-async def verify_published_address(email: str, env=None, state=None) -> str:
+async def verify_published_address(email: str, env=None, state=None,
+                                   unverified: str = "guess") -> str:
     """Grade an address the company publishes on its own website.
 
     Graded like any other address: a catch-all verdict stays "risky", so
     ``send_to_risky`` still decides whether it is sent (a published address
-    can be stale). A verifier's invalid verdict wins, and an inconclusive
-    check stays an honest guess that is never sent. ``state`` counts the
-    free tiers' monthly allowances, as in find_email.
+    can be stale). A verifier's invalid verdict wins. An inconclusive check
+    is ``unverified``: an honest guess that is never sent, or "published"
+    when channels.email.send_published lets such an address go (harvey/gate.py).
+    ``state`` counts the free tiers' monthly allowances, as in find_email.
     """
     email = (email or "").strip().lower()
     domain = email.partition("@")[2]
@@ -1303,7 +1305,7 @@ async def verify_published_address(email: str, env=None, state=None) -> str:
     if not mx_host:
         return "invalid"
     status, _ = await _verify_candidate(email, classify_mx(mx_host), env, state=state)
-    return status or "guess"
+    return status or unverified
 
 
 def _belongs_to_someone_else(candidate, pattern, person, domain, other_people, known_emails) -> bool:
@@ -1331,6 +1333,7 @@ async def find_email(
     known_emails: Optional[list[tuple[str, str, str]]] = None,
     default_pattern: str = DEFAULT_PATTERN,
     other_people: Optional[list[tuple[str, str]]] = None,
+    published: str = "guess",
 ) -> EmailResult:
     """Find and honestly grade one email for a person at a company.
 
@@ -1362,11 +1365,13 @@ async def find_email(
     )
     candidate = build_email(pattern, first_name, last_name, domain)
     own = _clean_name_part(first_name), _clean_name_part(last_name)
+    their_own = False      # the site prints this exact address as theirs
     for email, first, last in known_emails or []:
         if (_clean_name_part(first), _clean_name_part(last)) == own \
                 and email.split("@")[-1].lower() == domain:
             candidate = email.strip().lower()
             pattern = infer_pattern_from_email(candidate, first, last) or pattern
+            their_own = True
             break
     if _belongs_to_someone_else(candidate, pattern, (first_name, last_name), domain,
                                 other_people, known_emails):
@@ -1399,7 +1404,9 @@ async def find_email(
 
     if status is None:
         # Verification couldn't decide — an honest guess, never "verified".
-        status = "guess"
+        # Their own address as the site prints it is ``published`` (the grade
+        # channels.email.send_published lets go); a pattern stays a guess.
+        status = published if their_own else "guess"
     elif status == "risky" and source in WEAK_SOURCES:
         # A catch-all domain accepts every address at check time, so "risky"
         # says nothing about this mailbox. With a pattern Harvey never saw a

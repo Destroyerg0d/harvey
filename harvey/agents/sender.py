@@ -27,7 +27,8 @@ from harvey.config import (
     send_window_of,
 )
 from harvey.gate import (
-    MAX_BODY_WORDS, MAX_ESTIMATE_BODY_WORDS, autopilot_review, do_not_contact_match, pre_send_check,
+    MAX_BODY_WORDS, MAX_ESTIMATE_BODY_WORDS, PUBLISHED, autopilot_review, do_not_contact_match,
+    pre_send_check,
 )
 from harvey.send_window import in_window, next_send_time, recipient_country, recipient_zone
 from harvey.integrations.instantly import InstantlyClient
@@ -517,7 +518,7 @@ class Sender:
         sendable_email = (
             SENDABLE_EMAIL_STATUSES_WITH_RISKY if allow_risky
             else SENDABLE_EMAIL_STATUSES
-        )
+        ) | ({PUBLISHED} if self._send_published() else set())
         prospects = []
         seen_emails: set[str] = set()
         skipped_unverified = 0
@@ -786,6 +787,11 @@ class Sender:
                     details={"from": m.email, "to": chosen.email,
                              "prospects": len(company), "emails": rows})
 
+    def _send_published(self) -> bool:
+        """channels.email.send_published: an address the company prints on
+        its own site, which no verifier could judge, may get cold email."""
+        return bool(getattr(self.config.channels.email, "send_published", False))
+
     def _sign_off_problems(self, item: dict, mailbox: Mailbox) -> list[str]:
         """Several mailboxes: why this email (as it will read, sender tag
         filled in, without the footer) doesn't fit the mailbox it goes out
@@ -887,7 +893,7 @@ class Sender:
         sendable_email = (
             SENDABLE_EMAIL_STATUSES_WITH_RISKY if allow_risky
             else SENDABLE_EMAIL_STATUSES
-        )
+        ) | ({PUBLISHED} if self._send_published() else set())
 
         staged = 0
         skipped = 0
@@ -1107,6 +1113,7 @@ class Sender:
         gate = pre_send_check(
             item["to_email"], item["subject"], self._outgoing_body(item),
             prospect=prospect, allow_risky=allow_risky, kind=item["kind"],
+            allow_published=self._send_published(),
             postal_address=compliance_of(self.config).postal_address,
             do_not_contact=live_do_not_contact(self.config),
             max_words=(MAX_ESTIMATE_BODY_WORDS if item.get("angle") == INBOUND_ESTIMATE_ANGLE

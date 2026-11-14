@@ -60,6 +60,10 @@ channels:
     #                                  # domain and booking link; on autopilot,
     #                                  # an email linking elsewhere waits for you
     send_to_risky: false        # also send to catch-all domains (off = safest)
+    # Also send to an address the company prints on its own website (info@,
+    # hello@, a person's own address on their team page) when no verifier can
+    # judge it (no key, or the credits ran out). Guessed patterns never go.
+    send_published: false
     max_bounce_rate: 0.05       # pause all sending if bounces exceed this
     # New sending domain? Set start_date to the day your warmup service went
     # on: no cold email for min_days, then the cold cap climbs from

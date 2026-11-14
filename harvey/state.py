@@ -41,7 +41,9 @@ BUSY_TIMEOUT_SECONDS = 30.0
 
 # Email statuses the Writer drafts for. Shared with the heartbeat so it only
 # chooses write_campaign when there is something the Writer will act on.
-WRITABLE_EMAIL_STATUSES = ("verified", "risky")
+# "published": printed on the company's own site, no verifier could judge it;
+# only graded so while channels.email.send_published is on (harvey/gate.py).
+WRITABLE_EMAIL_STATUSES = ("verified", "risky", "published")
 # Settings key, per prospect: the user emailed them by hand from the
 # dashboard. Its value is the status they had before, so undo is exact; its
 # presence tells the Sender never to email them as well.

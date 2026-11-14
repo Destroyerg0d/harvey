@@ -346,6 +346,11 @@ class EmailChannelConfig(BaseModel):
     # mailboxes. Off by default — catch-alls accept everything, so a bad
     # guess still bounces.
     send_to_risky: bool = False
+    # Cold email to an address the company prints on its own website (info@,
+    # hello@, a person's own address on their team page) when no verifier can
+    # judge it, because there is no key or the credits ran out. Such addresses
+    # are graded "published" (not "guess") while this is on. Off by default.
+    send_published: bool = False
     # Native providers queue mail for approval. Instantly cannot use that
     # outbox, so it holds campaigns and escalates replies while this is true.
     # Set false explicitly for full autopilot once you trust the output.
