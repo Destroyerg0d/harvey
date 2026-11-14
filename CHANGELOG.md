@@ -9,6 +9,15 @@ minor versions can still change behaviour.
 
 ### Added
 
+- **Harvey notices email you write by hand.** Each cycle it reads the last three days of every
+  Gmail mailbox's Sent mail. An email a person wrote there (not Harvey: its Message-ID isn't in the
+  Outbox) to someone Harvey knows, matched by the message it answers, its Gmail thread or its
+  recipient, joins their conversation as yours ("by hand, from" the mailbox), cancels whatever
+  Harvey had queued for them (your own dashboard replies stay), and puts the conversation in a
+  new status, **You're handling it**: Harvey doesn't answer and it's off Needs you. Their next
+  reply comes to Needs you; **Hand back to Harvey** opens it again, and Harvey's next answer reads
+  everything you wrote. Answering a Needs-you thread from the dashboard, or ticking "I'll take it
+  from here", does the same. Mail to anyone Harvey doesn't know is left alone.
 - **A yes to "want me to write up the changes?" gets the review itself.** Harvey used to promise
   a write-up "within two working days" that nothing wrote. Now it tests their home page in
   headless Chrome as a mid-range phone on 4G (largest element, layout shift, page weight, the

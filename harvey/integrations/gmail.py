@@ -469,6 +469,43 @@ class GmailProvider(MailProvider):
         self._pending = (marker, True, False)
         return messages
 
+    async def get_sent(self, days: int = 3, known=frozenset(), max_pages: int = 5) -> list[InboundMessage]:
+        """Mail sent from this mailbox in the last ``days`` whose Gmail id
+        isn't in ``known``: Harvey's own sends and the ones a person wrote by
+        hand in Gmail alike (harvey/hand_sent.py tells them apart). Raises
+        GmailError when Gmail can't be read."""
+        if not await self._token():
+            raise GmailError(self._token_problem
+                             or f"not signed in to Gmail. Run '{self._auth_command()}'.")
+        if not await self._check_identity():
+            raise GmailError(self._identity_problem())
+        params = {"q": f"in:sent newer_than:{max(1, int(days))}d", "maxResults": 200}
+        ids, seen_tokens = [], set()
+        for page in range(1, max_pages + 1):
+            listing = await self._request("GET", "/messages", params=dict(params))
+            if not isinstance(listing, dict):
+                raise GmailError(f"sent page {page}: could not read messages")
+            for stub in listing.get("messages", []) or []:
+                msg_id = stub.get("id") if isinstance(stub, dict) else None
+                if isinstance(msg_id, str) and msg_id and msg_id not in known:
+                    ids.append(msg_id)
+            token = listing.get("nextPageToken")
+            if not token or token in seen_tokens:
+                break
+            seen_tokens.add(token)
+            params["pageToken"] = token
+        out = []
+        for msg_id in dict.fromkeys(ids):
+            got = await self._fetch(msg_id, "sent")
+            if got is _GONE:
+                continue
+            msg, labels = got
+            if msg is not None and "SENT" in labels and "DRAFT" not in labels:
+                if self.mailbox is not None:
+                    msg.mailbox = self.mailbox.email
+                out.append(msg)
+        return out
+
     def confirm_read(self):
         """The handler handled everything the last get_replies returned:
         the next read starts after it."""

@@ -32,7 +32,7 @@ _NOT_THEIR_OWN_RE = re.compile(
 SAID_NO = frozenset({"lost", "closed_lost"})
 # ...and that they're talking to us by email, or a deal is under way.
 LIVE_EMAIL = frozenset({"replied", "meeting", "closed", "closed_won"})
-LIVE_CONVERSATION = ("open", "replied", "meeting_booked", "needs_human")
+LIVE_CONVERSATION = ("open", "replied", "meeting_booked", "needs_human", "with_you")
 
 
 @dataclass

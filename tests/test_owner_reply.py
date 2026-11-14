@@ -125,7 +125,8 @@ async def test_taking_it_over_hands_the_conversation_to_you(state):
     await sent_email(state, pid)
     convo = await conversation(state, pid, [Message(sender="prospect", content="Hello")])
     await queue_your_reply(state, config(), body="I'll handle this one.", convo_id=convo.id, take_over=True)
-    assert (await state.get_conversation(convo.id)).status == "needs_human"
+    # You're handling it: Harvey stays out, and it's off Needs you until they write.
+    assert (await state.get_conversation(convo.id)).status == "with_you"
 
 
 @pytest.mark.asyncio

@@ -108,6 +108,7 @@ const STATUS = {
   unsubscribe:    ['Unsubscribed', 'bad'],
   escalate:       ['Needs a human', 'bad'],
   needs_human:    ['Needs you', 'waiting'],
+  with_you:       ['You’re handling it', 'active'],
   // outbox
   pending_review: ['Waiting on you', 'waiting'],
   approved:       ['Approved', 'good'],
@@ -274,7 +275,10 @@ function actionText(a) {
     case 'outbox_edited': return 'You edited a draft';
     case 'conversation_status':
       return d.to === 'closed' ? 'You closed a conversation'
-        : d.from === 'needs_human' ? 'You handed a conversation back to Harvey' : 'You reopened a conversation';
+        : d.from === 'needs_human' || d.from === 'with_you' ? 'You handed a conversation back to Harvey'
+        : 'You reopened a conversation';
+    case 'hand_sent': return 'You wrote to ' + who + ' by hand' +
+      (d.mailbox ? ' from ' + escHtml(d.mailbox) : '') + ' · Harvey stepped back';
   }
   const text = escHtml(String(a.action_type || '').replace(/_/g, ' '));
   return a.agent === 'main' ? 'Heartbeat: ' + text : text;
@@ -2613,6 +2617,7 @@ const STAGE_LABELS = {
 };
 const CONVO_FILTERS = [
   ['needs', 'Needs you', c => !!c.draft || c.status === 'needs_human'],
+  ['yours', 'You’re handling', c => c.status === 'with_you'],
   ['open', 'Open', c => c.status !== 'closed' && c.status !== 'awaiting_reply' && c.status !== 'auto'],
   ['awaiting', 'Awaiting reply', c => c.status === 'awaiting_reply'],
   ['closed', 'Closed', c => c.status === 'closed'],
@@ -2700,7 +2705,9 @@ function convoCard(c) {
     const m = it.msg, sent = m.sender === 'harvey' || m.sender === 'you';
     // An auto-reply, or a reply from an address other than the one emailed.
     const who = m.sender === 'you' ? 'You' : sent ? 'Harvey' : m.sender === 'auto' ? 'Automatic reply' : escHtml(first);
-    const from = !sent && m.from_email && m.from_email !== c.prospect_email ? ' (' + escHtml(m.from_email) + ')' : '';
+    // Yours with an address: written by hand in Gmail, by you or a coworker (harvey/hand_sent.py).
+    const from = m.sender === 'you' && m.from_email ? ' (by hand, from ' + escHtml(m.from_email) + ')'
+      : !sent && m.from_email && m.from_email !== c.prospect_email ? ' (' + escHtml(m.from_email) + ')' : '';
     return '<div class="thread-msg ' + (sent ? 'sent' : 'received') + '"><div class="sender">' +
       who + from + ' &middot; ' + relTime(m.timestamp) + '</div>' +
       escHtml(m.content) + '</div>';
@@ -2839,7 +2846,7 @@ function convoReplyHtml(c) {
   const fromDraft = c.draft
     ? '<button class="btn btn-ghost btn-sm" type="button" onclick="convoUseDraft(' + jsq(c.id) + ')">Start from Harvey’s draft</button>'
     : '';
-  const takeOver = c.status === 'needs_human' ? '' :
+  const takeOver = c.status === 'needs_human' || c.status === 'with_you' ? '' :
     '<label class="check"><input type="checkbox" id="convo-take-' + key + '"> I’ll take it from here (Harvey stops answering)</label>';
   return '<details class="convo-box" id="convo-box-' + key + '"><summary>' + icon('pen') + 'Write your own reply</summary>' +
     '<div class="reply-box"><label class="form-label" for="convo-reply-' + key + '">Your email' +
@@ -2887,6 +2894,13 @@ function convoActions(c) {
   if (c.status === 'needs_human') {
     return '<div class="convo-actions"><span class="muted">' + icon('alert') +
       'Harvey handed this to you. Reply here or from your inbox, then:</span>' +
+      '<button class="btn btn-secondary btn-sm" onclick="setConvoStatus(' + jsq(c.id) + ',\'open\')">Hand back to Harvey</button>' +
+      '<button class="btn btn-secondary btn-sm" onclick="setConvoStatus(' + jsq(c.id) + ',\'closed\')">Close</button></div>';
+  }
+  if (c.status === 'with_you') {
+    return '<div class="convo-actions"><span class="muted">' + icon('message') +
+      'You’re handling this one, so Harvey stays out. Their next reply comes to Needs you. ' +
+      'Hand it back and Harvey answers from here, reading everything you wrote.</span>' +
       '<button class="btn btn-secondary btn-sm" onclick="setConvoStatus(' + jsq(c.id) + ',\'open\')">Hand back to Harvey</button>' +
       '<button class="btn btn-secondary btn-sm" onclick="setConvoStatus(' + jsq(c.id) + ',\'closed\')">Close</button></div>';
   }

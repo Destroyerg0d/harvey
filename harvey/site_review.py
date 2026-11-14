@@ -230,14 +230,17 @@ async def measure_in_chrome(url: str, chrome_path: str = "", timeout: float = 75
             cdp.on("Network.responseReceived", response)
             cdp.on("Network.loadingFinished", finished)
             await page.add_init_script(_OBSERVE_JS)
-            answer = await page.goto(url, wait_until="load", timeout=int(timeout * 1000))
+            # Some pages never fire "load" (a widget or tracker that never
+            # finishes): the page itself is measured once it is there.
+            answer = await page.goto(url, wait_until="domcontentloaded", timeout=int(timeout * 1000))
             if answer is not None and answer.status >= 400:
                 m.why = f"the home page answered {answer.status}"
                 return m
-            try:
-                await page.wait_for_load_state("networkidle", timeout=10000)
-            except Exception:
-                pass
+            for state, wait_ms in (("load", int(timeout * 500)), ("networkidle", 10000)):
+                try:
+                    await page.wait_for_load_state(state, timeout=wait_ms)
+                except Exception:
+                    pass
             await page.wait_for_timeout(1500)
             data = await page.evaluate(_COLLECT_JS)
             m.final_url = page.url
@@ -420,6 +423,15 @@ def booking_url(config) -> str:
     return (getattr(offer, "booking_url", "") or "").strip()
 
 
+# Email fills {{sender_first_name}} with the sending mailbox's name; nothing
+# fills a tag on LinkedIn, so a review there has no sign-off at all.
+_SIGN_OFF = {
+    "email": "Sign off with {{sender_first_name}} on its own line, and use no other merge tags.",
+    "linkedin": "End with the booking line: no sign-off, no name and no merge tags such as "
+                "{{sender_first_name}}.",
+}
+
+
 def review_prompt(config, *, name: str, site: str, fact_lines: list[str], their_words: str,
                   channel: str, playbook: str = "", mailbox_name: str = "") -> str:
     from harvey.untrusted import UNTRUSTED_RULE, fence
@@ -452,6 +464,7 @@ Write:
 - If the measurements show a site in good shape, say so honestly and give the smaller wins.
 - Under {words} words. Plain text: no markdown, no bold, no headings, no dashes, no emojis.
   Never write "free", "no cost" or "guarantee". No other links.
+- {_SIGN_OFF.get(channel, _SIGN_OFF["linkedin"])}
 Output ONLY the message."""
 
 
@@ -488,6 +501,10 @@ def review_problem(text: str, fact_lines: list[str], config, site_host: str, cha
         return f"it links to {host or link}, which is neither their site nor the booking page"
     if booking and booking.rstrip("/") not in body:
         return "it doesn't include the booking link"
+    tags = set(re.findall(r"\{\{\s*([a-z_]+)\s*\}\}", body))
+    allowed_tags = {"sender_first_name"} if channel == "email" else set()
+    if tags - allowed_tags:
+        return f"it has a merge tag ({{{{{sorted(tags - allowed_tags)[0]}}}}}) nothing fills here"
     if not re.search(r"(?m)^\s*(?:1[.)]|\(1\))", body):
         return "it doesn't number the fixes"
     return ""

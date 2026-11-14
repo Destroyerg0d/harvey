@@ -44,7 +44,7 @@ from harvey.referrals import (
 )
 from harvey.state import (
     AUTO_CONVERSATION, AUTOMATIC_INTENTS, COLLEAGUE_REPLIED, FREE_MAIL_DOMAINS, HELD_FOR_REVIEW,
-    LEFT_THE_COMPANY, POLICY_AUTO_REPLY, REVIEW_NEXT_REPLY_KEY, STOP_ON_REPLY, StateManager,
+    LEFT_THE_COMPANY, POLICY_AUTO_REPLY, REVIEW_NEXT_REPLY_KEY, STOP_ON_REPLY, WITH_YOU, StateManager,
 )
 from harvey.sending_mode import sync_sending_mode
 from harvey.site_review import (
@@ -714,7 +714,9 @@ class Handler:
             return True
 
         if self.is_native:
-            return await self._run_native()
+            complete = await self._run_native()
+            await self._notice_hand_sent()
+            return complete
 
         # 1. Fetch active campaigns
         active_campaigns = await self.state.get_campaigns_by_status("active")
@@ -834,10 +836,33 @@ class Handler:
         except Exception as e:
             logger.debug(f"Handler: outbox cancel failed: {e}")
 
+    async def _notice_hand_sent(self) -> None:
+        """Email you or a coworker wrote by hand from these mailboxes
+        (harvey/hand_sent.py). Never stops the cycle."""
+        from harvey import hand_sent
+        try:
+            if is_multi(self.config):
+                providers = [(m.email, self.mailbox_providers.get(m))
+                             for m in configured_mailboxes(self.config)]
+            else:
+                providers = [(self.config.persona.email or "", self.provider)]
+            providers = [(a, p) for a, p in providers
+                         if a and p is not None and p.is_configured() and hasattr(p, "get_sent")]
+            if not providers:
+                return
+            mine, _ = self._own_addresses()
+            counts = await hand_sent.scan(self.state, providers, own_addresses=mine)
+            if counts["hand"]:
+                logger.info(f"Handler: {counts['hand']} email(s) you wrote by hand are on their "
+                            "conversations.")
+        except Exception as e:
+            logger.warning(f"Handler: couldn't check the mailboxes' sent mail: {e}")
+
     async def _stored_conversation(self, prospect_id: str) -> Conversation | None:
         """The conversation a new message from them joins: one handed to you
-        first, then an open one, then one only auto-replies are in."""
-        for status in ("needs_human", "open", AUTO_CONVERSATION):
+        first, then one you're handling, an open one, then one only
+        auto-replies are in."""
+        for status in ("needs_human", WITH_YOU, "open", AUTO_CONVERSATION):
             for convo in await self.state.get_conversations_by_status(status):
                 if convo.prospect_id == prospect_id:
                     return convo
@@ -1251,7 +1276,9 @@ class Handler:
         # hand, or it's a complaint. Later replies join it and nobody drafts.
         # A thread only auto-replies are in becomes theirs when a person writes.
         stored = await self._stored_conversation(prospect.id)
-        handed_off = stored is not None and stored.status == "needs_human"
+        # One you're handling (you wrote to them by hand, harvey/hand_sent.py)
+        # is the same: their reply goes on Needs you, for you.
+        handed_off = stored is not None and stored.status in ("needs_human", WITH_YOU)
         human_thread = stored is not None and stored.status != AUTO_CONVERSATION
         if stored is not None:
             convo = stored.model_copy(deep=True)
@@ -1280,6 +1307,8 @@ class Handler:
             else:
                 if convo.status == AUTO_CONVERSATION:
                     convo.status = "open"
+                elif convo.status == WITH_YOU:
+                    convo.status = "needs_human"     # they answered you: yours to read
                 convo.stage = self._determine_stage(intent, convo.stage, reply_text)
 
         # 2b. Draft the reply now, while nothing is stored yet. A held

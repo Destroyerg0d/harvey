@@ -377,6 +377,12 @@ and it waits for approval until reviews autopilot is on (its own switch on the O
 A job seeker on any channel gets one fixed reply naming `careers.email` and
 `careers.linkedin_url`, then nothing; someone selling to us gets no reply.
 
+Email written by hand in Gmail (harvey/hand_sent.py): each cycle reads every Gmail mailbox's
+recent Sent mail; what isn't Harvey's own (Outbox Message-ID) and belongs to a known contact
+joins their thread as `you`, cancels Harvey's queued email to them, and sets the conversation
+to `with_you` (Harvey stays out, off Needs you; their reply moves it to `needs_human`; Hand
+back to Harvey sets `open`). Seen Gmail ids are kept in the `sent_seen` table for 30 days.
+
 ### Common Issues
 - **"command not found: harvey"**: Activate venv first: `source .venv/bin/activate`
 - **"ModuleNotFoundError: No module named 'harvey'" after install (macOS)**: Python 3.13 silently ignores `.pth` files that carry the macOS hidden file flag, and some Macs propagate that flag into `.venv`. Run `harvey install` again (it auto-fixes by linking the package), or manually: `ln -s "$(pwd)/harvey" .venv/lib/python3.13/site-packages/harvey`

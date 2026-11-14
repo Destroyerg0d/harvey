@@ -72,6 +72,10 @@ COMPANY_STOP_KEEP_KEY = "company_stop_keep:"
 # answered, and the prospect's sequence carries on. A person writing in it
 # makes it an ordinary conversation again.
 AUTO_CONVERSATION = "auto"
+# A person on our side is handling it: they wrote to the prospect by hand
+# (harvey/hand_sent.py) or took it over from the dashboard. Harvey doesn't
+# answer, and it isn't on Needs you until the prospect writes again.
+WITH_YOU = "with_you"
 # Intents of a message a machine wrote, not a person.
 AUTOMATIC_INTENTS = frozenset({"ooo", "auto_ack", "left_company"})
 # Outbox error on what a reply cancelled (stop-on-reply), and on what an

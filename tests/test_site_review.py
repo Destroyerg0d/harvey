@@ -90,6 +90,14 @@ def test_a_review_that_invents_or_links_elsewhere_is_refused(change, why):
     assert why in review_problem(change(REVIEW), facts(slow_shop()), config(), "shop.example", "email")
 
 
+def test_a_merge_tag_only_passes_on_email():
+    signed = REVIEW + "\n{{sender_first_name}}"
+    assert review_problem(signed, facts(slow_shop()), config(), "shop.example", "email") == ""
+    assert "merge tag" in review_problem(signed, facts(slow_shop()), config(), "shop.example", "linkedin")
+    assert "merge tag" in review_problem(REVIEW + "\n{{first_name}}", facts(slow_shop()), config(),
+                                         "shop.example", "email")
+
+
 def test_a_link_to_their_own_site_is_fine():
     text = REVIEW.replace("from a test of your home page", "from a test of https://shop.example/")
     assert review_problem(text, facts(slow_shop()), config(), "shop.example", "email") == ""

@@ -22,6 +22,7 @@ import aiosqlite
 from harvey.config import live_do_not_contact
 from harvey.gate import do_not_contact_match, pre_send_check
 from harvey.models.conversation import Conversation
+from harvey.state import WITH_YOU
 
 logger = logging.getLogger("harvey.owner_reply")
 
@@ -165,7 +166,7 @@ async def queue_your_reply(state, config, *, body: str, convo_id: str = "", pros
         # Their next reply finds this conversation (the Handler reuses an open one).
         new_id = await state.add_conversation(Conversation(
             id="", prospect_id=prospect.id, campaign_id=await _latest_campaign(state, prospect.id),
-            channel="email", thread=[], status="needs_human" if take_over else "open",
+            channel="email", thread=[], status=WITH_YOU if take_over else "open",
             mailbox=headers.mailbox))
         convo = await state.get_conversation(new_id)
 
@@ -188,8 +189,10 @@ async def queue_your_reply(state, config, *, body: str, convo_id: str = "", pros
             status="approved", provider=getattr(config.channels.email, "provider", "") or "",
             thread_ref=headers.thread_ref, in_reply_to=headers.in_reply_to,
             approved_by="you", angle=OWNER_ANGLE, mailbox=headers.mailbox or None)
-    if take_over and convo.status != "needs_human":
-        await state.update_conversation(convo.id, status="needs_human")
+    # Taking it over, or answering one Harvey handed you: you're handling it
+    # (off Needs you, Harvey doesn't answer) until their reply or a hand back.
+    if (take_over or convo.status == "needs_human") and convo.status != WITH_YOU:
+        await state.update_conversation(convo.id, status=WITH_YOU)
     await state.log_action("owner_reply", "dashboard", {
         "conversation_id": convo.id, "outbox_id": outbox_id, "to_email": prospect.email,
         "replaced_draft": replaced is not None, "take_over": bool(take_over)})
