@@ -29,7 +29,9 @@ from harvey.humanize import humanize, humanizer_enabled
 from harvey.integrations.instantly import InstantlyClient
 from harvey.lessons import lessons_block
 from harvey.meeting_alert import POSITIVE_INTENTS, maybe_alert
-from harvey.meeting_slot import asks_to_meet, offer as meeting_offer, prompt_block
+from harvey.meeting_slot import (
+    asks_to_meet, chat_instead_block, chat_link, declines_call, offer as meeting_offer, prompt_block,
+)
 from harvey.integrations.mail_provider import (
     NATIVE_PROVIDERS, get_mail_provider, strip_quoted_reply,
 )
@@ -2265,18 +2267,24 @@ Write a reply that:"""
 
         # They asked to meet: the owner's fixed slot, in their time
         # (harvey/meeting_slot.py), never "send me two or three windows".
-        slot = None
-        if intent in ("interested", "question") and asks_to_meet(reply_text):
+        # They can't do a call: chat on WhatsApp instead (product.offer.chat_link).
+        slot, must = None, ""
+        if declines_call(reply_text) and chat_instead_block(self.config):
+            prompt += chat_instead_block(self.config)
+            must = chat_link(self.config)
+        elif intent in ("interested", "question") and asks_to_meet(reply_text):
             slot = await self._meeting_slot(prospect)
             if slot is not None:
                 prompt += prompt_block(slot, self.config)
+                must = slot.their_start()
 
         prompt += "\n\nWrite ONLY the email body. No subject line, no greeting label, no signature block, no markdown."
 
         response = ""
         for attempt in range(2):
             again = ("" if not attempt else
-                     f"\n\nYour last draft didn't state the meeting time. State it exactly: {slot.text()}.")
+                     f"\n\nYour last draft left out what it must say. Include, exactly: "
+                     f"{slot.text() if slot is not None else must}.")
             response = await self.brain.think(
                 prompt + again, session_id="harvey-handler",
                 agent="handler", task="generate_response",
@@ -2289,7 +2297,7 @@ Write a reply that:"""
                     raise BrainUnavailable(paused)
                 return ""
             response = response.strip()
-            if slot is None or slot.their_start() in response:
+            if not must or must in response:
                 break
         # Guard against the model returning meta-text instead of an email
         if response.lower().startswith(("i can't", "i cannot", "as an ai", "sorry,")):
@@ -2300,8 +2308,8 @@ Write a reply that:"""
             enabled=humanizer_enabled(self.config),
         )
         body = polished[0]["body"]
-        if slot is not None and slot.their_start() in response and slot.their_start() not in body:
-            return response          # the polish lost the time: the draft as written
+        if must and must in response and must not in body:
+            return response          # the polish lost the time or the link: the draft as written
         return body
 
     async def _meeting_slot(self, prospect):

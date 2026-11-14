@@ -777,6 +777,8 @@ class WhatsAppAgent:
             slot = await self.meeting_slot(contact)
             if slot is not None:
                 slot_block = prompt_block(slot, self.config)
+                # The one link this reply may carry: the meeting room, if set.
+                booking = getattr(getattr(product, "offer", None), "meeting_link", "") or ""
             else:
                 booking = getattr(getattr(product, "offer", None), "booking_url", "") or ""
         task = {
@@ -787,7 +789,9 @@ class WhatsAppAgent:
                           "useful or a different angle, no guilt, no \"bumping this\". No link, no "
                           "price. Under 35 words."),
             "reply": (f"They replied (read as: {intent}). Answer what they said, in their language. "
-                      + (f"They asked to talk: the booking link is {booking}. " if booking else "No link. ")
+                      + ("They asked to talk: the time and its link are below. " if slot_block
+                         else f"They asked to talk: the booking link is {booking}. " if booking
+                         else "No link. ")
                       + "No price, even if they ask. If they ask whether this is automated, say yes, "
                         "honestly. Under 80 words."),
         }[which]

@@ -101,7 +101,7 @@ async def test_an_email_asking_to_meet_gets_the_slot_and_a_draft_without_it_is_r
                                                                      content="Tell me when we can meet?")])
     reply = await h._generate_response("interested", "Tell me when we can meet?", prospect, convo)
     assert "4:30 to 6:30 AM London time" in reply and len(prompts) == 2
-    assert "THE MEETING TIME" in prompts[0] and "didn't state the meeting time" in prompts[1]
+    assert "THE MEETING TIME" in prompts[0] and "left out what it must say" in prompts[1]
     assert ms.prompt_block                     # the module the handler uses
 
 
@@ -156,3 +156,43 @@ async def test_the_alert_names_the_slot_and_a_later_agreed_time_alerts_again():
         assert len(bodies) == 2
         assert "Harvey offered: Monday 16 November, 4:30 to 6:30 AM London time" in bodies[0]
         assert bodies[1].startswith("Harvey: time agreed with Ann") and "5 AM London" in bodies[1]
+
+
+# ── The meeting room link, and chat instead of a call ──
+
+ROOM = "https://meet.example.test/abc-defg-hij"
+CHAT = "https://wa.me/15555550100"
+
+
+def linked_cfg():
+    c = cfg()
+    c.product.offer.meeting_link, c.product.offer.chat_link = ROOM, CHAT
+    return c
+
+
+def test_the_slot_carries_the_meeting_room_as_the_invite():
+    block = prompt_block(offer(linked_cfg(), SUNDAY_NIGHT, "Europe/London"), linked_cfg())
+    assert ROOM in block and "no separate calendar invite" in block
+    assert "calendar invite follows" in prompt_block(offer(cfg(), SUNDAY_NIGHT), cfg())
+
+
+def test_someone_who_cant_do_a_call_is_offered_chat_instead():
+    from harvey.meeting_slot import chat_instead_block, declines_call
+    for text in ("I can’t pick a date for a call right now, I’m often on the road.",
+                 "No calls please, I travel a lot", "Prefer email if that's ok"):
+        assert declines_call(text), text
+    for text in ("Can we do a call Thursday?", "Tell me when we can meet?"):
+        assert not declines_call(text), text
+    assert CHAT in chat_instead_block(linked_cfg()) and "playful" in chat_instead_block(linked_cfg())
+    assert chat_instead_block(cfg()) == ""                 # no chat link set: no offer
+
+
+def test_the_gate_lets_your_room_and_chat_links_through_and_nothing_else_there():
+    from harvey.gate import autopilot_review
+    c = linked_cfg()
+    c.persona = NS(email="sam@studio.example")
+    c.channels = NS(email=NS(link_domains=[], mailboxes=[]))
+    assert autopilot_review("", f"Here's the room: {ROOM}", c) == []
+    assert autopilot_review("", f"Message us: {CHAT}", c) == []
+    assert autopilot_review("", "Join https://meet.example.test/someone-else", c)
+    assert autopilot_review("", "Message https://wa.me/15555550999", c)

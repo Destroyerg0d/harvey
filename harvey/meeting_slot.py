@@ -140,14 +140,60 @@ def offer(config, now: datetime | None = None, their_zone: str = "") -> Slot | N
                 their_zone=their_zone)
 
 
+def _offer_field(config, name: str) -> str:
+    offer = getattr(getattr(config, "product", None), "offer", None)
+    return (getattr(offer, name, "") or "").strip()
+
+
 def prompt_block(slot: Slot, config) -> str:
     """What every channel's reply prompt gets when they ask to meet."""
-    offered = getattr(getattr(config, "product", None), "offer", None)
-    duration = getattr(offered, "meeting_duration", "") or "short"
-    who = getattr(offered, "meeting_owner", "") or "our team"
+    duration = _offer_field(config, "meeting_duration") or "short"
+    who = _offer_field(config, "meeting_owner") or "our team"
+    link = _offer_field(config, "meeting_link")
+    invite = (f"Give them this video call link for that time, written exactly: {link}. It is the "
+              "invite: no separate calendar invite is needed. "
+              if link else "Say the calendar invite follows once they confirm. ")
     return (
         "\n\nTHE MEETING TIME. They asked to meet. Offer exactly this time, written as it is here, "
-        f"for a call ({duration}) with {who}: {slot.text()}. Ask them to reply to confirm it suits, and "
-        "say the calendar invite follows once they do. Do not ask them to suggest times or windows, "
-        "and do not send a booking link. If it doesn't suit them, they can say so and we'll find "
-        "another time. This overrides any other instruction about timing or booking.")
+        f"for a call ({duration}) with {who}: {slot.text()}. {invite}Ask them to reply to confirm "
+        "it suits. Do not ask them to suggest times or windows, and do not send a booking link. "
+        "If it doesn't suit them, they can say so and we'll find another time. This overrides "
+        "any other instruction about timing or booking.")
+
+
+# They can't, or would rather not, do a call (owner, 2026-11-15, on a client
+# "often on the road": "follow up in a playful friendly manner, we can chat on
+# WhatsApp ... create a link to text me", and "do this if a client disagrees
+# to the call for similar reasons").
+DECLINES_CALL_RE = re.compile(
+    r"\b(?:can'?t|cannot|can not|unable to|not able to|won'?t be able to|couldn'?t|"
+    r"don'?t have (?:the )?time|no time|not (?:keen|interested|sure about))\b[^.?!\n]{0,40}?"
+    r"\b(?:call|calls|meeting|meet|talk|zoom|date|time|phone)\b"
+    r"|\bon the road\b|\btravel(?:l?ing)?\s+(?:a lot|constantly|all the time|so much)\b"
+    r"|\bprefer(?:red)? (?:to )?(?:email|e-mail|text|texting|chat|whatsapp|writing)\b"
+    r"|\bno calls?\b|\bnot (?:a )?(?:call|phone) person\b"
+    r"|\brather not (?:do a |have a |jump on a )?(?:call|meet)",
+    re.IGNORECASE)
+
+
+def declines_call(text: str) -> bool:
+    """They say they can't or would rather not do a call."""
+    return bool(DECLINES_CALL_RE.search((text or "").replace("’", "'")))
+
+
+def chat_link(config) -> str:
+    return _offer_field(config, "chat_link")
+
+
+def chat_instead_block(config) -> str:
+    """What a reply prompt gets when they can't do a call: chat instead."""
+    link = chat_link(config)
+    if not link:
+        return ""
+    return (
+        "\n\nTHEY CAN'T DO A CALL. Don't push the call and don't offer a time. In a warm, light, "
+        "friendly way (a little playfulness is welcome, never pushy), say no call is needed and "
+        "offer to keep it going on WhatsApp instead, with this link to message us there, written "
+        f"exactly: {link}. Email stays open too. Then answer anything they asked. This overrides "
+        "any other instruction about calls, timing or booking.")
+

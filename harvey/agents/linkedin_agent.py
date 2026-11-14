@@ -34,7 +34,9 @@ from types import SimpleNamespace
 from harvey import channel_login
 from harvey.careers import CAREERS_APPROVED, JOB_SEEKER, NOT_A_CLIENT, careers_reply
 from harvey.meeting_alert import POSITIVE_INTENTS
-from harvey.meeting_slot import asks_to_meet, offer as meeting_offer, prompt_block
+from harvey.meeting_slot import (
+    asks_to_meet, chat_instead_block, declines_call, offer as meeting_offer, prompt_block,
+)
 from harvey.site_review import HELD_REASON as REVIEW_HELD_REASON, REVIEW_AUTOPILOT, reviews_autopilot
 from harvey.linkedin import guards
 from harvey.linkedin.guards import BreakerTripped, active_pause, detect_breaker
@@ -931,7 +933,11 @@ class LinkedInAgent:
         slot_block = ""
         if which == "reply":
             theirs = [m for m in history or [] if m["direction"] == "in"]
-            if theirs and asks_to_meet(theirs[-1]["body"]):
+            latest = theirs[-1]["body"] if theirs else ""
+            if declines_call(latest) and chat_instead_block(self.config):
+                # They can't do a call: chat on WhatsApp instead.
+                slot_block, booking = chat_instead_block(self.config), ""
+            elif asks_to_meet(latest):
                 slot = await self.meeting_slot(lead)
                 if slot is not None:
                     slot_block, booking = prompt_block(slot, self.config), ""

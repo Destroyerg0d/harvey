@@ -14,7 +14,10 @@ minor versions can still change behaviour.
   owner's window on their next working day (Monday to Friday in their zone), written in the
   client's own time when Harvey knows it with the owner's beside it, and asks them to confirm,
   instead of asking for two or three times. An email draft that leaves the time out is written
-  again. The meeting alert says what was offered, and a second alert ("time agreed") goes when the
+  again. The slot carries `meeting_link` (a fixed video room) as the invite. Someone who can't or
+  won't do a call ("often on the road", "no calls", "prefer email") is offered a friendly chat
+  instead, with `chat_link` (a wa.me link), on email and LinkedIn; the send gate lets those two
+  exact links through like the booking page. The meeting alert says what was offered, and a second alert ("time agreed") goes when the
   client settles on a time. Alerts: a long one is confirmed by its opening (WhatsApp collapses it
   behind "Read more"), and one WhatsApp couldn't confirm no longer holds back the next.
 - **Cold email keeps going when the verifier credits run out** (`channels.email.send_published`,

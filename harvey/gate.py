@@ -376,6 +376,20 @@ def _booking_prefix(config) -> str:
     return links[0][1].rstrip("/") if links else ""
 
 
+def _owner_link_prefixes(config) -> list[str]:
+    """Your own pages on shared hosts that an email may link to: the booking
+    page, the meeting room (product.offer.meeting_link, a Google Meet room)
+    and the chat link (product.offer.chat_link, wa.me/<your number>). Each
+    allows itself and what's below it, never the rest of its host."""
+    offer = getattr(getattr(config, "product", None), "offer", None)
+    out = []
+    for field in ("booking_url", "meeting_link", "chat_link"):
+        links = find_links(str(getattr(offer, field, "") or ""))
+        if links:
+            out.append(links[0][1].rstrip("/"))
+    return out
+
+
 def allowed_link_domains(config) -> set[str]:
     """Your own domains: the sending address's (every mailbox's, with
     channels.email.mailboxes) and any listed in channels.email.link_domains.
@@ -477,10 +491,11 @@ def autopilot_review(subject: str, body: str, config, root=None, recipient: str 
     allowed = allowed_link_domains(config)
     if "@" in (recipient or ""):
         allowed.add(_host(recipient.rsplit("@", 1)[1]))
+    prefixes = _owner_link_prefixes(config)
     prefix = _booking_prefix(config)
     foreign = list(dict.fromkeys(
         _shown(host, link, prefix) for host, link in find_links(text)
-        if not _is_ours(host, allowed) and not _is_booking_page(link, prefix)))
+        if not _is_ours(host, allowed) and not any(_is_booking_page(link, p) for p in prefixes)))
     if foreign:
         reasons.append(
             f"links to {', '.join(foreign[:3])}, not one of your domains "

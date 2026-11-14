@@ -31,6 +31,10 @@ product:
     # their zone, instead of asking them for times. Empty: no fixed slot.
     meeting_window: ""             # e.g. "10:00-12:00"
     meeting_timezone: ""           # e.g. "Asia/Kolkata"
+    meeting_link: ""               # the video room the offered slot carries (it is the invite)
+    # Someone who can't or won't do a call is offered a chat instead, with this
+    # link (e.g. "https://wa.me/15555550100"). Empty: no chat offer.
+    chat_link: ""
 
 icp:
   industries:

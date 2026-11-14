@@ -52,6 +52,12 @@ class OfferConfig(BaseModel):
     # "10:00-12:00" with "Asia/Kolkata", say. Empty: no fixed slot.
     meeting_window: str = ""
     meeting_timezone: str = ""
+    # The video call link the offered slot carries (a fixed Google Meet room,
+    # say): it is the invite. Empty: "the calendar invite follows".
+    meeting_link: str = ""
+    # For someone who can't or won't do a call: a link to chat instead
+    # (https://wa.me/<your number>, say). Empty: no chat offer.
+    chat_link: str = ""
 
 
 class ProductConfig(BaseModel):
