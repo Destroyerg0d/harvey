@@ -26,6 +26,11 @@ product:
     booking_url: ""                # Calendar link URL (if using calendar_link method)
     meeting_duration: "15 minutes" # How long the call is
     meeting_owner: ""              # Who takes the meeting (name or role)
+    # When someone asks to meet, offer this window on your next working day
+    # (Monday to Friday in meeting_timezone), in their own time when Harvey knows
+    # their zone, instead of asking them for times. Empty: no fixed slot.
+    meeting_window: ""             # e.g. "10:00-12:00"
+    meeting_timezone: ""           # e.g. "Asia/Kolkata"
 
 icp:
   industries:

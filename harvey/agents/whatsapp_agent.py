@@ -32,9 +32,11 @@ from types import SimpleNamespace
 from harvey import channel_login
 from harvey.careers import CAREERS_APPROVED, NOT_A_CLIENT, STOPPED_JOB
 from harvey.meeting_alert import POSITIVE_INTENTS
+from harvey.meeting_slot import asks_to_meet, prompt_block
 from harvey.whatsapp.schema import OWNER_STAGE
 
 ALERT_KIND = "alert"     # a meeting alert to your own phone (harvey/meeting_alert.py)
+ALERT_PROOF_CHARS = 120  # the opening of an alert that must show in the chat
 from harvey.agents.linkedin_agent import (
     DECLINE_INTENTS, REPLY_INTENTS, SwitchedOff, _clean_draft, asks_if_automated,
 )
@@ -625,6 +627,16 @@ class WhatsAppAgent:
             "why": "They said no on WhatsApp.", "message": (text or "")[:1000],
             "whatsapp_contact_id": contact["id"]})
 
+    async def meeting_slot(self, contact: dict):
+        """The owner's next meeting window, in their time when exactly one zone
+        fits them (their number's country, their email contact), or None."""
+        from harvey.meeting_slot import offer
+        try:
+            zones = await recipient_zones(self.state, contact, None)
+        except Exception:
+            zones = []
+        return offer(self.config, their_zone=zones[0] if len(zones) == 1 else "")
+
     async def meeting_alert(self, contact: dict, latest: str) -> None:
         """Close to a meeting: a WhatsApp message to your phone
         (harvey/meeting_alert.py). Never raises."""
@@ -638,7 +650,9 @@ class WhatsAppAgent:
             name=name, latest=latest, thread=thread,
             contacts=[contact.get("phone") or "", contact.get("email") or ""],
             where=f"Harvey dashboard, WhatsApp tab, {name}",
-            notes=" ".join(filter(None, [contact.get("source") or "", contact.get("context") or ""])))
+            notes=" ".join(filter(None, [contact.get("source") or "", contact.get("context") or ""])),
+            offered=(await self.meeting_slot(contact)).text()
+            if asks_to_meet(latest) and await self.meeting_slot(contact) is not None else "")
 
     async def not_a_client(self, contact: dict, intent: str):
         """A job seeker or someone selling to us (harvey/careers.py). A job
@@ -756,9 +770,15 @@ class WhatsAppAgent:
                     prompt += f"\n\n{title}\n{text}"
         from harvey.lessons import lessons_block
         prompt += await lessons_block(self.state, "whatsapp")
-        booking = ""
+        booking, slot_block = "", ""
         if which == "reply" and _ASKS_TO_TALK_RE.search(their_text or ""):
-            booking = getattr(getattr(product, "offer", None), "booking_url", "") or ""
+            # The owner's fixed slot in their time (harvey/meeting_slot.py); the
+            # booking link only when no meeting window is set.
+            slot = await self.meeting_slot(contact)
+            if slot is not None:
+                slot_block = prompt_block(slot, self.config)
+            else:
+                booking = getattr(getattr(product, "offer", None), "booking_url", "") or ""
         task = {
             "first": ("Write the first message to this person. Say how we got their number, one useful "
                       "thing from WHAT THEY TOLD US if there is one, and finish with the way out: reply "
@@ -774,7 +794,7 @@ class WhatsAppAgent:
         prompt += f"\n\n{UNTRUSTED_RULE}\n\nWHAT WE KNOW:\n{fence(self._facts(contact), 'what they told us')}\n"
         if history and self._history(history):
             prompt += f"\nTHE CONVERSATION SO FAR:\n{fence(self._history(history), 'the conversation')}\n"
-        prompt += f"\nTASK: {task}\n\nOutput ONLY the message text."
+        prompt += f"\nTASK: {task}{slot_block}\n\nOutput ONLY the message text."
         problem = ""
         for _ in range(MAX_DRAFT_ATTEMPTS):
             again = f"\n\nYour last draft was refused: {problem}. Write it again." if problem else ""
@@ -849,10 +869,13 @@ class WhatsAppAgent:
             contact = await self.state.wa_get_contact(item["contact_id"])
             if contact is None:
                 continue
-            # Something may already have reached them: nothing more until you've looked.
-            if await self.state.wa_messages(contact_id=contact["id"], statuses=("maybe_sent",)):
-                continue
             alert = item["kind"] == ALERT_KIND
+            # Something may already have reached them: nothing more until you've
+            # looked. (Not for your own phone: one unconfirmed alert mustn't hold
+            # back the next.)
+            if not alert and await self.state.wa_messages(contact_id=contact["id"],
+                                                          statuses=("maybe_sent",)):
+                continue
             if alert:
                 # Your own phone: none of a lead's rules apply.
                 why = "" if contact.get("phone") else "your alert number is missing"
@@ -953,7 +976,10 @@ class WhatsAppAgent:
         if not chat_is_for(html, phone, name):
             await self.driver.clear(COMPOSER)
             return "failed", "the open chat changed while typing, so nothing was sent"
-        before = sum(1 for m in parse_messages(html) if m.direction == "out" and want in clean_text(m.body))
+        # A long alert shows collapsed behind "Read more": its opening is the proof.
+        # (A lead's message is short, and must show whole.)
+        seen_as = want[:ALERT_PROOF_CHARS] if alert else want
+        before = sum(1 for m in parse_messages(html) if m.direction == "out" and seen_as in clean_text(m.body))
         # Typing takes half a minute. Stopped meanwhile: nothing goes, and it stays approved.
         if await self._held():
             await self.driver.clear(COMPOSER)
@@ -970,8 +996,8 @@ class WhatsAppAgent:
             html = await self.driver.html()
             await self._guard(html)
             mine = [m for m in parse_messages(html) if m.direction == "out"]
-            shown = [m for m in mine if want in clean_text(m.body)]
-            if mine and want in clean_text(mine[-1].body) and not mine[-1].pending and len(shown) > before:
+            shown = [m for m in mine if seen_as in clean_text(m.body)]
+            if mine and seen_as in clean_text(mine[-1].body) and not mine[-1].pending and len(shown) > before:
                 sent_at = self.now()
                 await self.state.wa_mark_sent(item["id"], at=sent_at)
                 if item["kind"] == "first":

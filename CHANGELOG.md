@@ -9,6 +9,14 @@ minor versions can still change behaviour.
 
 ### Added
 
+- **Someone who asks to meet is offered a fixed time** (`product.offer.meeting_window` and
+  `meeting_timezone`, harvey/meeting_slot.py). On email, LinkedIn and WhatsApp the reply offers the
+  owner's window on their next working day (Monday to Friday in their zone), written in the
+  client's own time when Harvey knows it with the owner's beside it, and asks them to confirm,
+  instead of asking for two or three times. An email draft that leaves the time out is written
+  again. The meeting alert says what was offered, and a second alert ("time agreed") goes when the
+  client settles on a time. Alerts: a long one is confirmed by its opening (WhatsApp collapses it
+  behind "Read more"), and one WhatsApp couldn't confirm no longer holds back the next.
 - **Cold email keeps going when the verifier credits run out** (`channels.email.send_published`,
   off by default). An address the company prints on its own website, an info@ or a person's own
   address on their team page, with a working mail server, that no verifier could judge is graded

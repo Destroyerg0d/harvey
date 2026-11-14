@@ -46,6 +46,12 @@ class OfferConfig(BaseModel):
     booking_url: str = ""
     meeting_duration: str = "15 minutes"
     meeting_owner: str = ""
+    # When someone asks to meet, offer this window on your next working day
+    # (Monday to Friday in meeting_timezone), in their own time when Harvey
+    # knows their zone, instead of asking them for times (harvey/meeting_slot.py).
+    # "10:00-12:00" with "Asia/Kolkata", say. Empty: no fixed slot.
+    meeting_window: str = ""
+    meeting_timezone: str = ""
 
 
 class ProductConfig(BaseModel):

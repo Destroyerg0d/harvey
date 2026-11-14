@@ -15,13 +15,14 @@ short summary. Then one message goes in the WhatsApp queue to
 ``channels.whatsapp.alert_number`` from the linked number (kind "alert", which
 none of a lead's rules hold back: harvey/agents/whatsapp_agent.py).
 
-One alert per conversation every ALERT_EVERY (a new time proposed days later
-alerts again). Nothing is sent when no alert number is set, and the brain being
+One alert per conversation every ALERT_EVERY, and one more whenever a time is
+agreed that the last alert didn't have ("Harvey: time agreed with ..."). Nothing is sent when no alert number is set, and the brain being
 down only means no alert this time.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from datetime import datetime, timedelta, timezone
@@ -61,6 +62,24 @@ def _now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+def _last(raw: str | None) -> tuple[datetime | None, str]:
+    """(when the last alert went, the time it reported) from its setting."""
+    if not raw:
+        return None, ""
+    try:
+        data = json.loads(raw)
+        return datetime.fromisoformat(data.get("at", "")), str(data.get("when") or "")
+    except (ValueError, TypeError, AttributeError):
+        try:
+            return datetime.fromisoformat(raw), ""      # the older form: a time alone
+        except ValueError:
+            return None, ""
+
+
+def _norm(text: str) -> str:
+    return " ".join((text or "").lower().split())
+
+
 def _prompt(company: str, channel: str, name: str, thread: str, notes: str) -> str:
     return f"""You help the owner of {company or "a services company"} keep track of sales conversations.
 Read this {channel} conversation with {name or "a prospect"} and say whether it is close to a meeting
@@ -87,7 +106,7 @@ def _line(label: str, value: str) -> str:
 
 
 def compose(*, name: str, company: str, channel: str, where: str, contacts, read: dict,
-            latest: str, service_hint: str = "") -> str:
+            latest: str, service_hint: str = "", offered: str = "", update: bool = False) -> str:
     """The WhatsApp message: plain text, one fact a line."""
     who = name or "A client"
     if company:
@@ -96,11 +115,12 @@ def compose(*, name: str, company: str, channel: str, where: str, contacts, read
     if len(quote) > 280:
         quote = quote[:277].rstrip() + "..."
     lines = [
-        f"Harvey: a meeting is close with {who}",
+        (f"Harvey: time agreed with {who}" if update else f"Harvey: a meeting is close with {who}"),
         _line("Channel", channel),
         _line("Read it", where),
         _line("They want", read.get("service") or service_hint),
         _line("When", read.get("when") or "no time agreed yet"),
+        _line("Harvey offered", offered),
         _line("Contact", " | ".join(c for c in contacts if c)),
         _line("They said", f'"{quote}"' if quote else ""),
         _line("Where it stands", read.get("summary", "")),
@@ -140,20 +160,15 @@ async def queue_to_owner(state, config, text: str) -> str | None:
 
 async def maybe_alert(state, brain, config, *, channel: str, key: str, name: str, latest: str,
                       thread: str, where: str, company: str = "", contacts=(), notes: str = "",
-                      service_hint: str = "") -> bool:
+                      service_hint: str = "", offered: str = "") -> bool:
     """Alert you when this conversation is close to a meeting. ``key`` names
     the conversation (one alert each per ALERT_EVERY). Never raises."""
     try:
         if not alert_number(config) or not might_be_meeting(latest):
             return False
         setting = ALERT_KEY + key
-        last = await state.get_setting(setting)
-        if last:
-            try:
-                if _now() - datetime.fromisoformat(last) < ALERT_EVERY:
-                    return False
-            except ValueError:
-                pass
+        last_at, last_when = _last(await state.get_setting(setting))
+        recent = last_at is not None and _now() - last_at < ALERT_EVERY
         from harvey.referrals import _ask_json
         our_company = getattr(getattr(config, "persona", None), "company", "") or ""
         read = await _ask_json(brain, _prompt(our_company, channel, name, thread, notes),
@@ -164,12 +179,17 @@ async def maybe_alert(state, brain, config, *, channel: str, key: str, name: str
         if not (close is True or str(close).strip().lower() in ("true", "yes")):
             return False
         read = {k: str(read.get(k) or "")[:300] for k in ("when", "service", "summary", "next_step")}
+        # Alerted lately: again only when a time is now agreed that wasn't before.
+        update = recent and bool(read["when"]) and _norm(read["when"]) != _norm(last_when)
+        if recent and not update:
+            return False
         text = compose(name=name, company=company, channel=channel, where=where, contacts=contacts,
-                       read=read, latest=latest, service_hint=service_hint)
+                       read=read, latest=latest, service_hint=service_hint, offered=offered,
+                       update=update)
         message_id = await queue_to_owner(state, config, text)
         if not message_id:
             return False
-        await state.set_setting(setting, _now().isoformat())
+        await state.set_setting(setting, json.dumps({"at": _now().isoformat(), "when": read["when"]}))
         await state.log_action("meeting_alert", "alerts", {
             "channel": channel, "key": key, "name": name, "company": company,
             "when": read["when"], "service": read["service"], "whatsapp_message_id": message_id})

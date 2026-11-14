@@ -34,6 +34,7 @@ from types import SimpleNamespace
 from harvey import channel_login
 from harvey.careers import CAREERS_APPROVED, JOB_SEEKER, NOT_A_CLIENT, careers_reply
 from harvey.meeting_alert import POSITIVE_INTENTS
+from harvey.meeting_slot import asks_to_meet, offer as meeting_offer, prompt_block
 from harvey.site_review import HELD_REASON as REVIEW_HELD_REASON, REVIEW_AUTOPILOT, reviews_autopilot
 from harvey.linkedin import guards
 from harvey.linkedin.guards import BreakerTripped, active_pause, detect_breaker
@@ -528,6 +529,19 @@ class LinkedInAgent:
                 "why": "They said no on LinkedIn.", "message": (text or "")[:1000],
                 "linkedin_lead_id": lead["id"]})
 
+    async def meeting_slot(self, lead: dict):
+        """The owner's next meeting window, in their time when their email
+        contact says where they are (never a guess), or None."""
+        from harvey.send_window import recipient_zone
+        zone = ""
+        try:
+            if lead.get("prospect_id"):
+                prospect = await self.state.get_prospect(lead["prospect_id"])
+                zone = await recipient_zone(self.state, prospect, None) if prospect else ""
+        except Exception:
+            zone = ""
+        return meeting_offer(self.config, their_zone=zone or "")
+
     async def meeting_alert(self, lead: dict, latest: str) -> None:
         """Close to a meeting: a WhatsApp message to your phone
         (harvey/meeting_alert.py). Never raises."""
@@ -537,11 +551,13 @@ class LinkedInAgent:
         thread = "\n\n".join(f"{'Them' if m['direction'] == 'in' else 'Us'}: {m['body']}"
                              for m in history[-14:] if m["status"] == "sent" and m["body"])
         prospect = await self.state.get_prospect(lead["prospect_id"]) if lead.get("prospect_id") else None
+        slot = await self.meeting_slot(lead) if asks_to_meet(latest) else None
         await maybe_alert(
             self.state, self.brain, self.config, channel="LinkedIn", key=f"linkedin:{lead['id']}",
             name=name, company=lead.get("company") or "", latest=latest, thread=thread,
             contacts=[lead.get("profile_url") or "", getattr(prospect, "email", "") or ""],
-            where=f"Harvey dashboard, LinkedIn tab, {name}", notes=lead.get("headline") or "")
+            where=f"Harvey dashboard, LinkedIn tab, {name}", notes=lead.get("headline") or "",
+            offered=slot.text() if slot is not None else "")
 
     async def wants_site_review(self, intent: str, lead: dict, history) -> bool:
         """A yes to the write-up one of our messages offered, and no review
@@ -911,6 +927,14 @@ class LinkedInAgent:
         from harvey.lessons import lessons_block
         prompt += await lessons_block(getattr(self, "state", None), "linkedin")
         booking = getattr(getattr(product, "offer", None), "booking_url", "") or ""
+        # They asked to meet: the owner's fixed slot (harvey/meeting_slot.py), not a link.
+        slot_block = ""
+        if which == "reply":
+            theirs = [m for m in history or [] if m["direction"] == "in"]
+            if theirs and asks_to_meet(theirs[-1]["body"]):
+                slot = await self.meeting_slot(lead)
+                if slot is not None:
+                    slot_block, booking = prompt_block(slot, self.config), ""
         task = {
             "invite": (f"Write the note for a LinkedIn connection request to this person. At most "
                        f"{self.cfg.invite_note_max_chars} characters, one or two sentences, a reason to "
@@ -934,7 +958,7 @@ FACTS about them:
             prompt += f"\nTHE CONVERSATION SO FAR:\n{fence(self._history(history), 'the conversation')}\n"
         if note:
             task += "\nThe reply:\n" + note
-        prompt += f"\nTASK: {task}\n\nOutput ONLY the message text."
+        prompt += f"\nTASK: {task}{slot_block}\n\nOutput ONLY the message text."
         for _ in range(MAX_DRAFT_ATTEMPTS):
             text = await self.brain.think(prompt, session_id="harvey-linkedin",
                                           agent="linkedin", task=f"draft_{which}")

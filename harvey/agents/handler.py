@@ -29,6 +29,7 @@ from harvey.humanize import humanize, humanizer_enabled
 from harvey.integrations.instantly import InstantlyClient
 from harvey.lessons import lessons_block
 from harvey.meeting_alert import POSITIVE_INTENTS, maybe_alert
+from harvey.meeting_slot import asks_to_meet, offer as meeting_offer, prompt_block
 from harvey.integrations.mail_provider import (
     NATIVE_PROVIDERS, get_mail_provider, strip_quoted_reply,
 )
@@ -844,13 +845,15 @@ class Handler:
         source = (getattr(prospect, "source", "") or "")
         channel = "Email" + (" (a website chat lead)" if source.startswith("inbound") else "") + (
             f", in {convo.mailbox}" if convo.mailbox else "")
+        slot = await self._meeting_slot(prospect) if asks_to_meet(latest) else None
         await maybe_alert(
             self.state, self.brain, self.config, channel=channel, key=f"email:{convo.id}",
             name=name, company=getattr(prospect, "company", "") or "",
             contacts=[prospect.email], latest=latest,
             thread=conversation_history(convo.thread, name),
             where=f"Harvey dashboard, Conversations tab, {name}",
-            notes=getattr(prospect, "personalization_notes", "") or "")
+            notes=getattr(prospect, "personalization_notes", "") or "",
+            offered=slot.text() if slot is not None else "")
 
     async def _notice_hand_sent(self) -> None:
         """Email you or a coworker wrote by hand from these mailboxes
@@ -2260,20 +2263,34 @@ Write a reply that:"""
                 "--- owner's instruction ---\n" + guidance.strip()[:2000] +
                 "\n--- end of the owner's instruction ---")
 
+        # They asked to meet: the owner's fixed slot, in their time
+        # (harvey/meeting_slot.py), never "send me two or three windows".
+        slot = None
+        if intent in ("interested", "question") and asks_to_meet(reply_text):
+            slot = await self._meeting_slot(prospect)
+            if slot is not None:
+                prompt += prompt_block(slot, self.config)
+
         prompt += "\n\nWrite ONLY the email body. No subject line, no greeting label, no signature block, no markdown."
 
-        response = await self.brain.think(
-            prompt, session_id="harvey-handler",
-            agent="handler", task="generate_response",
-        )
-        if not response:
-            paused = getattr(self.brain, "paused_reason", "")
-            if paused:
-                # The provider went down mid-reply; nothing is stored yet,
-                # so leave the reply for a clean retry.
-                raise BrainUnavailable(paused)
-            return ""
-        response = response.strip()
+        response = ""
+        for attempt in range(2):
+            again = ("" if not attempt else
+                     f"\n\nYour last draft didn't state the meeting time. State it exactly: {slot.text()}.")
+            response = await self.brain.think(
+                prompt + again, session_id="harvey-handler",
+                agent="handler", task="generate_response",
+            )
+            if not response:
+                paused = getattr(self.brain, "paused_reason", "")
+                if paused:
+                    # The provider went down mid-reply; nothing is stored yet,
+                    # so leave the reply for a clean retry.
+                    raise BrainUnavailable(paused)
+                return ""
+            response = response.strip()
+            if slot is None or slot.their_start() in response:
+                break
         # Guard against the model returning meta-text instead of an email
         if response.lower().startswith(("i can't", "i cannot", "as an ai", "sorry,")):
             logger.warning("Handler: Model returned meta-text instead of an email. Discarding.")
@@ -2282,7 +2299,20 @@ Write a reply that:"""
             self.brain, [{"subject": "", "body": response}], agent="handler",
             enabled=humanizer_enabled(self.config),
         )
-        return polished[0]["body"]
+        body = polished[0]["body"]
+        if slot is not None and slot.their_start() in response and slot.their_start() not in body:
+            return response          # the polish lost the time: the draft as written
+        return body
+
+    async def _meeting_slot(self, prospect):
+        """The owner's next meeting window in this person's time, when Harvey
+        knows their zone (never a guessed one), or None with no window set."""
+        from harvey.send_window import recipient_zone
+        try:
+            zone = await recipient_zone(self.state, prospect, None) if prospect is not None else ""
+        except Exception:
+            zone = ""
+        return meeting_offer(self.config, their_zone=zone or "")
 
 
 # ── Backfill: auto-replies classed before Harvey could tell them apart ──
