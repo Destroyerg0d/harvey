@@ -532,6 +532,10 @@ def mev_body(status, catch_all="false", disposable="false", greylisted="false"):
     (mev_body("Catch All"), "risky"),
     (mev_body("Valid", catch_all="true"), "risky"),
     (mev_body("Valid", catch_all=False), "verified"),   # a JSON boolean reads the same
+    # Since 2026-11 the flags come as numbers (seen live: catch_all 0, Greylisted 0).
+    (mev_body("Valid", catch_all=0, disposable=0, greylisted=0), "verified"),
+    (mev_body("Valid", catch_all=1, disposable=0, greylisted=0), "risky"),
+    (mev_body("Valid", catch_all=0, disposable=1, greylisted=0), "invalid"),
     (mev_body("Valid", disposable="true"), "invalid"),
     (mev_body("Unknown"), None),
     (mev_body("Grey-listed", greylisted="true"), None),

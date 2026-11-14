@@ -915,12 +915,15 @@ async def _pace(service: str) -> None:
 
 
 def _text_flag(value) -> Optional[bool]:
-    """A yes/no field sent as a JSON boolean or as the text "true"/"false"
-    (MyEmailVerifier sends text). None when it is neither."""
+    """A yes/no field sent as a JSON boolean, the text "true"/"false", or the
+    number 1/0 (MyEmailVerifier sent text, and since 2026-11 sends 0/1). None
+    when it is none of these."""
     if isinstance(value, bool):
         return value
-    if isinstance(value, str) and value.strip().lower() in ("true", "false"):
-        return value.strip().lower() == "true"
+    if isinstance(value, int) and value in (0, 1):
+        return value == 1
+    if isinstance(value, str) and value.strip().lower() in ("true", "false", "1", "0"):
+        return value.strip().lower() in ("true", "1")
     return None
 
 
