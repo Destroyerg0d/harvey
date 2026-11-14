@@ -132,6 +132,10 @@ channels:
     #   enabled: true
     #   autopilot: false             # drafts wait on the dashboard's WhatsApp tab until true
     #   number: "+15555550100"       # the linked number, shown on the dashboard
+    #   # Your own phone: when a client on any channel gets close to a meeting, Harvey
+    #   # messages you here from the linked number (channel, where to read it, service,
+    #   # time, contact). Put the real number in harvey.local.yaml.
+    #   alert_number: "+15555550199"
     #   max_daily_first_messages_new: 5   # first messages a day for new_number_days after linking
     #   max_daily_first_messages: 10      # ...and after that
     #   new_number_days: 14

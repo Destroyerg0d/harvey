@@ -633,6 +633,10 @@ class WhatsAppChannelConfig(BaseModel):
     autopilot: bool = False
     # The linked number, shown on the dashboard so you can tell which phone it is.
     number: str = ""
+    # Your own phone: when a client on any channel gets close to a meeting,
+    # Harvey messages you here from the linked number (harvey/meeting_alert.py).
+    # Empty: no alerts.
+    alert_number: str = ""
     # First messages a day: this few for new_number_days after linking, then more.
     max_daily_first_messages_new: int = 5
     max_daily_first_messages: int = 10

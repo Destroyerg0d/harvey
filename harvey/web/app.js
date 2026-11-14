@@ -3992,7 +3992,8 @@ async function liSetMode(mode) {
 // ── WhatsApp: first messages, one follow-up and replies (harvey/whatsapp/) ──
 
 let _wa = null, _waEditing = null, _waFixing = null, _waArmed = false, _waBusy = false;
-const WA_KIND = {first: 'First message', follow_up: 'Follow-up', reply: 'Reply'};
+const WA_KIND = {first: 'First message', follow_up: 'Follow-up', reply: 'Reply',
+                 alert: 'Meeting alert to your phone'};
 const WA_STAGE = {queued: 'Queued', messaged: 'Messaged', replied: 'Replied', warm: 'Warm', meeting: 'Meeting',
   declined: 'Declined', no_whatsapp: 'Not on WhatsApp', needs_review: 'Check number'};
 

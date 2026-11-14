@@ -28,6 +28,7 @@ from harvey.gate import GIVEN, allowed_link_domains, autopilot_review, do_not_co
 from harvey.humanize import humanize, humanizer_enabled
 from harvey.integrations.instantly import InstantlyClient
 from harvey.lessons import lessons_block
+from harvey.meeting_alert import POSITIVE_INTENTS, maybe_alert
 from harvey.integrations.mail_provider import (
     NATIVE_PROVIDERS, get_mail_provider, strip_quoted_reply,
 )
@@ -836,6 +837,21 @@ class Handler:
         except Exception as e:
             logger.debug(f"Handler: outbox cancel failed: {e}")
 
+    async def _meeting_alert(self, prospect, convo, latest: str) -> None:
+        """Close to a meeting: a WhatsApp message to your phone
+        (harvey/meeting_alert.py). Never raises."""
+        name = (prospect.full_name() or "").strip() or prospect.email
+        source = (getattr(prospect, "source", "") or "")
+        channel = "Email" + (" (a website chat lead)" if source.startswith("inbound") else "") + (
+            f", in {convo.mailbox}" if convo.mailbox else "")
+        await maybe_alert(
+            self.state, self.brain, self.config, channel=channel, key=f"email:{convo.id}",
+            name=name, company=getattr(prospect, "company", "") or "",
+            contacts=[prospect.email], latest=latest,
+            thread=conversation_history(convo.thread, name),
+            where=f"Harvey dashboard, Conversations tab, {name}",
+            notes=getattr(prospect, "personalization_notes", "") or "")
+
     async def _notice_hand_sent(self) -> None:
         """Email you or a coworker wrote by hand from these mailboxes
         (harvey/hand_sent.py). Never stops the cycle."""
@@ -1358,6 +1374,8 @@ class Handler:
             )
         if convo.stage != old_stage:
             logger.info(f"Handler: Stage for {lead_email}: {old_stage} -> {convo.stage}")
+        if not automatic and intent in POSITIVE_INTENTS:
+            await self._meeting_alert(prospect, convo, reply_text)
 
         # 3. Route based on intent
         if intent == "unsubscribe":

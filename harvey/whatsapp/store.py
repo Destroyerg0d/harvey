@@ -16,7 +16,7 @@ import uuid
 import aiosqlite
 
 from harvey.linkedin.store import _iso, _now
-from harvey.whatsapp.schema import MESSAGE_KINDS, MESSAGE_STATUSES, STAGES
+from harvey.whatsapp.schema import MESSAGE_KINDS, MESSAGE_STATUSES, OWNER_STAGE, STAGES
 
 STAGE_RANK = {"queued": 0, "messaged": 1, "replied": 2, "warm": 3, "meeting": 4}
 # Error prefix on a draft the review sent back for a human: approve-all skips these.
@@ -39,7 +39,7 @@ def advance_stage(current: str, target: str) -> str:
     only, declined is final, and no number on WhatsApp stops only a contact
     who hasn't answered."""
     current = current if current in STAGES else "queued"
-    if target not in STAGES or current == "declined":
+    if target not in STAGES or current in ("declined", OWNER_STAGE) or target == OWNER_STAGE:
         return current
     if target == "declined":
         return "declined"

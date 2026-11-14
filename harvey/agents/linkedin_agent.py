@@ -33,6 +33,7 @@ from types import SimpleNamespace
 
 from harvey import channel_login
 from harvey.careers import CAREERS_APPROVED, JOB_SEEKER, NOT_A_CLIENT, careers_reply
+from harvey.meeting_alert import POSITIVE_INTENTS
 from harvey.site_review import HELD_REASON as REVIEW_HELD_REASON, REVIEW_AUTOPILOT, reviews_autopilot
 from harvey.linkedin import guards
 from harvey.linkedin.guards import BreakerTripped, active_pause, detect_breaker
@@ -478,6 +479,8 @@ class LinkedInAgent:
                 await self.state.li_set_stage(lead["id"], "warm")
             if intent in REPLY_INTENTS or intent == "escalate":
                 await self.stop_email_pitch(lead, keep=referred["keep"])
+            if intent in POSITIVE_INTENTS and not self.dry_run:
+                await self.meeting_alert(lead, message["body"])
             latest[lead["id"]] = {**message, "intent": intent, "referral_note": referred["note"],
                                   "for_you": referred["for_you"]}
         for lead_id, message in latest.items():
@@ -524,6 +527,21 @@ class LinkedInAgent:
                 "prospect_id": prospect_id, "rule": "linkedin", "matched": intent,
                 "why": "They said no on LinkedIn.", "message": (text or "")[:1000],
                 "linkedin_lead_id": lead["id"]})
+
+    async def meeting_alert(self, lead: dict, latest: str) -> None:
+        """Close to a meeting: a WhatsApp message to your phone
+        (harvey/meeting_alert.py). Never raises."""
+        from harvey.meeting_alert import maybe_alert
+        name = lead.get("name") or lead.get("first_name") or lead.get("slug") or ""
+        history = await self.state.li_messages(lead_id=lead["id"])
+        thread = "\n\n".join(f"{'Them' if m['direction'] == 'in' else 'Us'}: {m['body']}"
+                             for m in history[-14:] if m["status"] == "sent" and m["body"])
+        prospect = await self.state.get_prospect(lead["prospect_id"]) if lead.get("prospect_id") else None
+        await maybe_alert(
+            self.state, self.brain, self.config, channel="LinkedIn", key=f"linkedin:{lead['id']}",
+            name=name, company=lead.get("company") or "", latest=latest, thread=thread,
+            contacts=[lead.get("profile_url") or "", getattr(prospect, "email", "") or ""],
+            where=f"Harvey dashboard, LinkedIn tab, {name}", notes=lead.get("headline") or "")
 
     async def wants_site_review(self, intent: str, lead: dict, history) -> bool:
         """A yes to the write-up one of our messages offered, and no review

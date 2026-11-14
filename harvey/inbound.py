@@ -1086,6 +1086,7 @@ class InboundPipeline:
             report["triaged"] += 1
             if not dry_run:
                 await save_record(self.state, lead.email, now, status=TRIAGED, why="", **common)
+                await self._meeting_alert(lead, result)
             return result, False
         escalated = result.category in ESCALATED_CATEGORIES
         report["escalated" if escalated else "not_project"] += 1
@@ -1099,6 +1100,22 @@ class InboundPipeline:
                              "reason": f"{how_they_reached_us(lead)}: looks like a "
                                        f"{result.category} matter, not a new project: {result.summary}"})
         return None, True
+
+    async def _meeting_alert(self, lead: InboundLead, triaged: Triage) -> None:
+        """A visitor who asked for a call or a time in the chat: a WhatsApp
+        message to your phone (harvey/meeting_alert.py). Never raises."""
+        from harvey.meeting_alert import maybe_alert
+        theirs = [line.text for line in lead.transcript if line.who == VISITOR]
+        if not theirs:
+            return
+        name = lead.name or lead.email
+        await maybe_alert(
+            self.state, self.brain, self.config, channel=how_they_reached_us(lead).capitalize(),
+            key=f"inbound:{lead.email.lower()}", name=name, company=lead.company,
+            latest="\n".join(theirs[-3:]), thread=transcript_text(lead),
+            contacts=[lead.email, lead.phone], where=f"Harvey dashboard, Website leads tab, {lead.email}",
+            notes=" ".join(filter(None, [journey_note(lead), triaged.summary])),
+            service_hint=triaged.service_type if triaged.service_type != "other" else "")
 
     async def _queue_whatsapp(self, lead: InboundLead, triaged: Triage, report: dict):
         """A project lead who left a number joins the WhatsApp queue once a

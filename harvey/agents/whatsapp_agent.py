@@ -31,6 +31,10 @@ from types import SimpleNamespace
 
 from harvey import channel_login
 from harvey.careers import CAREERS_APPROVED, NOT_A_CLIENT, STOPPED_JOB
+from harvey.meeting_alert import POSITIVE_INTENTS
+from harvey.whatsapp.schema import OWNER_STAGE
+
+ALERT_KIND = "alert"     # a meeting alert to your own phone (harvey/meeting_alert.py)
 from harvey.agents.linkedin_agent import (
     DECLINE_INTENTS, REPLY_INTENTS, SwitchedOff, _clean_draft, asks_if_automated,
 )
@@ -260,6 +264,8 @@ class WhatsAppAgent:
         return bool(added) and timedelta(0) <= self.now() - added < timedelta(hours=FRESH_FIRST_HOURS)
 
     async def _may_send(self, contact: dict, kind: str) -> bool:
+        if kind == ALERT_KIND:
+            return True             # to you, at once, whatever the hour
         if kind == "first" and self._fresh(contact) and not contact.get("last_outbound_at"):
             return True
         return await self._recipient_open(contact)
@@ -277,8 +283,8 @@ class WhatsAppAgent:
         yours: WhatsApp goes by the recipient's clock."""
         for item in await self.state.wa_messages(statuses=("approved",), direction="out", limit=200):
             contact = await self.state.wa_get_contact(item["contact_id"])
-            if contact and await self._may_send(contact, item["kind"]) and \
-                    not await self.pacing.blocked(item["kind"]):
+            if contact and await self._may_send(contact, item["kind"]) and (
+                    item["kind"] == ALERT_KIND or not await self.pacing.blocked(item["kind"])):
                 return True
         return False
 
@@ -447,8 +453,9 @@ class WhatsAppAgent:
         await self._guard(html)
         seen = {r.title for r in rows}
         rows += [r for r in parse_chat_list(html) if r.title not in seen]
+        # Your own phone (meeting alerts) is never read as a lead's chat.
         contacts = [c for c in await self.state.wa_contacts()
-                    if c.get("phone") and c["stage"] != "no_whatsapp"]
+                    if c.get("phone") and c["stage"] not in ("no_whatsapp", OWNER_STAGE)]
         by_digits = {digits_of(c["phone"]): c for c in contacts}
         opened = 0
         for row in rows:
@@ -557,6 +564,8 @@ class WhatsAppAgent:
                 await self.state.wa_set_stage(contact["id"], "warm")
             if intent in REPLY_INTENTS or intent == "escalate":
                 await self.stop_email_pitch(contact)
+            if intent in POSITIVE_INTENTS and not self.dry_run:
+                await self.meeting_alert(contact, message["body"])
             latest[contact["id"]] = {**message, "intent": intent}
         for contact_id, message in latest.items():
             if message["intent"] not in REPLY_INTENTS or not self._time_left() or self._brain_paused():
@@ -615,6 +624,21 @@ class WhatsAppAgent:
             "prospect_id": prospect.id, "rule": "whatsapp", "matched": intent,
             "why": "They said no on WhatsApp.", "message": (text or "")[:1000],
             "whatsapp_contact_id": contact["id"]})
+
+    async def meeting_alert(self, contact: dict, latest: str) -> None:
+        """Close to a meeting: a WhatsApp message to your phone
+        (harvey/meeting_alert.py). Never raises."""
+        from harvey.meeting_alert import maybe_alert
+        name = contact.get("name") or contact.get("phone") or ""
+        history = await self.state.wa_messages(contact_id=contact["id"])
+        thread = "\n\n".join(f"{'Them' if m['direction'] == 'in' else 'Us'}: {m['body']}"
+                             for m in history[-14:] if m["status"] == "sent" and m["body"])
+        await maybe_alert(
+            self.state, self.brain, self.config, channel="WhatsApp", key=f"whatsapp:{contact['id']}",
+            name=name, latest=latest, thread=thread,
+            contacts=[contact.get("phone") or "", contact.get("email") or ""],
+            where=f"Harvey dashboard, WhatsApp tab, {name}",
+            notes=" ".join(filter(None, [contact.get("source") or "", contact.get("context") or ""])))
 
     async def not_a_client(self, contact: dict, intent: str):
         """A job seeker or someone selling to us (harvey/careers.py). A job
@@ -807,7 +831,7 @@ class WhatsAppAgent:
         return await stop_reason(self.state, self.config, contact, replying=item["kind"] == "reply")
 
     async def send_approved(self):
-        order = {"reply": 0, "follow_up": 1, "first": 2}
+        order = {ALERT_KIND: -1, "reply": 0, "follow_up": 1, "first": 2}
         fresh = {c["id"] for c in await self.state.wa_contacts(stages=("queued",)) if self._fresh(c)}
         # Replies first, then someone who just chatted, then the rest in order.
         items = sorted(await self.state.wa_messages(statuses=("approved",), direction="out"),
@@ -828,13 +852,18 @@ class WhatsAppAgent:
             # Something may already have reached them: nothing more until you've looked.
             if await self.state.wa_messages(contact_id=contact["id"], statuses=("maybe_sent",)):
                 continue
-            why = await self._why_not_send(contact, item)
+            alert = item["kind"] == ALERT_KIND
+            if alert:
+                # Your own phone: none of a lead's rules apply.
+                why = "" if contact.get("phone") else "your alert number is missing"
+            else:
+                why = await self._why_not_send(contact, item)
             if why:
                 await self.state.wa_skip(item["id"], why)
                 continue
             if not await self._may_send(contact, item["kind"]):
                 continue
-            blocked = await self.pacing.blocked(item["kind"])
+            blocked = "" if alert else await self.pacing.blocked(item["kind"])
             if blocked:
                 if "hour" in blocked:
                     break
@@ -901,11 +930,13 @@ class WhatsAppAgent:
         if not chat_is_for(html, phone, name):
             return "failed", "couldn't confirm the open chat is theirs, so nothing was typed"
         messages = parse_messages(html)
-        if await self.record_chat(contact, messages):
+        alert = item["kind"] == ALERT_KIND
+        # Your own chat (an alert) isn't read as a lead's, and may be new or old.
+        if not alert and await self.record_chat(contact, messages):
             return "held", ""
         if item["kind"] == "first" and messages:
             return "failed", "this chat already has messages, so a first message would be wrong; check it"
-        if item["kind"] != "first" and not messages:
+        if item["kind"] not in ("first", ALERT_KIND) and not messages:
             return "failed", "couldn't read the chat, so can't tell whether they replied"
         if clean_text(await self.driver.text_of(COMPOSER)):
             await self.driver.clear(COMPOSER)
@@ -932,7 +963,8 @@ class WhatsAppAgent:
             await self.driver.clear(COMPOSER)
             return "held", ""
         await self.driver.press_enter()
-        await self.pacing.record(item["kind"])
+        if not alert:
+            await self.pacing.record(item["kind"])
         for _ in range(SEND_POLLS):
             await self.driver.wait(1.5)
             html = await self.driver.html()

@@ -383,6 +383,12 @@ joins their thread as `you`, cancels Harvey's queued email to them, and sets the
 to `with_you` (Harvey stays out, off Needs you; their reply moves it to `needs_human`; Hand
 back to Harvey sets `open`). Seen Gmail ids are kept in the `sent_seen` table for 30 days.
 
+Meeting alerts (harvey/meeting_alert.py): every channel calls `maybe_alert` on a positive
+message; a word check, then one model read, decides whether a meeting is close; the alert goes
+to `channels.whatsapp.alert_number` through the WhatsApp queue as kind `alert` to a contact at
+stage `owner` (never drafted to, never read, no hours or caps). Keep the real number in
+harvey.local.yaml only.
+
 ### Common Issues
 - **"command not found: harvey"**: Activate venv first: `source .venv/bin/activate`
 - **"ModuleNotFoundError: No module named 'harvey'" after install (macOS)**: Python 3.13 silently ignores `.pth` files that carry the macOS hidden file flag, and some Macs propagate that flag into `.venv`. Run `harvey install` again (it auto-fixes by linking the package), or manually: `ln -s "$(pwd)/harvey" .venv/lib/python3.13/site-packages/harvey`

@@ -9,6 +9,14 @@ minor versions can still change behaviour.
 
 ### Added
 
+- **A WhatsApp alert to your own phone when a meeting is close.** On email, LinkedIn, WhatsApp
+  and the website chat, a positive message that talks about a call, a meeting, a day or a time
+  gets one model read of the conversation; when a meeting really is close, Harvey messages
+  `channels.whatsapp.alert_number` from the linked number with who it is, the channel, where to
+  read it on the dashboard, the service they want, the time if one was named, their contact
+  details, their words and the next step. One alert per conversation every three days. The alert
+  number is a contact of its own (stage `owner`, message kind `alert`): it goes at any hour
+  outside the caps, nothing is ever drafted to it, and its chat is never read as a lead's.
 - **Harvey notices email you write by hand.** Each cycle it reads the last three days of every
   Gmail mailbox's Sent mail. An email a person wrote there (not Harvey: its Message-ID isn't in the
   Outbox) to someone Harvey knows, matched by the message it answers, its Gmail thread or its

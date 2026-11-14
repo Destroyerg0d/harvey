@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 from harvey import channel_login
 from harvey.whatsapp import guards
 from harvey.whatsapp.pacing import LINKED_AT_KEY, LINKED_NUMBER_KEY
+from harvey.whatsapp.schema import OWNER_STAGE
 from harvey.whatsapp.store import HELD_FOR_REVIEW
 
 logger = logging.getLogger("harvey.dashboard")
@@ -260,6 +261,8 @@ async def whatsapp_overview():
         conversations = []
         numbers = blocked_numbers(config)
         for contact in contacts:
+            if contact["stage"] == OWNER_STAGE:
+                continue        # your own phone's meeting alerts: in the queue, not a conversation
             rows = messages.get(contact["id"], [])
             thread = _history(rows)
             if not thread and not contact.get("last_inbound_at"):
