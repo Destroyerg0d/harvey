@@ -92,6 +92,16 @@ async def started(state):
 
 
 @pytest.mark.asyncio
+async def test_the_first_read_acts_only_on_what_came_after_harveys_latest_message(state):
+    chat = [Msg("old chat", "w0"), Msg("Harvey update - sent 3", "o1", direction="out"),
+            Msg("thanks", "w1"), Msg("Harvey: you can message me here", "o2", direction="out"),
+            Msg("pause linkedin", "w2")]
+    assert await owner_inbox.record(state, chat) == 1
+    rows = {r["wa_id"]: r["status"] for r in await owner_inbox._rows(state, "SELECT * FROM owner_messages")}
+    assert rows == {"w0": "seen", "w1": "seen", "w2": "new"}
+
+
+@pytest.mark.asyncio
 async def test_old_messages_are_seen_and_new_ones_acted_on_once(state):
     await started(state)
     assert await owner_inbox.record(state, [Msg("got it", "w0"), Msg("pause linkedin", "w1")]) == 1

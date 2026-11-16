@@ -103,21 +103,27 @@ async def record(state, messages) -> int:
     already there is kept as seen. Returns how many are new to act on."""
     await _ensure(state)
     first = not await state.get_setting(STARTED_KEY)
+    messages = list(messages)
+    # The first read: what you wrote after Harvey's latest message to you is
+    # new (a reply to it); everything before that is history, kept as seen.
+    last_ours = max((i for i, m in enumerate(messages) if getattr(m, "direction", "") == "out"
+                     and (m.body or "").strip().startswith("Harvey")), default=-1)
     known = await _rows(state, "SELECT wa_id, body FROM owner_messages WHERE direction = 'in' "
                                "ORDER BY created_at DESC LIMIT 200")
     ids = {r["wa_id"] for r in known if r["wa_id"]}
     bodies = {r["body"] for r in known}
     new = 0
-    for m in messages:
+    for i, m in enumerate(messages):
         if getattr(m, "direction", "") != "in" or not getattr(m, "text", True):
             continue
         body = (m.body or "").strip()
         if not body or (m.wa_id and m.wa_id in ids) or (not m.wa_id and body in bodies):
             continue
-        await _insert(state, body, wa_id=m.wa_id or "", status=SEEN if first else NEW)
+        old = first and (last_ours < 0 or i < last_ours)
+        await _insert(state, body, wa_id=m.wa_id or "", status=SEEN if old else NEW)
         ids.add(m.wa_id)
         bodies.add(body)
-        new += 0 if first else 1
+        new += 0 if old else 1
     if first:
         await state.set_setting(STARTED_KEY, _now())
     return new
