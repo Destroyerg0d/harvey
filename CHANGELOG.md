@@ -9,6 +9,13 @@ minor versions can still change behaviour.
 
 ### Added
 
+- **Two free discovery sources, no signup.** Scout reads Overture Maps' open business data
+  (harvey/collectors/discover.py `OvertureMaps`, DuckDB over the public Parquet release): one city
+  a cycle in the map's weighted order, independent shops with a website of their own (Overture's
+  "shopping" kinds, no chain brand, no shared or social website), paging deeper into a city each
+  visit. And it reads new Shopify Community questions (harvey/collectors/intent.py) every 30
+  minutes: a store linked in a question, confirmed as a Shopify storefront, is added with a note of
+  what they asked, and the backfill looks at those first. Nobody is messaged on the forum.
 - **Your phone gets Harvey's news, and Harvey takes instructions from it.** Each heartbeat cycle
   sends one short WhatsApp message to `channels.whatsapp.alert_number` about what happened since
   the last one: emails sent, replies answered, what needs you, opt-outs, bounces, new senders,

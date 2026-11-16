@@ -32,7 +32,7 @@ import logging
 import random
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, quote_plus, urlparse
 
 import httpx
@@ -138,6 +138,35 @@ def search_phrase(label: str) -> str:
 # without a consent check (owner, 2026-11-14: "utilize the mailing capacity to
 # the fullest"; Precleared holds most EU and Australian addresses).
 MAP_WEIGHT = {"united states": 3}
+
+
+# Overture Maps (open business data): one city a cycle, in the same weighted
+# order, paging through each city's shops a batch of raw places at a time.
+OVERTURE_CURSOR_KEY = "scout:overture_cursor"
+OVERTURE_OFFSET_KEY = "scout:overture_offset:"
+OVERTURE_BATCH = 1500
+# The Shopify Community intent feed (harvey/collectors/intent.py).
+INTENT_AT_KEY = "scout:intent_at"
+INTENT_EVERY = timedelta(minutes=30)
+INTENT_SOURCE = "intent:shopify_community"
+
+
+def city_rotation(config) -> list[str]:
+    """The cities of icp.geography in map order (MAP_WEIGHT cities a round
+    for a country listed there), each once."""
+    cities, weights = [], []
+    for place in getattr(config.icp, "geography", None) or []:
+        known = MAP_CITIES.get(place.strip().lower())
+        cities.append(list(known) if known else [place.strip()])
+        weights.append(max(1, MAP_WEIGHT.get(place.strip().lower(), 1)))
+    ordered, taken = [], [0] * len(cities)
+    while any(t < len(c) for t, c in zip(taken, cities)):
+        for k, c in enumerate(cities):
+            for city in c[taken[k]:taken[k] + weights[k]]:
+                if city not in ordered:
+                    ordered.append(city)
+            taken[k] += weights[k]
+    return ordered
 
 
 def map_rotation(config, osm) -> list[tuple[str, str]]:
@@ -302,6 +331,10 @@ class Scout:
         # New companies from the map: free and keyless, so it works when every
         # search engine refuses this PC (DuckDuckGo, Bing and Google all do).
         strategies.append(("map", self._prospect_via_map))
+        # Open business data (Overture Maps): shops OpenStreetMap misses, free.
+        strategies.append(("overture", self._prospect_via_overture))
+        # People asking for help on the Shopify Community right now: warm.
+        strategies.append(("intent", self._prospect_via_intent))
         # The dashboard's LinkedIn switch can only take this away: off means off
         # everywhere, but turning it on there runs the channel through its own
         # signed-in profile, and isn't a yes to a password-based search as well.
@@ -824,6 +857,90 @@ class Scout:
             logger.info(f"Scout: the map found {report.new_companies} new shop"
                         f"{'s' if report.new_companies != 1 else ''} with a website in {city} "
                         f"({term}); the backfill finds who to write to.")
+        return 0
+
+    # ── Strategy 0c: Shops in Overture's open business data (free, no key) ──
+
+    async def _prospect_via_overture(self) -> int:
+        """One city a cycle from Overture Maps places: independent shops with a
+        website of their own, OVERTURE_BATCH raw places further into that city
+        each visit (back to the start once a city runs out). Companies only:
+        the backfill finds each one's owner or published inbox afterwards."""
+        from harvey.collectors.discover import DiscoveryQuery, run_discovery
+        cities = city_rotation(self.config)
+        if not cities:
+            return 0
+        try:
+            import duckdb  # noqa: F401
+        except ImportError:
+            logger.info("Scout: the Overture step needs DuckDB (pip install duckdb); skipped.")
+            return 0
+        try:
+            cursor = int(await self.state.get_setting(OVERTURE_CURSOR_KEY) or 0)
+        except (TypeError, ValueError):
+            cursor = 0
+        city = cities[cursor % len(cities)]
+        await self.state.set_setting(OVERTURE_CURSOR_KEY, str(cursor + 1))
+        offset_key = OVERTURE_OFFSET_KEY + city.lower()
+        try:
+            offset = int(await self.state.get_setting(offset_key) or 0)
+        except (TypeError, ValueError):
+            offset = 0
+        try:
+            report = await run_discovery(
+                self.state, self.config, "overture",
+                queries=[DiscoveryQuery(term="independent shops", location=city,
+                                        limit=OVERTURE_BATCH, offset=offset)], max_spend=0.0)
+        except Exception as e:
+            logger.info(f"Scout: the Overture search in {city} didn't run: {e}")
+            return 0
+        found = report.found
+        if report.errors:
+            logger.info(f"Scout: the Overture search in {city}: {report.errors[0][:160]}")
+            return 0
+        # Page on; a visit that found no shop at all means the city ran out.
+        empty = not report.new_companies and not found
+        await self.state.set_setting(offset_key, "0" if empty and offset else str(offset + OVERTURE_BATCH))
+        if report.new_companies:
+            logger.info(f"Scout: Overture found {report.new_companies} new shop"
+                        f"{'s' if report.new_companies != 1 else ''} with a website in {city}; "
+                        "the backfill finds who to write to.")
+        return 0
+
+    # ── Strategy 0d: Stores asking for help on the Shopify Community ──
+
+    async def _prospect_via_intent(self) -> int:
+        """At most every INTENT_EVERY: stores linked in new Shopify Community
+        questions (harvey/collectors/intent.py), added as companies with a note
+        of what they asked. The backfill takes them first (state's
+        companies_needing_prospects puts intent: sources ahead)."""
+        from harvey.collectors.intent import shopify_community_leads
+        from harvey.models.company import Company
+        last = await self.state.get_setting(INTENT_AT_KEY)
+        now = datetime.now(timezone.utc)
+        try:
+            if last and now - datetime.fromisoformat(last) < INTENT_EVERY:
+                return 0
+        except ValueError:
+            pass
+        await self.state.set_setting(INTENT_AT_KEY, now.isoformat())
+        try:
+            leads = await shopify_community_leads(self.state)
+        except Exception as e:
+            logger.info(f"Scout: the Shopify Community feed didn't answer: {e}")
+            return 0
+        added = 0
+        for lead in leads:
+            if await self.state.get_company_by_domain(lead.domain) is not None:
+                continue
+            await self.state.add_company(Company(
+                name=lead.domain.split(".")[0].replace("-", " ").title(), domain=lead.domain,
+                website=lead.store_url, source=INTENT_SOURCE, source_url=lead.topic_url,
+                notes=lead.note(), tech_stack=["Shopify"]))
+            added += 1
+        if added:
+            logger.info(f"Scout: {added} store{'s' if added != 1 else ''} asking for help on the "
+                        "Shopify Community added; the backfill looks at them first.")
         return 0
 
     # ── Strategy 0: Known companies with zero prospects ──

@@ -389,6 +389,7 @@ class DiscoveryQuery:
     depth: int = 30                  # SERP depth; ignored by listings providers
     limit: int = 100                 # max records to take from one query
     preset: str = ""                 # PRESETS key that built it, if any
+    offset: int = 0                  # skip this many (a provider that pages, Overture)
 
     def keyword(self) -> str:
         return f"{self.term} {self.location}".strip()
@@ -1218,6 +1219,139 @@ class OpenStreetMap(DiscoveryProvider):
         return out
 
 
+class OvertureMaps(DiscoveryProvider):
+    """Overture Maps places: free open map data (Amazon, Meta, Microsoft,
+    TomTom), over 100 million businesses, many with a website, phone and
+    address. No signup and no key: the monthly release is read straight from
+    its public bucket with DuckDB, a city at a time (about 20 seconds for a
+    big one). It covers shops OpenStreetMap misses (2026-11-16 research).
+
+    Only independent shops with a website of their own: anything under
+    "shopping" in Overture's taxonomy, without a chain brand, minus the kinds
+    that never buy a website (petrol stations, supermarkets, pharmacies...)
+    and minus marketplace and social pages standing in for a website."""
+
+    key = "overture"
+    label = "Overture Maps places (open data)"
+    kind = "listings"
+    needs_coordinates = True
+    blurb = ("Free open business data from Overture Maps: shops with their own website, "
+             "city by city. No signup, no key, no card.")
+    cost_note = "free"
+    free_tier = "unlimited (open data, a new release every month)"
+    signup_url = "https://docs.overturemaps.org/guides/places"
+    env_keys = ()
+    caveat = "Needs DuckDB (pip install duckdb); each city reads part of the public files over the network."
+
+    BUCKET = "s3://overturemaps-us-west-2/release"
+    REGION = "us-west-2"
+    MIN_CONFIDENCE = 0.6
+    # Shopping kinds that are chains, utilities or never a web-store buyer.
+    EXCLUDED = ("gas_station", "convenience_store", "grocery_store", "supermarket", "pharmacy",
+                "drugstore", "atm", "auto_dealer", "car_dealer", "liquor_store", "tobacco_shop",
+                "vape_shop", "pawn_shop", "thrift_store", "dollar_store", "discount_store",
+                "department_store", "shopping_center", "mall", "outlet_store", "warehouse_store")
+    NOT_A_SITE = ("facebook.com", "instagram.com", "etsy.com", "ebay.com", "amazon.com", "yelp.com",
+                  "linktr.ee", "google.com", "business.site", "tiktok.com", "twitter.com", "x.com",
+                  "squareup.com", "square.site", "wix.com", "linkedin.com", "youtube.com")
+    _release: tuple[str, float] | None = None
+
+    def _connect(self):
+        import duckdb
+        con = duckdb.connect()
+        con.execute("INSTALL httpfs; LOAD httpfs;")
+        con.execute(f"SET s3_region='{self.REGION}';")
+        return con
+
+    def _latest(self, con) -> str:
+        """The newest release's name, checked once a day."""
+        if OvertureMaps._release and time.time() - OvertureMaps._release[1] < 86400:
+            return OvertureMaps._release[0]
+        rows = con.execute(
+            "SELECT DISTINCT regexp_extract(file, 'release/([^/]+)/', 1) AS r FROM "
+            f"glob('{self.BUCKET}/*/theme=places/type=place/*') ORDER BY r DESC LIMIT 1").fetchall()
+        if not rows or not rows[0][0]:
+            raise RuntimeError("Overture: couldn't find a places release in the public bucket")
+        OvertureMaps._release = (rows[0][0], time.time())
+        return rows[0][0]
+
+    def _query(self, bbox: tuple[float, float, float, float], limit: int, offset: int) -> list[tuple]:
+        """Places in the box with a website, ``limit`` of them from ``offset``
+        (in id order, so the next call pages on). Only the area, the website and
+        the confidence are filtered here; the rest is in ``fetch``: DuckDB 2.0
+        hits an internal error when a second nested-field filter (taxonomy,
+        brand) or an element pick like websites[1] meets the bbox filter. The
+        numbers are inlined for the same reason; every one is Harvey's own."""
+        west, south, east, north = bbox
+        con = self._connect()
+        try:
+            path = f"{self.BUCKET}/{self._latest(con)}/theme=places/type=place/*"
+            return con.execute(f"""
+                SELECT id, names, websites, phones, addresses, taxonomy, brand
+                FROM read_parquet('{path}', hive_partitioning=1)
+                WHERE bbox.xmin BETWEEN {float(west)} AND {float(east)}
+                  AND bbox.ymin BETWEEN {float(south)} AND {float(north)}
+                  AND websites IS NOT NULL
+                  AND confidence >= {float(self.MIN_CONFIDENCE)}
+                ORDER BY id
+                LIMIT {int(limit)} OFFSET {int(offset)}""").fetchall()
+        finally:
+            con.close()
+
+    @staticmethod
+    def bbox(coordinate: str) -> tuple[float, float, float, float]:
+        """"lat,lng,radius_km" -> (west, south, east, north)."""
+        lat, lng, radius = (float(x) for x in (coordinate.split(",") + ["", "", "25"])[:3])
+        dlat = radius / 111.0
+        dlng = radius / (111.0 * max(0.2, math.cos(math.radians(lat))))
+        return lng - dlng, lat - dlat, lng + dlng, lat + dlat
+
+    async def fetch(self, client, env, query):
+        if not query.coordinate:
+            logger.warning("overture: no coordinate for %r", query.keyword())
+            return []
+        try:
+            import duckdb  # noqa: F401
+        except ImportError:
+            raise RuntimeError("Overture needs DuckDB: pip install duckdb") from None
+        rows = await asyncio.to_thread(self._query, self.bbox(query.coordinate),
+                                       query.limit, getattr(query, "offset", 0) or 0)
+        def first(values):
+            return values[0] if isinstance(values, (list, tuple)) and values else None
+
+        out = []
+        for (pid, names, websites, phones, addresses, taxonomy, brand) in rows:
+            hierarchy = (taxonomy or {}).get("hierarchy") if isinstance(taxonomy, dict) else None
+            if brand or "shopping" not in (hierarchy or []):
+                continue                  # a chain, or not a shop
+            if (taxonomy or {}).get("primary") in self.EXCLUDED:
+                continue
+            name = (names or {}).get("primary") if isinstance(names, dict) else None
+            site, phone = first(websites), first(phones)
+            address = first(addresses) or {}
+            street, city = address.get("freeform"), address.get("locality")
+            region, country = address.get("region"), address.get("country")
+            category = (taxonomy or {}).get("primary") if isinstance(taxonomy, dict) else None
+            domain = normalize_domain(site or "")
+            if not name or not domain or any(domain == h or domain.endswith("." + h)
+                                             for h in self.NOT_A_SITE):
+                continue
+            out.append(Business(
+                name=name, domain=domain, website=site or "", phone=phone or "",
+                address=street or "",
+                location=", ".join(x for x in (city, region, country) if x) or query.location,
+                category=category or "", has_website=True,
+                external_id=f"overture:{pid}", source_url=f"{self.signup_url}#{pid}",
+                provider=self.key,
+            ))
+        # A website several places share is a chain's (Overture often leaves
+        # their brand empty); a directory or listing site is never a shop's.
+        seen = {}
+        for b in out:
+            seen[b.domain] = seen.get(b.domain, 0) + 1
+        return [b for b in out if seen[b.domain] == 1 and not is_junk(b.domain, b.name)]
+
+
 class ScavioProvider(DiscoveryProvider):
     """Shared plumbing for the two Scavio adapters: one key, one credit price.
 
@@ -1470,6 +1604,7 @@ class ScavioSearch(ScavioProvider):
 PROVIDERS: dict[str, DiscoveryProvider] = {
     p.key: p for p in (
         OpenStreetMap(),
+        OvertureMaps(),
         TinyFish(),
         DataForSEOListings(),
         DataForSEOSerp(),

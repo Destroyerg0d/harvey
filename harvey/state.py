@@ -2536,7 +2536,9 @@ class StateManager(LinkedInStateMixin, WhatsAppStateMixin):
                           OR c.prospects_checked_at < datetime('now', ?))
                    GROUP BY c.id
                    HAVING COUNT(p.id) = 0
-                   ORDER BY c.prospects_checked_at IS NOT NULL, c.prospects_checked_at
+                   ORDER BY c.prospects_checked_at IS NOT NULL,
+                            COALESCE(c.source, '') LIKE 'intent:%' DESC,
+                            c.prospects_checked_at
                    LIMIT ?""",
                 (f"-{int(stale_days)} days", int(limit)),
             ) as cursor:
