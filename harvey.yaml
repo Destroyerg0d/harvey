@@ -134,6 +134,10 @@ channels:
     # and at most 12 an hour. Connect on the dashboard's LinkedIn tab, or
     # `harvey linkedin login`, signs the profile in.
     # hours: {start: "10:00", end: "19:00", timezone: "Asia/Kolkata", weekdays_only: true}
+    # Answer replies at any hour: a short inbox check every reply_check_minutes reads
+    # the inbox and sends replies only (invites and first messages keep to hours).
+    # replies_any_time: false
+    # reply_check_minutes: 10
     # WhatsApp through WhatsApp Web, only to people who gave you their number
     # themselves (`harvey whatsapp add`). Automating WhatsApp breaks its terms and
     # can get the number banned: use a separate number you can afford to lose, and
@@ -162,6 +166,9 @@ channels:
     #   do_not_contact: []           # numbers never to message, each with its + country code
     #   # Goes by the recipient's own clock when known; anyone Harvey can't place uses this.
     #   hours: {start: "10:00", end: "19:00", timezone: "Asia/Kolkata", weekdays_only: true}
+    #   # Read chats and answer replies at any hour, quiet hours included; a reply
+    #   # never waits for the person's daytime.
+    #   replies_any_time: false
 
 usage:
   max_daily_claude_percent: 80

@@ -45,7 +45,8 @@ from harvey.linkedin.pages import (
     COMPOSER, CONNECTIONS_URL, CONVERSATION_LIST, FEED_URL, INVITE_NOTE_BOX, MESSAGING_URL,
     SEND_BUTTON, SENT_INVITES_URL, clean_text, compose_link_from_profile, invite_confirmed,
     names_match, note_limit_reached, parse_connections, parse_conversation_list,
-    parse_sent_invitations, parse_thread, profile_connect_state, profile_url,
+    parse_sent_invitations, parse_thread, profile_connect_state, profile_headline, profile_summary,
+    profile_url,
     recipient_confirmed, signed_in_from,
 )
 from harvey.linkedin.store import HELD_FOR_REVIEW, MAYBE_SENT, _iso
@@ -54,10 +55,18 @@ from harvey.untrusted import UNTRUSTED_RULE, fence
 logger = logging.getLogger("harvey.linkedin")
 
 LAST_RUN_KEY = "linkedin:last_run"
+# When the last replies-only inbox check started (channels.linkedin.replies_any_time).
+INBOX_CHECK_KEY = "linkedin:last_inbox_check"
+INBOX_CHECK_MINUTES = 15     # the most a replies-only check runs
 RUNNING_KEY = "linkedin:running"
 AUTOPILOT_KEY = "linkedin:autopilot"
 # A site review was written for this lead (harvey/site_review.py): one each.
 REVIEWED_KEY = "linkedin:reviewed:"
+# Failed sends to one person before Harvey stops drafting for them.
+MAX_FAILED_SENDS = 2
+# What their profile page says, read once and kept this long (drafting).
+PROFILE_KEY = "linkedin:profile:"
+PROFILE_FRESH = timedelta(days=14)
 ENABLED_KEY = "linkedin:enabled"
 NOTES_OFF_KEY = "linkedin:notes_unavailable_until"
 
@@ -191,7 +200,9 @@ class LinkedInAgent:
 
     # ── When it may run ──
 
-    async def why_not_now(self, ignore_interval: bool = False) -> str:
+    async def why_not_now(self, ignore_interval: bool = False, replies_only: bool = False) -> str:
+        """Why a run can't start now, or "". ``replies_only``: the short inbox
+        check channels.linkedin.replies_any_time allows at any hour."""
         if not await channel_on(self.state, self.config):
             return "LinkedIn is off (the switch on the dashboard's LinkedIn tab, or channels.linkedin.enabled)"
         pause = await active_pause(self.state, self.now())
@@ -199,12 +210,20 @@ class LinkedInAgent:
             return "LinkedIn is paused: " + str(pause.get("reason") or "paused")
         if await channel_login.in_progress(self.state, "linkedin"):
             return "a LinkedIn sign-in is waiting, and its Chrome window holds the profile"
-        if not self.pacing.in_hours():
+        if replies_only and not getattr(self.cfg, "replies_any_time", False):
+            return "replies at any hour are off (channels.linkedin.replies_any_time)"
+        if not replies_only and not self.pacing.in_hours():
             return f"outside LinkedIn hours ({self.pacing.hours_text()})"
         running = _parse(await self.state.get_setting(RUNNING_KEY))
         if running and self.now() - running < timedelta(minutes=self.cfg.max_run_minutes + 15):
             return "a LinkedIn run is already going"
-        if not ignore_interval:
+        if replies_only and not ignore_interval:
+            checked = _parse(await self.state.get_setting(INBOX_CHECK_KEY))
+            every = max(1, int(getattr(self.cfg, "reply_check_minutes", 10) or 10))
+            if checked and self.now() - checked < timedelta(minutes=every):
+                return (f"the inbox was checked at {checked:%H:%M} UTC; the next check "
+                        f"waits {every} minutes")
+        elif not ignore_interval:
             last = await self.last_run()
             started = _parse(last.get("started"))
             if started and self.now() - started < timedelta(minutes=self.cfg.run_every_minutes):
@@ -221,21 +240,28 @@ class LinkedInAgent:
 
     # ── A run ──
 
-    async def run(self, dry_run: bool = False, ignore_interval: bool = False) -> dict:
-        reason = await self.why_not_now(ignore_interval)
+    async def run(self, dry_run: bool = False, ignore_interval: bool = False,
+                  replies_only: bool = False) -> dict:
+        reason = await self.why_not_now(ignore_interval, replies_only=replies_only)
         if reason:
             return {"ran": False, "reason": reason}
         self.dry_run = dry_run
+        self.replies_only = replies_only
         self._failed_leads = set()
         started = self.now()
-        self.deadline = started + timedelta(minutes=self.cfg.max_run_minutes)
+        self.deadline = started + timedelta(
+            minutes=INBOX_CHECK_MINUTES if replies_only else self.cfg.max_run_minutes)
         self.report = {"ran": True, "dry_run": dry_run, "started": _iso(started), "outcome": "",
                        "inbound": 0, "accepted": 0, "withdrawn": 0, "declined": 0, "drafted": 0,
                        "invite_drafts": 0, "sent_messages": 0, "sent_invites": 0, "failed": 0,
                        "would_send": []}
         await self.state.set_setting(RUNNING_KEY, _iso(started))
-        await self.state.set_setting(LAST_RUN_KEY, json.dumps(
-            {"started": _iso(started), "finished": None, "outcome": "running"}))
+        if replies_only:
+            # A check between full runs: it doesn't push the next full run back.
+            await self.state.set_setting(INBOX_CHECK_KEY, _iso(started))
+        else:
+            await self.state.set_setting(LAST_RUN_KEY, json.dumps(
+                {"started": _iso(started), "finished": None, "outcome": "running"}))
         try:
             async with self.driver_factory() as driver:
                 self.driver = driver
@@ -254,20 +280,28 @@ class LinkedInAgent:
             self.driver = None
             self.report["finished"] = _iso(self.now())
             await self.state.set_setting(RUNNING_KEY, "")
-            await self.state.set_setting(LAST_RUN_KEY, json.dumps(
-                {k: v for k, v in self.report.items() if k != "would_send"}))
-            try:
-                await self.state.log_action("linkedin_run", "linkedin",
-                                            {k: v for k, v in self.report.items()})
-            except Exception:
-                pass
+            if not replies_only:
+                await self.state.set_setting(LAST_RUN_KEY, json.dumps(
+                    {k: v for k, v in self.report.items() if k != "would_send"}))
+            busy = (self.report.get("inbound") or self.report.get("sent_messages")
+                    or not str(self.report.get("outcome", "")).startswith("done"))
+            if not replies_only or busy:
+                try:
+                    await self.state.log_action(
+                        "linkedin_inbox_check" if replies_only else "linkedin_run", "linkedin",
+                        {k: v for k, v in self.report.items()})
+                except Exception:
+                    pass
         return self.report
 
     async def _steps(self):
         await self.pacing.prune()
         await self._check_signed_in()
-        for step in (self.sync_inbox, self.sync_connections, self.sync_sent_invites,
-                     self.handle_inbound, self.draft_messages, self.pick_invites, self.send_approved):
+        steps = ((self.sync_inbox, self.handle_inbound, self.send_approved)
+                 if getattr(self, "replies_only", False) else
+                 (self.sync_inbox, self.sync_connections, self.sync_sent_invites,
+                  self.handle_inbound, self.draft_messages, self.pick_invites, self.send_approved))
+        for step in steps:
             await self._still_on()
             await step()
         await self._still_on()      # stopped during the last step: say so, not "done"
@@ -783,6 +817,15 @@ class LinkedInAgent:
             if lead.get("no_message_reason") or await self.state.li_pending_for(
                     lead["id"], kinds=("message", "reply")):
                 continue
+            failed = await self.state.li_messages(lead_id=lead["id"], kinds=("message",),
+                                                  statuses=("failed",))
+            if len(failed) >= MAX_FAILED_SENDS:
+                # The same send failing again and again: set them aside for you
+                # instead of drafting (and spending a model call) each run.
+                await self.state.li_update_lead(lead["id"], no_message_reason=(
+                    f"{len(failed)} messages to them failed ({failed[-1]['error'] or 'no reason'}): "
+                    "look at their profile")[:300])
+                continue
             if await self.email_block(lead):
                 continue
             unanswered = await self.state.li_unanswered(lead["id"])
@@ -898,6 +941,39 @@ class LinkedInAgent:
             lines.append(f"How we came to them: {lead['note']}")
         return "\n".join(line for line in lines if not line.endswith(": "))
 
+    async def research(self, lead: dict) -> str:
+        """What their profile page says (pages.profile_summary), read once and
+        kept PROFILE_FRESH, so a message builds on something real about them
+        (owner, 2026-11-16: the messages read generic). Their headline is
+        stored when it was missing. "" without a browser or a profile URL."""
+        key = PROFILE_KEY + lead["id"]
+        cached = {}
+        try:
+            cached = json.loads(await self.state.get_setting(key) or "{}")
+        except ValueError:
+            cached = {}
+        at = _parse(cached.get("at"))
+        if cached.get("text") and at and self.now() - at < PROFILE_FRESH:
+            return cached["text"]
+        url = lead.get("profile_url") or (profile_url(lead["slug"]) if lead.get("slug") else "")
+        if self.driver is None or self.dry_run or not url:
+            return cached.get("text") or ""
+        try:
+            html = await self._visit(url)
+        except (BreakerTripped, SwitchedOff):
+            raise
+        except Exception as e:
+            logger.info(f"LinkedIn: couldn't read {lead.get('name') or 'a'} profile: {e}")
+            return cached.get("text") or ""
+        text = profile_summary(html)
+        headline = profile_headline(html)
+        if headline and not lead.get("headline"):
+            await self.state.li_update_lead(lead["id"], headline=headline[:220])
+            lead["headline"] = headline[:220]
+        if text:
+            await self.state.set_setting(key, json.dumps({"at": self.now().isoformat(), "text": text}))
+        return text
+
     def _history(self, history) -> str:
         out = []
         for m in (history or [])[-12:]:
@@ -953,6 +1029,7 @@ class LinkedInAgent:
                       + (f"If they ask to talk, the booking link is {booking}. " if booking else "")
                       + "If they ask whether this is automated, say yes, honestly."),
         }[which]
+        profile = await self.research(lead) if which in ("first", "follow_up", "reply") else ""
         prompt += f"""
 
 {UNTRUSTED_RULE}
@@ -960,6 +1037,14 @@ class LinkedInAgent:
 FACTS about them:
 {fence(await self._facts(lead), "their profile and company")}
 """
+        if profile:
+            prompt += (f"\nTHEIR LINKEDIN PROFILE (what their profile page shows):\n"
+                       f"{fence(profile, 'their LinkedIn profile')}\n")
+        if which in ("first", "follow_up"):
+            task += (" Build it on one concrete detail from THEIR LINKEDIN PROFILE or the FACTS: what "
+                     "they sell, their role, something they did or said. Never fall back on a question "
+                     "you could ask anyone (such as whether the site is run in-house or by an agency) "
+                     "when a specific detail is there.")
         if history:
             prompt += f"\nTHE CONVERSATION SO FAR:\n{fence(self._history(history), 'the conversation')}\n"
         if note:
@@ -1005,9 +1090,15 @@ FACTS about them:
         order = {"reply": 0, "message": 1, "invite_note": 2}
         items = sorted(await self.state.li_messages(statuses=("approved",), direction="out"),
                        key=lambda m: (order.get(m["kind"], 3), m["created_at"] or ""))
+        replies_any_time = bool(getattr(self.cfg, "replies_any_time", False))
         for item in items:
-            if not self._time_left() or not self.pacing.in_hours():
+            if not self._time_left():
                 break
+            reply = item["kind"] == "reply"
+            if getattr(self, "replies_only", False) and not reply:
+                continue        # an inbox check sends replies only
+            if not self.pacing.in_hours() and not (reply and replies_any_time):
+                continue        # invites and first messages keep to hours
             await self._still_on()
             if await active_pause(self.state, self.now()):
                 break
@@ -1214,19 +1305,26 @@ class LinkedInRunner:
     def running(self) -> bool:
         return self.task is not None and not self.task.done()
 
-    async def maybe_start(self) -> str:
-        """Start a run if one is due. Returns why not, or "started"."""
+    async def maybe_start(self, replies_only: bool = False) -> str:
+        """Start a run if one is due, else (channels.linkedin.replies_any_time)
+        a replies-only inbox check if one is. ``replies_only``: only that check
+        (quiet hours, a tight Claude budget). Returns why not, or "started"."""
         if not await channel_on(self.state, self.config):
             return "off"
         if self.running:
             return "a run is going"
         agent = self.agent_factory()
-        why = await agent.why_not_now()
-        if why:
-            return why
-        logger.info("LinkedIn: starting a run in the background.")
-        self.task = asyncio.create_task(agent.run())
-        return "started"
+        why = "" if replies_only else await agent.why_not_now()
+        if not why and not replies_only:
+            logger.info("LinkedIn: starting a run in the background.")
+            self.task = asyncio.create_task(agent.run())
+            return "started"
+        if getattr(self.config.channels.linkedin, "replies_any_time", False):
+            check = await agent.why_not_now(replies_only=True)
+            if not check:
+                self.task = asyncio.create_task(agent.run(replies_only=True))
+                return "started (inbox check)"
+        return why or "no inbox check due"
 
     async def shutdown(self):
         if self.running:

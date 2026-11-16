@@ -63,7 +63,17 @@ def names_match(a: str, b: str) -> bool:
         return False
     if ta == tb:
         return True
+    if ta[0] == tb[0] and len(ta) > 1 and len(tb) > 1 and _initial_of(ta[-1], tb[-1]):
+        # LinkedIn shortens some names to a last initial ("Toby G."); the
+        # message window shows the whole name (2026-11-16: 107 failed sends).
+        return True
     return ta[0] == tb[0] and ta[-1] == tb[-1] and (len(ta) > 1 or len(tb) == 1)
+
+
+def _initial_of(x: str, y: str) -> bool:
+    """One of two last names is the other's initial ("g" and "green")."""
+    short, full = sorted((x, y), key=len)
+    return len(short) == 1 and len(full) > 1 and full.startswith(short)
 
 
 def slug_from_url(url: str) -> str:
@@ -328,6 +338,45 @@ def parse_sent_invitations(html: str) -> list[SentInvite]:
 
 
 # ── Profile: connect flow ──
+
+# Lines on a profile page that are buttons, counters or furniture, not about them.
+_PROFILE_NOISE_RE = re.compile(
+    r"^(?:message|connect|follow|following|more|pending|show all.*|see more|see less|…see more|"
+    r"\d[\d,]*\+? (?:followers|connections)|contact info|open to|add profile section|"
+    r"enhance profile|resources|people you may know|people also viewed|you might like|"
+    r"show (?:all|more).*|\d+(?:st|nd|rd)|·|•|-)$", re.IGNORECASE)
+
+
+def profile_summary(html: str, max_chars: int = 2500) -> str:
+    """What their profile page says about them, as plain lines: name,
+    headline, location, About, current and past roles. Buttons, counters
+    and the "people also viewed" side panel are left out."""
+    s = soup_of(html)
+    main = s.select_one("main") or s
+    for el in main.select("script, style, aside, nav, button, svg, [aria-hidden='true']"):
+        el.decompose()
+    lines, seen = [], set()
+    for chunk in main.get_text("\n").split("\n"):
+        line = clean_text(chunk)
+        if len(line) < 2 or line in seen or _PROFILE_NOISE_RE.match(line):
+            continue
+        seen.add(line)
+        lines.append(line)
+    return "\n".join(lines)[:max_chars]
+
+
+def profile_headline(html: str) -> str:
+    """The line under their name in the profile's top card, or ""."""
+    card = _top_card(soup_of(html))
+    name = card.find("h1") if card is not None else None
+    if name is None:
+        return ""
+    for el in name.find_all_next(["div", "p", "span"], limit=12):
+        text = clean_text(el.get_text(" "))
+        if text and text != clean_text(name.get_text(" ")) and 8 <= len(text) <= 220:
+            return text
+    return ""
+
 
 def _top_card(s: BeautifulSoup):
     """The profile's own header, not the "people also viewed" sidebar."""

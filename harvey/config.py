@@ -1,5 +1,6 @@
 """Configuration loader for Harvey. Reads harvey.yaml + .env."""
 
+import json
 import logging
 import os
 import re
@@ -577,6 +578,11 @@ class LinkedInChannelConfig(BaseModel):
     # One run at a time, at most one every run_every_minutes, each at most this long.
     run_every_minutes: int = 120
     max_run_minutes: int = 90
+    # Answer replies at any hour, quiet hours included: between full runs, a
+    # short check every reply_check_minutes reads the inbox and sends the
+    # replies only (invites and first messages keep to hours).
+    replies_any_time: bool = False
+    reply_check_minutes: int = 10
     # A warning, captcha, sign-in challenge or limit notice pauses LinkedIn this long.
     pause_hours_on_warning: int = 48
     withdraw_after_days: int = 21
@@ -671,6 +677,9 @@ class WhatsAppChannelConfig(BaseModel):
     # One run at a time, at most one every run_every_minutes, each at most this long.
     run_every_minutes: int = 60
     max_run_minutes: int = 60
+    # Answer replies at any hour: outside hours and in quiet hours a run still
+    # reads the chats and replies, and a reply never waits for their daytime.
+    replies_any_time: bool = False
     # A ban or warning pauses this long; a phone that dropped off, this long;
     # this many failed sends in a row pause until you resume.
     pause_hours_on_warning: int = 48
@@ -1488,7 +1497,44 @@ def refresh_sending_mode(config, path=None) -> bool:
 _dnc_cache: dict[str, tuple[tuple, list[str] | None]] = {}
 
 
+EXTRA_DO_NOT_CONTACT = "data/do_not_contact.extra.json"
+
+
+def extra_do_not_contact() -> list[str]:
+    """Entries added outside the config file (an instruction you sent Harvey
+    on WhatsApp, harvey/owner_inbox.py): EXTRA_DO_NOT_CONTACT, a JSON list.
+    Missing or unreadable: none."""
+    path = PROJECT_ROOT / EXTRA_DO_NOT_CONTACT
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        return ComplianceConfig(do_not_contact=raw if isinstance(raw, list) else []).do_not_contact
+    except (OSError, ValueError, ValidationError):
+        return []
+
+
+def add_extra_do_not_contact(entry: str) -> list[str]:
+    """Add one address or domain to EXTRA_DO_NOT_CONTACT (validated like the
+    config list). Returns the new list; raises ValueError on a bad entry."""
+    current = extra_do_not_contact()
+    try:
+        merged = ComplianceConfig(do_not_contact=[*current, entry]).do_not_contact
+    except ValidationError as e:
+        raise ValueError(f"{entry!r} isn't an address or a domain") from e
+    path = PROJECT_ROOT / EXTRA_DO_NOT_CONTACT
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(merged, indent=1), encoding="utf-8")
+    return merged
+
+
 def live_do_not_contact(config) -> list[str]:
+    """The do-not-contact list as the config file says it is now, plus what
+    was added from WhatsApp (extra_do_not_contact)."""
+    extra = extra_do_not_contact()
+    listed = _file_do_not_contact(config)
+    return listed + [e for e in extra if e not in listed] if extra else listed
+
+
+def _file_do_not_contact(config) -> list[str]:
     """The do-not-contact list as the config file says it is now.
 
     Someone who sees an approved email to a company they must not contact

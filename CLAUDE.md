@@ -369,6 +369,8 @@ harvey inbound import FILE [--source NAME]  # The same from a CSV or XLSX of lea
 harvey reviews measure URL   # What the site-review test finds on a home page (nothing is stored or sent)
 harvey reviews promised      # Who a sent reply promised a write-up to and hasn't had one
 harvey reviews write [NAME]  # Write those reviews; each waits for approval (unless reviews autopilot is on)
+harvey owner notes          # What the owner asked for on WhatsApp that needs a code change, and answers
+harvey owner ask "TEXT"      # A question to the owner's phone (their answer lands in `harvey owner notes`)
 ```
 
 Site reviews and job seekers (harvey/site_review.py, harvey/careers.py): a yes to the

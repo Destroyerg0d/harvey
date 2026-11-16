@@ -44,10 +44,14 @@ def test_overview_has_the_linked_number_funnel_queue_caps_and_conversations(wa):
     run(state.wa_add_message(c, direction="in", kind="reply", body="What would it involve?", status="sent",
                              sent_at="2026-11-04T05:00:00", intent="question"))
     run(state.wa_add_message(c, kind="reply", body="A short chat would tell."))
-    run(state.set_setting("whatsapp:linked_at", "2026-11-01T00:00:00"))
+    # Linked a few days ago, so it is still a new number (first_today 5): a
+    # fixed date here started failing once the real clock passed new_number_days.
+    from datetime import datetime, timedelta, timezone
+    linked = (datetime.now(timezone.utc) - timedelta(days=3)).replace(tzinfo=None, microsecond=0).isoformat()
+    run(state.set_setting("whatsapp:linked_at", linked))
     data = wa.get("/api/whatsapp").json()
     assert data["enabled"] is True and data["autopilot"] is False and data["number"] == "+15555550100"
-    assert data["linked"] is True and data["linked_at"] == "2026-11-01T00:00:00"
+    assert data["linked"] is True and data["linked_at"] == linked
     assert data["funnel"]["replied"] == 1 and data["funnel"]["messaged"] == 1 and data["funnel"]["reply_rate"] == 1.0
     assert data["drafts_waiting"] == 1
     assert data["queue"][0]["body"] == "A short chat would tell." and data["queue"][0]["contact"]["phone"] == JANE

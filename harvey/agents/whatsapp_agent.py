@@ -268,6 +268,8 @@ class WhatsAppAgent:
     async def _may_send(self, contact: dict, kind: str) -> bool:
         if kind == ALERT_KIND:
             return True             # to you, at once, whatever the hour
+        if kind == "reply" and getattr(self.cfg, "replies_any_time", False):
+            return True             # they just wrote: answer now, not in their morning
         if kind == "first" and self._fresh(contact) and not contact.get("last_outbound_at"):
             return True
         return await self._recipient_open(contact)
@@ -309,7 +311,8 @@ class WhatsAppAgent:
                 return (f"the last WhatsApp run started at {started:%H:%M} UTC; the next one "
                         f"waits {self.cfg.run_every_minutes} minutes")
         if ((send_only or not self.pacing.in_hours()) and not await self.sendable_now()
-                and not (not send_only and await self.fresh_waiting())):
+                and not (not send_only and await self.fresh_waiting())
+                and not getattr(self.cfg, "replies_any_time", False)):
             return f"nothing can go now, and it's outside WhatsApp hours ({self.pacing.hours_text()})"
         return ""
 
@@ -367,7 +370,14 @@ class WhatsAppAgent:
     async def _steps(self, send_only: bool = False):
         await self.pacing.prune()
         await self._wait_ready()
-        steps = () if send_only else (self.sync_inbox, self.handle_inbound, self.draft_messages)
+        # channels.whatsapp.replies_any_time: outside hours and in quiet hours a
+        # run still reads the chats and answers (no first messages or follow-ups).
+        replies_mode = getattr(self.cfg, "replies_any_time", False) and (
+            send_only or not self.pacing.in_hours())
+        if replies_mode:
+            steps = (self.sync_inbox, self.handle_inbound)
+        else:
+            steps = () if send_only else (self.sync_inbox, self.handle_inbound, self.draft_messages)
         for step in (*steps, self.send_approved):
             await self._still_on()
             await step()
@@ -455,7 +465,13 @@ class WhatsAppAgent:
         await self._guard(html)
         seen = {r.title for r in rows}
         rows += [r for r in parse_chat_list(html) if r.title not in seen]
-        # Your own phone (meeting alerts) is never read as a lead's chat.
+        # Your own phone (meeting alerts) is never read as a lead's chat; what
+        # you write there is read as an instruction to Harvey (owner_inbox).
+        owners = await self.state.wa_contacts(stages=(OWNER_STAGE,))
+        owner = owners[0] if owners else None
+        if owner and owner.get("phone") and any(
+                r.unread and r.digits == digits_of(owner["phone"]) for r in rows):
+            await self.read_owner_chat(owner)
         contacts = [c for c in await self.state.wa_contacts()
                     if c.get("phone") and c["stage"] not in ("no_whatsapp", OWNER_STAGE)]
         by_digits = {digits_of(c["phone"]): c for c in contacts}
@@ -626,6 +642,29 @@ class WhatsAppAgent:
             "prospect_id": prospect.id, "rule": "whatsapp", "matched": intent,
             "why": "They said no on WhatsApp.", "message": (text or "")[:1000],
             "whatsapp_contact_id": contact["id"]})
+
+    async def read_owner_chat(self, owner: dict) -> int:
+        """Your chat with the linked number: what you wrote since the last
+        read becomes instructions (harvey/owner_inbox.py), acted on now so the
+        replies go in this same run. Only a chat that is surely yours is read:
+        its title is your number, or it holds Harvey's own alerts to you."""
+        from harvey import owner_inbox
+        if self.dry_run:
+            return 0
+        await self.pacing.between_pages()
+        status, html = await self._open_chat(owner)
+        if status != "open":
+            return 0
+        messages = parse_messages(html)
+        ours = [m for m in messages if m.direction == "out" and clean_text(m.body).startswith("Harvey")]
+        if not chat_is_for(html, owner["phone"], "") and not ours:
+            logger.info("WhatsApp: couldn't confirm the open chat is yours; your messages weren't read.")
+            return 0
+        new = await owner_inbox.record(self.state, messages)
+        if new:
+            logger.info(f"WhatsApp: {new} new message(s) from you; acting on them.")
+            await owner_inbox.handle(self.state, self.brain, self.config)
+        return new
 
     async def meeting_slot(self, contact: dict):
         """The owner's next meeting window, in their time when exactly one zone

@@ -1379,6 +1379,10 @@ def main():
     from harvey.site_review import add_cli_parser as add_reviews_parser
     add_reviews_parser(subparsers)
 
+    # harvey owner notes|ask|inbox (harvey/owner_inbox.py)
+    from harvey.owner_inbox import add_cli_parser as add_owner_parser
+    add_owner_parser(subparsers)
+
     # harvey usage
     sub = subparsers.add_parser("usage", help="Show brain usage and quota (Claude or Codex)")
     sub.add_argument("--days", type=int, default=30, help="Breakdown window (default: 30)")

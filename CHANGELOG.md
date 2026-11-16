@@ -9,6 +9,25 @@ minor versions can still change behaviour.
 
 ### Added
 
+- **Your phone gets Harvey's news, and Harvey takes instructions from it.** Each heartbeat cycle
+  sends one short WhatsApp message to `channels.whatsapp.alert_number` about what happened since
+  the last one: emails sent, replies answered, what needs you, opt-outs, bounces, new senders,
+  website leads, LinkedIn and WhatsApp runs, site reviews (gathered through quiet hours and sent
+  after). What you write back in that chat is read on the next WhatsApp run (harvey/owner_inbox.py):
+  questions are answered from a status snapshot; safe actions run at once (pause or resume email,
+  LinkedIn or WhatsApp; guide one conversation, held for you; add to do-not-contact, kept in
+  `data/do_not_contact.extra.json`; change the meeting window, zone, link or chat link); anything
+  unclear gets a question back; anything needing code is kept for the next build. `harvey owner
+  notes|ask|inbox`. Messages already in the chat when this starts are never acted on.
+- **Replies at any hour on LinkedIn and WhatsApp** (`replies_any_time`). LinkedIn checks its inbox
+  every `reply_check_minutes` between full runs, in quiet hours too, and sends replies only;
+  WhatsApp reads chats and answers outside its hours, and a reply no longer waits for the
+  person's daytime. Invites, first messages and follow-ups keep their hours.
+- **LinkedIn messages are written from the person's profile.** Before drafting, the agent reads
+  their profile page once (kept 14 days): headline, About, roles; the brain must build on one
+  concrete detail instead of a question it could ask anyone. A shortened name ("Toby G.") now
+  matches the whole one in the message window (107 failed sends in four days), and two failed
+  sends to one person set them aside instead of redrafting every run.
 - **Someone who asks to meet is offered a fixed time** (`product.offer.meeting_window` and
   `meeting_timezone`, harvey/meeting_slot.py). On email, LinkedIn and WhatsApp the reply offers the
   owner's window on their next working day (Monday to Friday in their zone), written in the

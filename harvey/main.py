@@ -403,6 +403,9 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
 
     await state.init_db()
     logger.info("Database initialized.")
+    # Settings you changed from WhatsApp (harvey/owner_inbox.py) outlive a restart.
+    from harvey import owner_inbox
+    await owner_inbox.apply_overrides(state, config)
     # Which mailboxes this run sends from: the config is read once, at start.
     from harvey import mailboxes
     try:
@@ -481,6 +484,7 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
                 shutting_down = False
                 while in_quiet_hours(config):
                     await _start_whatsapp(whatsapp, send_only=True)
+                    await _start_linkedin(linkedin, replies_only=True)
                     if await _interruptible_sleep(QUIET_HOURS_POLL_SECONDS, stop_event):
                         shutting_down = True
                         break
@@ -494,6 +498,7 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
             sender.inbound_only = send_only and not in_their_zones
             if send_only:
                 await _start_whatsapp(whatsapp, send_only=True)
+                await _start_linkedin(linkedin, replies_only=True)
             # What an unread inbox holds back is decided afresh every cycle.
             sender.hold_prospects, sender.hold_mailboxes = set(), set()
             if send_only and not await sender.cold_due_in_window():
@@ -544,6 +549,7 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
             # background, far longer than a cycle; it never blocks this one).
             if over_limit and not send_only:
                 await _start_whatsapp(whatsapp, send_only=True)
+                await _start_linkedin(linkedin, replies_only=True)
             if not send_only and not over_limit:
                 try:
                     await linkedin.maybe_start()
@@ -663,6 +669,11 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
 
             consecutive_errors = 0
 
+            # 6b. A short update to your phone on what this cycle did
+            # (harvey/owner_updates.py); in quiet hours it waits for the morning.
+            from harvey import owner_updates
+            await owner_updates.send(state, config, quiet=in_quiet_hours(config))
+
             # 7. Sleep until next heartbeat
             logger.info(
                 f"Cycle complete. Sleeping for {config.usage.heartbeat_interval_minutes} minutes."
@@ -691,6 +702,15 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
     await learner.shutdown()
     await inbound.shutdown()
     logger.info("Harvey shutting down. Deals don't close themselves, but I need a break.")
+
+
+async def _start_linkedin(linkedin, replies_only: bool = False) -> None:
+    """A LinkedIn run if one is due; ``replies_only``: just the inbox check
+    channels.linkedin.replies_any_time allows at any hour."""
+    try:
+        await linkedin.maybe_start(replies_only=replies_only)
+    except Exception as e:
+        logger.warning(f"LinkedIn couldn't start: {e}")
 
 
 async def _start_whatsapp(whatsapp, send_only: bool = False) -> None:
