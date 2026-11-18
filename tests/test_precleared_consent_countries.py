@@ -121,3 +121,30 @@ def test_scout_drops_single_cities_of_a_held_country_from_a_group():
     assert "Dublin" not in cities and "Amsterdam" not in cities
     assert "Berlin" in cities and len(cities) == len(S.MAP_CITIES["european union"]) - 2
     assert set(S.MAP_CITY_CODES) == set(S.MAP_CITIES["european union"])   # every city tagged
+
+
+# ── offer_packs (owner, 2026-11-18: "you never buy") ──
+
+def test_with_offer_packs_off_the_out_of_checks_notice_names_nothing_to_buy():
+    from harvey.integrations.precleared import hold_message, offers_packs
+    hold = {"kind": "out_of_checks", "waiting": 12, "url": "https://precleared.dev/checkout?t=x"}
+    off = hold_message(hold, offer_packs=False)
+    assert off["url"] == "" and off["url_label"] == ""
+    assert "buy" not in off["detail"].lower() and "pack" not in off["detail"].lower()
+    assert off["detail"].startswith("12 cold emails are waiting.") and "midnight UK" in off["detail"]
+    assert hold_message(hold)["url_label"] == "Buy checks"          # the default is unchanged
+    assert offers_packs(None) is True
+    assert offers_packs(SimpleNamespace(compliance=SimpleNamespace(
+        precleared=PreclearedConfig(offer_packs=False)))) is False
+    assert PreclearedConfig().offer_packs is True
+
+
+@pytest.mark.asyncio
+async def test_with_offer_packs_off_the_hold_reason_names_no_pack(state):
+    import httpx
+    out = httpx.MockTransport(lambda request: httpx.Response(402, json={"error": "out of checks"}))
+    for offer, expected in ((True, "add a pack"), (False, "come back after midnight UK time")):
+        result = await PreclearedClient(sender_country="US", api_key="pc_live_example_key_123",
+                                        transport=out, offer_packs=offer).check(
+            "jane@shop.example", state)
+        assert result.held and result.hold_kind == "out_of_checks" and expected in result.reason

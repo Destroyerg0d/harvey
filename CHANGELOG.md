@@ -9,6 +9,9 @@ minor versions can still change behaviour.
 
 ### Added
 
+- **`compliance.precleared.offer_packs: false`**: when the free checks run out, the Today page,
+  `harvey status` and the log say only that the waiting emails go out after midnight UK time,
+  with no pack to buy and no link. On by default, as before.
 - **`compliance.precleared.consent_countries`: hold, unchecked, where a cold email needs consent.**
   Australian shops used up the 25 free checks by 08:00 UTC, every one came back `consent_needed`
   (Spam Act 2003), and first emails to everyone else waited all day. A recipient Harvey is sure is

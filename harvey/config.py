@@ -799,6 +799,9 @@ class PreclearedConfig(BaseModel):
     # from the company's location, or from the address's country domain
     # (".com.au"); a country domain only ever holds, it never skips a check.
     consent_countries: list[str] = []
+    # When the free checks run out: say where to buy a pack of checks (true), or
+    # only when the free ones come back (false; owner, 2026-11-18: "you never buy").
+    offer_packs: bool = True
 
     @field_validator("sender_country", mode="before")
     @classmethod

@@ -248,10 +248,10 @@ def cmd_status(args):
             print("  Sending:              NOT SENDING (couldn't read your inbox)")
             print(textwrap.fill(detail, width=72, initial_indent="                        ",
                                 subsequent_indent="                        "))
-        from harvey.integrations.precleared import current_hold, hold_message
+        from harvey.integrations.precleared import current_hold, hold_message, offers_packs
         precleared_hold = await current_hold(state, loaded)
         if precleared_hold:
-            message = hold_message(precleared_hold)
+            message = hold_message(precleared_hold, offer_packs=offers_packs(loaded))
             print(f"  Precleared:           HOLDING COLD EMAIL since {precleared_hold.get('since', '?')}")
             print(textwrap.fill(f"{message['title']}. {message['detail']}", width=72,
                                 initial_indent="                        ",

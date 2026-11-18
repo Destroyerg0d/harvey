@@ -165,6 +165,7 @@ class PreclearedClient:
         skip_countries: list[str] | tuple[str, ...] | str = (),
         transport: httpx.AsyncBaseTransport | None = None,
         consent_countries: list[str] | tuple[str, ...] | str = (),
+        offer_packs: bool = True,
     ):
         self.sender_country = sender_country
         self.api_key = api_key or ""
@@ -185,6 +186,8 @@ class PreclearedClient:
             consent_countries = consent_countries.split(",")
         codes = (_country(c) for c in consent_countries or ())
         self.consent_countries = frozenset("GB" if code == "UK" else code for code in codes if code)
+        # False: an out-of-checks hold never names a pack to buy.
+        self.offer_packs = offer_packs is not False
         self._transport = transport  # tests inject httpx.MockTransport
 
     @classmethod
@@ -204,6 +207,7 @@ class PreclearedClient:
             default_country=icp_country(config),
             skip_countries=getattr(settings, "skip_countries", None) or (),
             consent_countries=getattr(settings, "consent_countries", None) or (),
+            offer_packs=getattr(settings, "offer_packs", True),
         )
 
     def _redact(self, text: str) -> str:
@@ -458,8 +462,9 @@ class PreclearedClient:
                 hold_kind="out_of_checks", fix_url=buy_url,
                 reason=self._redact(
                     "Precleared: today's free checks on your key are used and it has "
-                    f"no credits left; add a pack ({buy_url}) "
-                    "or wait until tomorrow"
+                    + (f"no credits left; add a pack ({buy_url}) or wait until tomorrow"
+                       if self.offer_packs else
+                       "no credits left; they come back after midnight UK time")
                 ),
             )
         if resp.status_code == 401:
@@ -760,10 +765,18 @@ async def current_hold(state, config=None) -> dict:
     return {k: _clean(v) if isinstance(v, str) else v for k, v in status.items()}
 
 
-def hold_message(hold: dict) -> dict:
+def offers_packs(config) -> bool:
+    """compliance.precleared.offer_packs, or True when there's no config."""
+    settings = getattr(getattr(config, "compliance", None), "precleared", None)
+    return getattr(settings, "offer_packs", True) is not False
+
+
+def hold_message(hold: dict, offer_packs: bool = True) -> dict:
     """Title, detail, tone and link for a recorded hold, in plain words.
 
     Shared by the Today page and `harvey status`, so both say the same thing.
+    ``offer_packs`` False (compliance.precleared.offer_packs): an out-of-checks
+    hold names no pack to buy and links nowhere.
     """
     kind = hold.get("kind")
     url = _text(hold.get("url"))
@@ -783,6 +796,14 @@ def hold_message(hold: dict) -> dict:
                        f"A free key gives Harvey its own 25 a day: get one at {url or GET_KEY_URL} "
                        "and put it in .env as PRECLEARED_API_KEY. Otherwise the waiting "
                        f"emails go out after the checks reset at midnight UK time. {replies}"),
+        }
+    if kind == "out_of_checks" and not offer_packs:
+        return {
+            "tone": "warn", "url": "", "url_label": "",
+            "title": "Today's Precleared checks are used up",
+            "detail": (f"{emails}. The key's free checks for today are used. The waiting "
+                       "emails go out on their own after the checks reset at midnight UK "
+                       f"time. {replies}"),
         }
     if kind == "out_of_checks":
         return {

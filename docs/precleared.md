@@ -24,6 +24,7 @@ compliance:
     prospect_country: ""        # e.g. "US" if all prospects are in one country
     skip_countries: []          # optional, e.g. ["US"]: see "Skipping countries"
     consent_countries: []       # optional, e.g. ["AU"]: see "Countries that need consent"
+    offer_packs: true           # false: when checks run out, never name a pack to buy
 ```
 
 Quote `prospect_country` (YAML reads an unquoted `NO` as false).

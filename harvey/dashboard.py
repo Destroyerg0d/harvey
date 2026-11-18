@@ -2665,7 +2665,7 @@ async def get_today():
 
         # Cold email waiting on the optional Precleared check: its free
         # checks ran out, the key was rejected, or it couldn't be reached.
-        from harvey.integrations.precleared import current_hold, hold_message
+        from harvey.integrations.precleared import current_hold, hold_message, offers_packs
         try:
             from harvey.config import load_config
             loaded = load_config(str(_resolve_config_file()))
@@ -2673,7 +2673,7 @@ async def get_today():
             loaded = None  # can't judge: show the hold rather than hide it
         precleared_hold = await current_hold(state, loaded)
         if precleared_hold:
-            message = hold_message(precleared_hold)
+            message = hold_message(precleared_hold, offer_packs=offers_packs(loaded))
             items.append({
                 "key": "precleared-hold", "tone": message["tone"],
                 "title": message["title"], "detail": message["detail"],
