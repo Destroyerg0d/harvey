@@ -13,7 +13,7 @@ from harvey import channel_login, kept_browser, owner_updates
 from harvey.agents.whatsapp_agent import WhatsAppRunner
 from harvey.kept_browser import KeptBrowser, browser_key, holder, release_key, request_release
 from harvey.meeting_alert import queue_to_owner
-from harvey.whatsapp.pages import BULLET, composer_safe
+from harvey.whatsapp.pages import composer_safe
 from tests.test_outbox_native import state  # noqa: F401  (fixture)
 from tests.test_owner_whatsapp import cfg, to_owner
 from tests.whatsapp_fakes import JANE, Person, World, run
@@ -21,10 +21,11 @@ from tests.whatsapp_fakes import JANE, Person, World, run
 
 # ── What WhatsApp's message box keeps ──
 
-def test_list_and_quote_markers_at_a_line_start_become_plain_characters():
-    text = "Update\n- one\n* two\n  - nested\n1. first\n> quoted\n*bold* stays\n-5 stays\nmid - dash stays"
-    assert composer_safe(text) == (f"Update\n{BULLET}one\n{BULLET}two\n  {BULLET}nested\n1) first\n"
-                                   "quoted\n*bold* stays\n-5 stays\nmid - dash stays")
+def test_list_and_quote_markers_at_a_line_start_are_dropped():
+    text = ("Update\n- one\n* two\n  - nested\n" + chr(0x2022) + " typed bullet\n1. first\n> quoted\n"
+            "*bold* stays\n-5 stays\nmid - dash stays")
+    assert composer_safe(text) == ("Update\none\ntwo\n  nested\ntyped bullet\n1) first\nquoted\n"
+                                   "*bold* stays\n-5 stays\nmid - dash stays")
     assert composer_safe(composer_safe(text)) == composer_safe(text)
 
 
@@ -40,12 +41,13 @@ def test_a_message_with_dashes_is_typed_so_the_box_holds_it_and_goes(tmp_path):
     report = w.go()
     assert report["sent"] == 1 and report["failed"] == 0
     sent = w.get(m)
-    assert sent["status"] == "sent" and "- " not in sent["body"] and f"{BULLET}a faster home page" in sent["body"]
+    assert sent["status"] == "sent"
+    assert sent["body"] == "Hi Jane, two ideas:\na faster home page\none checkout step less"
 
 
-def test_an_update_never_starts_a_line_with_a_dash():
+def test_an_update_is_plain_lines_with_no_list_markers():
     message = owner_updates.compose(["Sent 2 follow-ups.", "ann@shop.example opted out."])
-    assert message == f"Harvey update\n{BULLET}Sent 2 follow-ups.\n{BULLET}ann@shop.example opted out."
+    assert message == "Harvey update\nSent 2 follow-ups.\nann@shop.example opted out."
     assert composer_safe(message) == message
 
 
@@ -67,13 +69,13 @@ async def test_updates_waiting_to_go_merge_into_one_and_a_sent_one_stays(state):
     assert sorted(m["body"].splitlines()[0] for m in waiting) == ["Harvey update",
                                                                  "Harvey: a meeting is close with Jo (Shop Example)"]
     [update] = [m for m in waiting if m["body"].startswith("Harvey update")]
-    assert f"{BULLET}Sent 1 first email, 1 follow-up." in update["body"]
+    assert "\nSent 1 first email, 1 follow-up." in update["body"]
     # Once it went, the next update is its own message and covers only what's new.
     await state.wa_update_message(update["id"], status="sent")
     await state.log_action("email_sent", "sender", {"kind": "reply"})
     assert await owner_updates.send(state, cfg())
     newest = (await to_owner(state))[-1]
-    assert f"{BULLET}Sent 1 reply." in newest and "follow-up" not in newest
+    assert "\nSent 1 reply." in newest and "follow-up" not in newest
     assert (await state.wa_get_message(update["id"]))["status"] == "sent"
 
 

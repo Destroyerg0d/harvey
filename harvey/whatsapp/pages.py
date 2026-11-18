@@ -22,21 +22,24 @@ from harvey.whatsapp.numbers import digits_of
 BASE = "https://web.whatsapp.com"
 HOME_URL = BASE + "/"
 
-# What WhatsApp's message box turns into formatting as it's typed, at a line's
-# start: "- " or "* " a bulleted list, "1. " a numbered one, "> " a quote. The box
-# then never holds the draft word for word, and the send is refused (live,
-# 2026-11-16: every "- " update to the owner's phone failed, and three in a row
-# paused WhatsApp). "*bold*" needs no space after the star, so it's left alone.
-_BULLET_START_RE = re.compile(r"^([ \t]*)[-*][ \t]+", re.MULTILINE)
+# What WhatsApp turns into formatting at a line's start: "- " or "* " (or a typed
+# bullet) a bulleted list, "1. " a numbered one, "> " a quote. As it's typed, the
+# message box then doesn't hold the draft word for word and the send is refused
+# (live, 2026-11-16: every "- " update to the owner's phone failed, and three in a
+# row paused WhatsApp). Once sent, the bubble shows the list apart from the text
+# above it, so the check that the message went out can't find it (live,
+# 2026-11-18, with "• " lines: sent, but not confirmed). So list and quote
+# markers are dropped, each item staying its own line, and a number becomes "1)".
+# "*bold*" has no space after the star, so it's left alone.
+_BULLET_START_RE = re.compile(r"^([ \t]*)[-*•▪●][ \t]+", re.MULTILINE)
 _NUMBER_START_RE = re.compile(r"^([ \t]*)(\d{1,3})\.[ \t]+", re.MULTILINE)
 _QUOTE_START_RE = re.compile(r"^([ \t]*)>[ \t]+", re.MULTILINE)
-BULLET = "• "
 
 
 def composer_safe(text: str) -> str:
-    """``text`` as WhatsApp's message box keeps it when typed: list and quote
-    markers at a line's start become plain characters (BULLET, "1) ")."""
-    text = _BULLET_START_RE.sub(lambda m: m.group(1) + BULLET, text or "")
+    """``text`` as WhatsApp keeps it, typed and sent: no list or quote markers at
+    a line's start (dropped; "1. " becomes "1) ")."""
+    text = _BULLET_START_RE.sub(lambda m: m.group(1), text or "")
     text = _NUMBER_START_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}) ", text)
     return _QUOTE_START_RE.sub(lambda m: m.group(1), text)
 

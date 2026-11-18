@@ -708,9 +708,10 @@ minor versions can still change behaviour.
 - **WhatsApp paused itself over the owner's own updates.** WhatsApp Web's message box turns a
   typed "- " at the start of a line into a bulleted list, so it never held an update ("Harvey
   update / - Sent 1 follow-up.") word for word, the send was refused, and three refusals in a row
-  paused the channel. Updates now use a bullet character, and every message is typed with list and
-  quote markers at a line's start made plain ("- " and "* " become "• ", "1. " becomes "1) ",
-  "> " is dropped), with the stored message showing what was typed
+  paused the channel. A bullet character instead didn't do either: WhatsApp shows those lines as a
+  list too, apart from the text above them, so the check that the message went out couldn't find
+  it. Updates are now plain lines, and every message is typed with list and quote markers at a
+  line's start dropped ("1. " becomes "1) "), the stored message showing what was typed
   (harvey/whatsapp/pages.py `composer_safe`).
 - **An expired Claude token no longer puts Harvey to sleep all evening.** The usage gauge's token
   expired, the gauge answered 401, Harvey judged by its own call count, was over it, and slept the

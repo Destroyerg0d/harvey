@@ -106,13 +106,14 @@ def lines_for(rows: list[tuple[str, dict]]) -> list[str]:
 
 
 def compose(lines: list[str]) -> str:
-    """The message. Lines start with a bullet character, never "- ": WhatsApp's
-    message box turns a typed "- " into a list, and the send is then refused."""
-    from harvey.whatsapp.pages import BULLET
+    """The message: a plain line per item, no list markers. WhatsApp makes a
+    list of "- " or a bullet at a line's start, and then neither the box nor
+    the sent bubble holds the text word for word (harvey/whatsapp/pages.py
+    ``composer_safe``)."""
     shown = lines[:MAX_LINES]
     if len(lines) > MAX_LINES:
         shown.append(f"+{len(lines) - MAX_LINES} more on the dashboard.")
-    return (HEADER + "\n" + "\n".join(BULLET + l for l in shown))[:MAX_CHARS]
+    return (HEADER + "\n" + "\n".join(shown))[:MAX_CHARS]
 
 
 async def _withdraw_unsent(state) -> int:
