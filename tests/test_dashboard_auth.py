@@ -784,7 +784,7 @@ NODE_HARNESS = r"""
 const store = {};
 const calls = [];
 let replaced = null;
-globalThis.window = {location: {origin: 'http://127.0.0.1:5555', pathname: '/',
+globalThis.window = {location: {origin: process.argv[3] || 'http://127.0.0.1:5555', pathname: '/',
                                 search: '', hash: process.argv[2] || ''}};
 globalThis.location = window.location;
 globalThis.history = {replaceState: (s, t, url) => { replaced = url; window.location.hash = ''; }};
@@ -812,11 +812,11 @@ eval(require('fs').readFileSync(process.argv[1], 'utf8') +
 """
 
 
-def _node(hash_value):
+def _node(hash_value, origin="http://127.0.0.1:5555"):
     node = shutil.which("node")
     if not node:
         pytest.skip("node is not installed")
-    out = subprocess.run([node, "-e", NODE_HARNESS, str(WEB / "auth.js"), hash_value],
+    out = subprocess.run([node, "-e", NODE_HARNESS, str(WEB / "auth.js"), hash_value, origin],
                          capture_output=True, text=True, check=True, timeout=30)
     return json.loads(out.stdout)
 
@@ -830,7 +830,28 @@ def test_fragment_token_moves_to_session_storage_and_leaves_the_url():
     assert out["call"]["url"] == "http://127.0.0.1:5555/api/companies"
     assert out["call"]["ctype"] == "application/json"
     assert out["call"]["mode"] == "same-origin" and out["call"]["credentials"] == "omit"
-    assert out["call"]["redirect"] == "error" and out["call"]["referrerPolicy"] == "same-origin"
+    assert out["call"]["redirect"] == "manual" and out["call"]["referrerPolicy"] == "same-origin"
+
+
+@pytest.mark.parametrize("origin, credentials", [
+    ("http://127.0.0.1:5555", "omit"), ("http://localhost:5555", "omit"), ("http://[::1]:5555", "omit"),
+    # Behind Cloudflare Access: its sign-in cookie must go with each call, or
+    # Access turns the call back and the page shows "offline" (live, 2026-11-18).
+    ("https://harvey.example.com", "same-origin"),
+])
+def test_cookies_go_along_only_on_the_public_address(origin, credentials):
+    token = "T" * 43
+    out = _node(f"#token={token}", origin)
+    assert out["call"]["credentials"] == credentials
+    assert out["call"]["url"] == f"{origin}/api/companies"
+    assert out["call"]["auth"] == f"Bearer {token}" and out["call"]["redirect"] == "manual"
+
+
+def test_a_turned_back_call_asks_to_sign_in_again_not_offline():
+    app = (WEB / "app.js").read_text(encoding="utf-8")
+    body = app[app.index("async function lockIfRefused"):]
+    body = body[:body.index("\n}\n")]
+    assert "opaqueredirect" in body and "Reload this page to sign in again" in body
 
 
 def test_bad_fragment_is_stripped_but_not_stored():

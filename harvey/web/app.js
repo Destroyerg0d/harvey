@@ -318,6 +318,13 @@ async function api(path, opts) {
 let _locked = false;
 
 async function lockIfRefused(r) {
+  // Turned back before reaching Harvey: on the public address, Cloudflare
+  // Access's sign-in has ended (it lasts a day) and it redirects to its login.
+  if (r && r.type === 'opaqueredirect') {
+    showLock('Your sign-in has ended. Reload this page to sign in again with the code ' +
+             'Cloudflare emails you; this tab keeps its key.');
+    return true;
+  }
   if (r.status !== 401 && r.status !== 503) {
     if (r.ok && _locked) hideLock();
     return false;

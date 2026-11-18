@@ -42,8 +42,22 @@ function sameOriginUrl(path) {
   return url.origin === window.location.origin ? url : null;
 }
 
+// This page is served from this computer's own address, not the public one.
+function onLoopback() {
+  let host = '';
+  try { host = new URL(window.location.origin).hostname.toLowerCase(); } catch { return true; }
+  return host === 'localhost' || host === '[::1]' || host === '::1' || host.startsWith('127.');
+}
+
 // fetch() for this dashboard's own API, with the token attached. Refuses
-// anything that isn't same-origin, and never follows redirects.
+// anything that isn't same-origin, and never follows redirects: one comes back
+// as an 'opaqueredirect' response (see lockIfRefused in app.js).
+//
+// Cookies: none on this computer's own address. On the public address
+// (dashboard.public_url) the page sits behind Cloudflare Access, which turns
+// away every request that lacks its sign-in cookie, so there this origin's own
+// cookies go along. The server never reads a cookie either way; the token is
+// what it checks.
 function authFetch(path, opts) {
   const url = sameOriginUrl(path);
   if (!url) return Promise.reject(new Error('refusing to send the dashboard token off-origin'));
@@ -53,9 +67,9 @@ function authFetch(path, opts) {
   if (token) headers.set('Authorization', 'Bearer ' + token);
   o.headers = headers;
   o.mode = 'same-origin';
-  o.credentials = 'omit';
+  o.credentials = onLoopback() ? 'omit' : 'same-origin';
   o.cache = 'no-store';
-  o.redirect = 'error';
+  o.redirect = 'manual';
   // Not 'no-referrer': per the Fetch spec that makes a POST's Origin "null"
   // (Safari follows it), and the guard then refuses every action.
   o.referrerPolicy = 'same-origin';

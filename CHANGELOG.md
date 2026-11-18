@@ -15,6 +15,10 @@ minor versions can still change behaviour.
   exactly that HTTPS name and its origin as well as loopback. The server still listens on 127.0.0.1
   only, every request still needs the token, and `harvey dashboard --url --public` prints the link
   to hand over. Anything but `https://` and a bare name is refused, and the dashboard stays local.
+  On the public address the page's API calls carry the page's own cookies (Access's sign-in
+  cookie; without it every call was turned back and the page read "offline"), and a sign-in that
+  has ended shows "reload to sign in again" instead of "offline". On loopback no cookie is sent,
+  as before.
 - **Two free discovery sources, no signup.** Scout reads Overture Maps' open business data
   (harvey/collectors/discover.py `OvertureMaps`, DuckDB over the public Parquet release): one city
   a cycle in the map's weighted order, independent shops with a website of their own (Overture's
