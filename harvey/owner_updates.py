@@ -16,21 +16,21 @@ from __future__ import annotations
 import json
 import logging
 from collections import Counter
-from datetime import datetime, timezone
 
 import aiosqlite
 
 logger = logging.getLogger("harvey.owner_updates")
 
 LAST_KEY = "owner:updates_through"
+# Where the update now waiting in the queue starts: a newer one taking it back
+# starts there instead.
+WAITING_SINCE_KEY = "owner:update_waiting_since"
+HEADER = "Harvey update"
+MERGED_NOTE = "merged into a newer update"
 MAX_LINES = 12
 MAX_CHARS = 1200
 # What a line may name: an address, never more than this.
 _WHO = 60
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def _who(d: dict) -> str:
@@ -106,17 +106,55 @@ def lines_for(rows: list[tuple[str, dict]]) -> list[str]:
 
 
 def compose(lines: list[str]) -> str:
+    """The message. Lines start with a bullet character, never "- ": WhatsApp's
+    message box turns a typed "- " into a list, and the send is then refused."""
+    from harvey.whatsapp.pages import BULLET
     shown = lines[:MAX_LINES]
     if len(lines) > MAX_LINES:
         shown.append(f"+{len(lines) - MAX_LINES} more on the dashboard.")
-    return ("Harvey update\n" + "\n".join(f"- {l}" for l in shown))[:MAX_CHARS]
+    return (HEADER + "\n" + "\n".join(BULLET + l for l in shown))[:MAX_CHARS]
 
 
-async def _rows_since(state, since: str) -> list[tuple[str, str, dict]]:
+async def _withdraw_unsent(state) -> int:
+    """Take back updates still waiting in the WhatsApp queue. Only ones not yet
+    claimed for sending (status approved), so nothing half-sent is touched;
+    meeting alerts and questions to you are never taken back."""
+    async with aiosqlite.connect(state.db_path, timeout=30) as db:
+        cur = await db.execute(
+            "UPDATE whatsapp_messages SET status = 'skipped', error = ? WHERE direction = 'out' "
+            "AND kind = 'alert' AND status = 'approved' AND body LIKE ?",
+            (MERGED_NOTE, HEADER + "\n%"))
+        await db.commit()
+        return cur.rowcount or 0
+
+
+async def _mark(state, value: str) -> int | None:
+    """A bookmark as the actions table's rowid. Actions are stamped to the
+    second, so a time would skip what was logged in the same second just after
+    an update; the rowid only grows. A time (what earlier versions kept, or a
+    test's starting point) means the last action logged by then."""
+    value = (value or "").strip()
+    if not value:
+        return None
+    if value.isdigit():
+        return int(value)
+    async with aiosqlite.connect(state.db_path, timeout=30) as db:
+        async with db.execute("SELECT COALESCE(MAX(rowid), 0) FROM actions WHERE created_at <= ?",
+                              (value,)) as cursor:
+            return int((await cursor.fetchone())[0])
+
+
+async def _latest(state) -> int:
+    async with aiosqlite.connect(state.db_path, timeout=30) as db:
+        async with db.execute("SELECT COALESCE(MAX(rowid), 0) FROM actions") as cursor:
+            return int((await cursor.fetchone())[0])
+
+
+async def _rows_since(state, since: int) -> list[tuple[int, str, dict]]:
     async with aiosqlite.connect(state.db_path, timeout=30) as db:
         async with db.execute(
-                "SELECT created_at, action_type, details_json FROM actions WHERE created_at > ? "
-                "ORDER BY created_at", (since,)) as cursor:
+                "SELECT rowid, action_type, details_json FROM actions WHERE rowid > ? "
+                "ORDER BY rowid", (since,)) as cursor:
             raw = await cursor.fetchall()
     rows = []
     for at, kind, details in raw:
@@ -135,21 +173,31 @@ async def send(state, config, quiet: bool = False) -> bool:
     try:
         if not alert_number(config) or quiet:
             return False
-        since = await state.get_setting(LAST_KEY)
-        if not since:
+        since = await _mark(state, await state.get_setting(LAST_KEY))
+        if since is None:
             # The first time: from now on, not the whole history.
-            await state.set_setting(LAST_KEY, _now().strftime("%Y-%m-%d %H:%M:%S"))
+            await state.set_setting(LAST_KEY, str(await _latest(state)))
             return False
         rows = await _rows_since(state, since)
         if not rows:
             return False
         lines = lines_for([(kind, d) for _, kind, d in rows])
-        through = rows[-1][0]
+        through = str(rows[-1][0])
         if not lines:
             await state.set_setting(LAST_KEY, through)
             return False
+        # Something new, and an update still waiting to go (WhatsApp paused, or
+        # behind): that one is taken back and this one covers its time too, so
+        # you get one message, not a pile.
+        if await _withdraw_unsent(state):
+            waiting = await _mark(state, await state.get_setting(WAITING_SINCE_KEY))
+            if waiting is not None and waiting < since:
+                since = waiting
+                lines = lines_for([(kind, d) for _, kind, d in await _rows_since(state, since)])
         if not await queue_to_owner(state, config, compose(lines)):
+            await state.set_setting(LAST_KEY, str(since))   # whatever was taken back goes next time
             return False
+        await state.set_setting(WAITING_SINCE_KEY, str(since))
         await state.set_setting(LAST_KEY, through)
         return True
     except Exception as e:

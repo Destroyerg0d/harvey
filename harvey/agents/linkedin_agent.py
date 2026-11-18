@@ -33,6 +33,7 @@ from types import SimpleNamespace
 
 from harvey import channel_login
 from harvey.careers import CAREERS_APPROVED, JOB_SEEKER, NOT_A_CLIENT, careers_reply
+from harvey.kept_browser import KeptBrowser
 from harvey.meeting_alert import POSITIVE_INTENTS
 from harvey.meeting_slot import (
     asks_to_meet, chat_instead_block, declines_call, offer as meeting_offer, prompt_block,
@@ -1296,10 +1297,24 @@ class LinkedInRunner:
     """The heartbeat's hook: starts a LinkedIn run in the background when
     one is due (it takes far longer than a cycle), never two at once."""
 
-    def __init__(self, brain, state, config, agent_factory=None):
+    def __init__(self, brain, state, config, agent_factory=None, kept=None):
         self.brain, self.state, self.config = brain, state, config
-        self.agent_factory = agent_factory or (lambda: LinkedInAgent(brain, state, config))
+        # One Chrome window, kept open between runs (owner, 2026-11-18). The
+        # page is left where the run ended: LinkedIn's inbox is read by matching
+        # text, not unread marks, so an open conversation hides nothing.
+        self.kept = kept or KeptBrowser(state, "linkedin", self._open_window,
+                                        wanted=self._window_wanted)
+        self.agent_factory = agent_factory or (
+            lambda: LinkedInAgent(brain, state, config, driver_factory=self.kept.lease))
         self.task: asyncio.Task | None = None
+
+    def _open_window(self):
+        from harvey.linkedin.session import open_session
+        return open_session(self.config.channels.linkedin)
+
+    async def _window_wanted(self) -> bool:
+        return (await channel_on(self.state, self.config)
+                and not await channel_login.in_progress(self.state, "linkedin"))
 
     @property
     def running(self) -> bool:
@@ -1310,6 +1325,8 @@ class LinkedInRunner:
         a replies-only inbox check if one is. ``replies_only``: only that check
         (quiet hours, a tight Claude budget). Returns why not, or "started"."""
         if not await channel_on(self.state, self.config):
+            if not self.running:
+                await self.kept.close_if_idle()
             return "off"
         if self.running:
             return "a run is going"
@@ -1334,3 +1351,4 @@ class LinkedInRunner:
             except (asyncio.CancelledError, Exception):
                 pass
             await self.state.set_setting(RUNNING_KEY, "")
+        await self.kept.close()

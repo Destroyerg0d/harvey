@@ -186,7 +186,11 @@ async def _run(args, config, state):
     from harvey.agents.whatsapp_agent import WhatsAppAgent
     from harvey.brain import Brain
     await state.init_db()
-    agent = WhatsAppAgent(Brain(state, config.brain), state, config)
+    from harvey.kept_browser import own_window
+    from harvey.whatsapp.session import open_session
+    cfg = config.channels.whatsapp
+    agent = WhatsAppAgent(Brain(state, config.brain), state, config,
+                          driver_factory=lambda: own_window(state, "whatsapp", lambda: open_session(cfg)))
     report = await agent.run(dry_run=args.dry_run, ignore_interval=args.once)
     if not report.get("ran"):
         print(f"\n  Not run: {report.get('reason')}\n")

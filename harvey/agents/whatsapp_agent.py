@@ -34,6 +34,7 @@ from harvey.careers import CAREERS_APPROVED, NOT_A_CLIENT, STOPPED_JOB
 from harvey.meeting_alert import POSITIVE_INTENTS
 from harvey.meeting_slot import asks_to_meet, prompt_block
 from harvey.whatsapp.schema import OWNER_STAGE
+from harvey.kept_browser import KeptBrowser
 
 ALERT_KIND = "alert"     # a meeting alert to your own phone (harvey/meeting_alert.py)
 ALERT_PROOF_CHARS = 120  # the opening of an alert that must show in the chat
@@ -51,7 +52,8 @@ from harvey.whatsapp.guards import Breaker, BreakerTripped, active_pause, detect
 from harvey.whatsapp.numbers import digits_of
 from harvey.whatsapp.pacing import WhatsAppPacing, recipient_zones
 from harvey.whatsapp.pages import (
-    CHAT_LIST, COMPOSER, HOME_URL, POPOVER_CLOSE, app_ready, chat_is_for, chat_open, invalid_number,
+    CHAT_LIST, COMPOSER, HOME_URL, POPOVER_CLOSE, app_ready, chat_is_for, chat_open, composer_safe,
+    invalid_number,
     parse_chat_list, parse_messages, send_url, tip_showing,
 )
 from harvey.whatsapp.store import HELD_FOR_REVIEW, HOLDING_STATUSES
@@ -407,10 +409,21 @@ class WhatsAppAgent:
             await guards.trip(self.state, breaker, self.cfg, now=self.now())
             raise BreakerTripped(breaker)
 
+    async def _already_ready(self) -> bool:
+        try:
+            if not (self.driver.url or "").startswith(HOME_URL):
+                return False
+            return app_ready(await self.driver.html())
+        except Exception:
+            return False
+
     async def _wait_ready(self) -> str:
         """WhatsApp Web's chat list, however long it takes to load (it syncs
-        with the phone), or an exception: nothing runs on a page Harvey can't read."""
-        await self.driver.goto(HOME_URL)
+        with the phone), or an exception: nothing runs on a page Harvey can't read.
+        A window kept open since the last run (harvey/kept_browser.py) already
+        shows it, so the page isn't loaded again."""
+        if not await self._already_ready():
+            await self.driver.goto(HOME_URL)
         for _ in range(READY_POLLS):
             html = await self.driver.html()
             await self._guard(html)
@@ -985,6 +998,12 @@ class WhatsAppAgent:
     async def send_message(self, contact: dict, item: dict) -> tuple[str, str]:
         """The recipe: ("sent" | "failed" | "maybe_sent" | "no_whatsapp" | "held", detail)."""
         phone, name, body = contact["phone"], contact.get("name") or "", item["body"]
+        typed = composer_safe(body)
+        if typed != body:
+            # WhatsApp turns "- " at a line's start into a list as it's typed, so
+            # the box would never match the draft; the record keeps what goes.
+            await self.state.wa_update_message(item["id"], body=typed)
+            body = item["body"] = typed
         status, html = await self._open_chat(contact)
         if status == "invalid":
             await self.state.wa_set_stage(contact["id"], "no_whatsapp", next_action_at=None)
@@ -1057,10 +1076,22 @@ class WhatsAppRunner:
     due (it takes far longer than a cycle), never two at once, never blocking
     the email sends of the cycle."""
 
-    def __init__(self, brain, state, config, agent_factory=None):
+    def __init__(self, brain, state, config, agent_factory=None, kept=None):
         self.brain, self.state, self.config = brain, state, config
-        self.agent_factory = agent_factory or (lambda: WhatsAppAgent(brain, state, config))
+        # One Chrome window, kept open between runs (owner, 2026-11-18).
+        self.kept = kept or KeptBrowser(state, "whatsapp", self._open_window, park_url=HOME_URL,
+                                        wanted=self._window_wanted)
+        self.agent_factory = agent_factory or (
+            lambda: WhatsAppAgent(brain, state, config, driver_factory=self.kept.lease))
         self.task: asyncio.Task | None = None
+
+    def _open_window(self):
+        from harvey.whatsapp.session import open_session
+        return open_session(self.config.channels.whatsapp)
+
+    async def _window_wanted(self) -> bool:
+        return (await channel_on(self.state, self.config)
+                and not await channel_login.in_progress(self.state, "whatsapp"))
 
     @property
     def running(self) -> bool:
@@ -1069,6 +1100,8 @@ class WhatsAppRunner:
     async def maybe_start(self, send_only: bool = False) -> str:
         """Start a run if one is due. Returns why not, or "started"."""
         if not await channel_on(self.state, self.config):
+            if not self.running:
+                await self.kept.close_if_idle()
             return "off"
         if self.running:
             return "a run is going"
@@ -1088,3 +1121,4 @@ class WhatsAppRunner:
             except (asyncio.CancelledError, Exception):
                 pass
             await self.state.set_setting(RUNNING_KEY, "")
+        await self.kept.close()

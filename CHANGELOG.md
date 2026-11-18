@@ -591,6 +591,18 @@ minor versions can still change behaviour.
 
 ### Changed
 
+- **The WhatsApp and LinkedIn windows stay open between runs** (harvey/kept_browser.py). Each run
+  used to open the channel's Chrome profile and close it at the end, so the windows came and went
+  all day and WhatsApp Web synced with the phone from scratch each time. The heartbeat now opens a
+  channel's window at its first run and keeps it; a run that ends leaves WhatsApp on its chat list,
+  so no chat stays open where a new message would be read unseen. The window closes when the
+  channel is switched off, when a sign-in needs the profile (Connect, `harvey <channel> login`, and
+  `harvey <channel> run --once` ask the heartbeat to let go and wait), when it was closed by hand
+  (the next run opens a new one), or when Harvey stops.
+- **Updates to your phone that couldn't go merge into one.** While WhatsApp was paused or behind,
+  every cycle queued another; now a new update takes back the one still waiting and covers its time
+  too. Updates also track what they covered by the actions table's row, not its timestamp, which
+  is to the second and skipped what was logged in the same second just after an update.
 - **Pausing LinkedIn now holds a run already going.** Its send loop only read the pause at the
   start of a run, so the dashboard's "Nothing is read or sent until you resume" wasn't true of
   one in progress. WhatsApp's already did this.
@@ -687,6 +699,13 @@ minor versions can still change behaviour.
 
 ### Fixed
 
+- **WhatsApp paused itself over the owner's own updates.** WhatsApp Web's message box turns a
+  typed "- " at the start of a line into a bulleted list, so it never held an update ("Harvey
+  update / - Sent 1 follow-up.") word for word, the send was refused, and three refusals in a row
+  paused the channel. Updates now use a bullet character, and every message is typed with list and
+  quote markers at a line's start made plain ("- " and "* " become "• ", "1. " becomes "1) ",
+  "> " is dropped), with the stored message showing what was typed
+  (harvey/whatsapp/pages.py `composer_safe`).
 - **An expired Claude token no longer puts Harvey to sleep all evening.** The usage gauge's token
   expired, the gauge answered 401, Harvey judged by its own call count, was over it, and slept the
   whole cycle (no sends, no replies read), so nothing called the CLI that would renew the token. A

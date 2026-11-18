@@ -190,8 +190,16 @@ async def run_attended(state, channel: str, login, *, minutes: float, on_connect
         started = _now()
         await _write(state, channel, status=WAITING, pid=os.getpid(), started=_iso(started),
                      deadline=_iso(started + timedelta(minutes=minutes)), finished=None, detail="")
-        watchdog = started + timedelta(minutes=minutes, seconds=WATCHDOG_EXTRA_SECONDS)
-        outcome = await _watch(state, channel, login, watchdog)
+        # The heartbeat keeps the channel's window open between runs
+        # (harvey/kept_browser.py), and Chrome opens a profile once: it lets go
+        # first. Writing WAITING above already stops it starting a new run.
+        from harvey.kept_browser import request_release
+        if not await request_release(state, channel):
+            outcome = Outcome(FAILED, f"Harvey's {LABELS[channel]} window is busy with a run. "
+                                      "Try again in a few minutes.")
+        else:
+            watchdog = started + timedelta(minutes=minutes, seconds=WATCHDOG_EXTRA_SECONDS)
+            outcome = await _watch(state, channel, login, watchdog)
         if outcome.connected and on_connected is not None:
             try:
                 await on_connected()
