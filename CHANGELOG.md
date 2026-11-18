@@ -9,6 +9,12 @@ minor versions can still change behaviour.
 
 ### Added
 
+- **The dashboard at a public address, for a teammate elsewhere** (`dashboard.public_url`). Put
+  a tunnel on this computer in front of the dashboard (Cloudflare Tunnel, with Cloudflare Access's
+  email sign-in) and set `dashboard.public_url: https://harvey.example.com`: the guard then accepts
+  exactly that HTTPS name and its origin as well as loopback. The server still listens on 127.0.0.1
+  only, every request still needs the token, and `harvey dashboard --url --public` prints the link
+  to hand over. Anything but `https://` and a bare name is refused, and the dashboard stays local.
 - **Two free discovery sources, no signup.** Scout reads Overture Maps' open business data
   (harvey/collectors/discover.py `OvertureMaps`, DuckDB over the public Parquet release): one city
   a cycle in the map's weighted order, independent shops with a website of their own (Overture's

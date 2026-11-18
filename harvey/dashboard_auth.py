@@ -6,11 +6,13 @@ still *send*), and any DNS name pointed at 127.0.0.1 can reach the port. So
 every request passes, in order:
 
 1. Host: one Host header naming a loopback address (``localhost``,
-   127.0.0.0/8, ``[::1]``) with an optional port. Anything else, including a
-   rebinding name that resolves to 127.0.0.1, is refused before the token is
-   looked at.
+   127.0.0.0/8, ``[::1]``) with an optional port, or exactly the configured
+   public address (``dashboard.public_url``, see ``PublicAddress``) with no
+   port. Anything else, including a rebinding name that resolves to
+   127.0.0.1, is refused before the token is looked at.
 2. Browser provenance: a request carrying ``Origin`` must come from exactly
-   this origin, and ``Sec-Fetch-Site`` must be ``same-origin`` or ``none``.
+   this origin (``http://`` + the loopback Host, or the public address's
+   ``https://`` origin), and ``Sec-Fetch-Site`` must be ``same-origin`` or ``none``.
    (A top-level navigation to ``/`` is the one exception: the shell carries
    no data.) No CORS headers are ever sent, so preflights fail.
 3. Public shell: only ``GET``/``HEAD`` of ``/`` and ``/static/*`` (HTML, CSS,
@@ -274,6 +276,60 @@ def is_loopback(host: str) -> bool:
         return False
 
 
+class PublicAddress:
+    """The one HTTPS address, besides loopback, the dashboard answers to: what
+    a tunnel on this computer forwards (owner, 2026-11-18: an employee uses the
+    dashboard from elsewhere). The tunnel connects to 127.0.0.1, so the server
+    still listens on loopback alone; the name only widens which Host header and
+    Origin are accepted. The token is still required on every request, and the
+    tunnel's own sign-in (Cloudflare Access) sits in front of that."""
+
+    def __init__(self):
+        self.host = ""
+
+    @property
+    def origin(self) -> str:
+        return f"https://{self.host}" if self.host else ""
+
+    def configure(self, url: str) -> str:
+        """Use ``url`` ("https://name", nothing after the name), or none when
+        it's empty. Raises ValueError, and keeps none, when it isn't one."""
+        self.host = ""
+        url = (url or "").strip()
+        if not url:
+            return ""
+        host = public_host_of(url)
+        if not host:
+            raise ValueError(f"dashboard.public_url {url!r} must be https:// and a name with nothing "
+                             "after it (no port, path or query), e.g. https://harvey.example.com")
+        self.host = host
+        return self.origin
+
+    def matches(self, host_header: str) -> bool:
+        return bool(self.host) and host_header.lower() == self.host
+
+
+_PUBLIC_NAME_RE = re.compile(r"(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}")
+
+
+def public_host_of(url: str) -> str:
+    """The host name in "https://name" (a trailing slash allowed), or "". A
+    loopback name or an IP address is never a public address."""
+    value = (url or "").strip().lower()
+    if not value.startswith("https://"):
+        return ""
+    host = value[len("https://"):]
+    if host.endswith("/"):
+        host = host[:-1]
+    if not _PUBLIC_NAME_RE.fullmatch(host) or is_loopback(host):
+        return ""
+    try:
+        ipaddress.ip_address(host)
+        return ""
+    except ValueError:
+        return host
+
+
 def is_public_path(method: str, path: str) -> bool:
     if method not in ("GET", "HEAD"):
         return False
@@ -303,9 +359,10 @@ class DashboardGuard:
     """ASGI middleware applying the checks in the module docstring to every
     request, and the security headers to every response."""
 
-    def __init__(self, app, store: TokenStore):
+    def __init__(self, app, store: TokenStore, public: PublicAddress | None = None):
         self.app = app
         self.store = store
+        self.public = public or PublicAddress()
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "lifespan":
@@ -340,10 +397,13 @@ class DashboardGuard:
         # 1. Host, before anything else.
         hosts = headers.get("host", [])
         host = parse_host(hosts[0]) if len(hosts) == 1 else None
-        if host is None or not is_loopback(host):
+        via_public = host is not None and self.public.matches(hosts[0])
+        if host is None or not (is_loopback(host) or via_public):
             return await deny(400, "bad_host",
-                              "This dashboard only answers to localhost / 127.0.0.1.")
+                              "This dashboard only answers to localhost / 127.0.0.1"
+                              + (" and its public address." if self.public.host else "."))
         host_header = hosts[0].lower()
+        own_origin = self.public.origin if via_public else f"http://{host_header}"
 
         # 2. Browser provenance.
         public = is_public_path(method, path)
@@ -351,7 +411,7 @@ class DashboardGuard:
                       and headers.get("sec-fetch-mode", [""])[0] == "navigate"
                       and headers.get("sec-fetch-dest", [""])[0] == "document")
         origins = headers.get("origin", [])
-        if origins and (len(origins) != 1 or origins[0].lower() != f"http://{host_header}"):
+        if origins and (len(origins) != 1 or origins[0].lower() != own_origin):
             if not navigation:
                 return await deny(403, "cross_origin", "Cross-origin requests are refused.")
         site = headers.get("sec-fetch-site", [])

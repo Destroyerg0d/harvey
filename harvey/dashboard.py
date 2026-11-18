@@ -59,7 +59,9 @@ def _resolve_config_file() -> Path:
 # route except the static shell needs the token (see dashboard_auth).
 app = FastAPI(title="Harvey Dashboard", docs_url=None, redoc_url=None, openapi_url=None)
 token_store = auth.TokenStore(TOKEN_FILE)
-app.add_middleware(auth.DashboardGuard, store=token_store)
+# The one HTTPS address besides loopback (dashboard.public_url), set at start.
+public_address = auth.PublicAddress()
+app.add_middleware(auth.DashboardGuard, store=token_store, public=public_address)
 
 # The LinkedIn tab's routes (/api/linkedin...), behind the same guard.
 from harvey.linkedin.web import router as linkedin_router  # noqa: E402
@@ -3265,10 +3267,35 @@ def _check_loopback_bind(host: str) -> str:
     return name
 
 
-def dashboard_url(host: str = "127.0.0.1", port: int = 5555) -> str:
+def configure_public_address() -> str:
+    """dashboard.public_url from the config file, for the guard: the public
+    origin, or "" (none set, or the config can't be read). A malformed one is
+    refused: the dashboard then answers on this computer only."""
+    try:
+        from harvey.config import load_config
+        url = getattr(getattr(load_config(), "dashboard", None), "public_url", "") or ""
+    except Exception as e:
+        logger.debug(f"dashboard: couldn't read dashboard.public_url: {e}")
+        url = ""
+    try:
+        return public_address.configure(url)
+    except ValueError as e:
+        print(f"\n  {e}. Answering on this computer only.\n")
+        return ""
+
+
+def dashboard_url(host: str = "127.0.0.1", port: int = 5555, public: bool = False) -> str:
     """The unlock link. The token rides in the #fragment, which browsers
     never send to the server (so it stays out of logs and Referer); the
-    page moves it to sessionStorage and strips it from the address bar."""
+    page moves it to sessionStorage and strips it from the address bar.
+    ``public``: the link at dashboard.public_url, for someone elsewhere."""
+    if public:
+        origin = public_address.origin or configure_public_address()
+        if not origin:
+            raise DashboardSetupError(
+                "No public address is set: put dashboard.public_url (https://...) in the "
+                "config file, with a tunnel forwarding it to this computer's dashboard.")
+        return f"{origin}/#token={token_store.get()}"
     name = _check_loopback_bind(host)
     try:
         if ipaddress.ip_address(name).version == 6:
@@ -3287,6 +3314,9 @@ def start_dashboard(host: str = "127.0.0.1", port: int = 5555):
         url = dashboard_url(host, port)
     except (DashboardSetupError, auth.TokenError) as e:
         raise DashboardSetupError(str(e)) from e
+    public = configure_public_address()
+    if public:
+        print(f"\n  Also answering at {public} (through your tunnel; the token is still required).")
 
     print(f"\n  Harvey Dashboard running. Open this link to unlock it:\n\n    {url}\n")
     print(f"  The token is stored in {token_store.path} (owner-only). Keep the link")

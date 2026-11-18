@@ -183,7 +183,8 @@ def cmd_dashboard(args):
     try:
         if getattr(args, "url", False):
             # The unlock link for an already-running dashboard.
-            print(dashboard_url(host=args.host, port=args.port))
+            print(dashboard_url(host=args.host, port=args.port,
+                                public=getattr(args, "public", False)))
             return
         start_dashboard(host=args.host, port=args.port)
     except (DashboardSetupError, TokenError) as e:
@@ -1230,6 +1231,8 @@ def main():
     sub.add_argument("--port", type=int, default=5555, help="Port (default: 5555)")
     sub.add_argument("--url", action="store_true",
                      help="Print the unlock link (with its token) and exit")
+    sub.add_argument("--public", action="store_true",
+                     help="With --url: the link at dashboard.public_url, for someone on another computer")
     sub.set_defaults(func=cmd_dashboard)
 
     # harvey status

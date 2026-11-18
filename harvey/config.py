@@ -1154,6 +1154,17 @@ class CareersConfig(BaseModel):
     linkedin_url: str = ""   # the company's LinkedIn page
 
 
+class DashboardConfig(BaseModel):
+    """The dashboard reached from other computers (owner, 2026-11-18: "make harvey
+    online so my employee can see and manage it"). ``public_url`` is the one
+    HTTPS address a tunnel (Cloudflare Tunnel, with Cloudflare Access's sign-in in
+    front) forwards to this computer's dashboard, e.g. "https://harvey.example.com".
+    Empty: the dashboard answers on this computer only. Either way it still
+    listens on 127.0.0.1 alone, and every request still needs the token
+    (harvey/dashboard_auth.py)."""
+    public_url: str = ""
+
+
 class SiteReviewConfig(BaseModel):
     """The site review Harvey writes when someone says yes to "want me to send
     the changes?" (harvey/site_review.py). Every review waits for your
@@ -1176,6 +1187,7 @@ class HarveyConfig(BaseModel):
     writer: WriterConfig = WriterConfig()
     careers: CareersConfig = CareersConfig()
     site_review: SiteReviewConfig = SiteReviewConfig()
+    dashboard: DashboardConfig = DashboardConfig()
     # The file it was loaded from, so a running Harvey can re-read the
     # sending mode from that same file (refresh_sending_mode).
     _source_path: str | None = PrivateAttr(default=None)
