@@ -111,3 +111,13 @@ def test_scout_doesn_t_look_for_shops_in_a_consent_country():
     assert not set(held) & set(S.MAP_CITIES["australia"])
     assert "Austin, TX" in held and S.MAP_CITIES["united states"][0] in held
     assert set(S.MAP_CITIES["australia"]) <= set(S.city_rotation(config([])))
+
+
+def test_scout_drops_single_cities_of_a_held_country_from_a_group():
+    config = SimpleNamespace(
+        icp=SimpleNamespace(geography=["European Union"]),
+        compliance=SimpleNamespace(precleared=SimpleNamespace(consent_countries=["IE", "NL"])))
+    cities = S.city_rotation(config)
+    assert "Dublin" not in cities and "Amsterdam" not in cities
+    assert "Berlin" in cities and len(cities) == len(S.MAP_CITIES["european union"]) - 2
+    assert set(S.MAP_CITY_CODES) == set(S.MAP_CITIES["european union"])   # every city tagged

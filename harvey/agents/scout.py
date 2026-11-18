@@ -138,9 +138,19 @@ def search_phrase(label: str) -> str:
 # without a consent check (owner, 2026-11-14: "utilize the mailing capacity to
 # the fullest"; Precleared holds most EU and Australian addresses).
 MAP_WEIGHT = {"united states": 3}
-# A MAP_CITIES country's two-letter code, for compliance.precleared.consent_countries.
+# A MAP_CITIES country's two-letter code, for compliance.precleared.consent_countries,
+# and each city's where a group spans countries (the European Union).
 MAP_COUNTRY_CODES = {"united states": "US", "united kingdom": "GB", "australia": "AU",
                      "canada": "CA", "india": "IN"}
+MAP_CITY_CODES = {"Dublin": "IE", "Amsterdam": "NL", "Berlin": "DE", "Paris": "FR",
+                  "Madrid": "ES", "Copenhagen": "DK", "Stockholm": "SE", "Milan": "IT",
+                  "Barcelona": "ES", "Vienna": "AT"}
+
+
+def held_countries(config) -> set[str]:
+    """compliance.precleared.consent_countries: where a cold email needs consent."""
+    return set(getattr(getattr(getattr(config, "compliance", None), "precleared", None),
+                       "consent_countries", None) or ())
 
 
 def map_places(config) -> list[str]:
@@ -148,11 +158,18 @@ def map_places(config) -> list[str]:
     (compliance.precleared.consent_countries): every first email to a shop
     found there would only be held (owner, 2026-11-18: Australian shops used
     up the day's checks and none could be written to)."""
-    held = set(getattr(getattr(getattr(config, "compliance", None), "precleared", None),
-                       "consent_countries", None) or ())
+    held = held_countries(config)
     places = [p for p in (getattr(config.icp, "geography", None) or [])
               if MAP_COUNTRY_CODES.get(p.strip().lower()) not in held]
     return places
+
+
+def place_cities(place: str, held: set[str]) -> list[str]:
+    """The map cities for one icp.geography entry, without any city in a held
+    country (Dublin and Amsterdam out of the European Union's)."""
+    known = MAP_CITIES.get(place.strip().lower())
+    cities = list(known) if known else [place.strip()]
+    return [c for c in cities if MAP_CITY_CODES.get(c) not in held]
 
 
 # Overture Maps (open business data): one city a cycle, in the same weighted
@@ -170,9 +187,9 @@ def city_rotation(config) -> list[str]:
     """The cities of icp.geography in map order (MAP_WEIGHT cities a round
     for a country listed there), each once."""
     cities, weights = [], []
+    held = held_countries(config)
     for place in map_places(config):
-        known = MAP_CITIES.get(place.strip().lower())
-        cities.append(list(known) if known else [place.strip()])
+        cities.append(place_cities(place, held))
         weights.append(max(1, MAP_WEIGHT.get(place.strip().lower(), 1)))
     ordered, taken = [], [0] * len(cities)
     while any(t < len(c) for t, c in zip(taken, cities)):
@@ -194,9 +211,9 @@ def map_rotation(config, osm) -> list[tuple[str, str]]:
         return []
     cities: list[list[str]] = []
     weights: list[int] = []
+    held = held_countries(config)
     for place in map_places(config):
-        known = MAP_CITIES.get(place.strip().lower())
-        cities.append(list(known) if known else [place.strip()])
+        cities.append(place_cities(place, held))
         weights.append(max(1, MAP_WEIGHT.get(place.strip().lower(), 1)))
     flat, taken = [], [0] * len(cities)
     while any(t < len(c) for t, c in zip(taken, cities)):     # round robin
