@@ -9,6 +9,12 @@ minor versions can still change behaviour.
 
 ### Added
 
+- **`compliance.precleared.consent_countries`: hold, unchecked, where a cold email needs consent.**
+  Australian shops used up the 25 free checks by 08:00 UTC, every one came back `consent_needed`
+  (Spam Act 2003), and first emails to everyone else waited all day. A recipient Harvey is sure is
+  in a listed country (the company's location, or the address's country domain, `.com.au`) is now
+  held without a check, failed with the reason as that verdict would be; Scout's map steps stop
+  looking for shops there. A country domain only holds, it never skips a check.
 - **The dashboard at a public address, for a teammate elsewhere** (`dashboard.public_url`). Put
   a tunnel on this computer in front of the dashboard (Cloudflare Tunnel, with Cloudflare Access's
   email sign-in) and set `dashboard.public_url: https://harvey.example.com`: the guard then accepts

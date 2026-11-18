@@ -792,6 +792,13 @@ class PreclearedConfig(BaseModel):
     # Harvey is sure of the recipient's country from the company's location;
     # prospect_country never counts. A verdict already stored still applies.
     skip_countries: list[str] = []
+    # Optional: countries (two letters, e.g. ["AU"]) where a cold email needs
+    # the recipient's consent whatever a check finds (Australia's Spam Act
+    # 2003). Their recipients are held without a check, as Precleared would
+    # hold them, so the day's checks go to people who can be written to. Sure
+    # from the company's location, or from the address's country domain
+    # (".com.au"); a country domain only ever holds, it never skips a check.
+    consent_countries: list[str] = []
 
     @field_validator("sender_country", mode="before")
     @classmethod
@@ -814,34 +821,35 @@ class PreclearedConfig(BaseModel):
     def _valid_prospect_country(cls, v) -> str:
         return normalize_prospect_country(v)
 
-    @field_validator("skip_countries", mode="before")
+    @field_validator("skip_countries", "consent_countries", mode="before")
     @classmethod
-    def _valid_skip_countries(cls, v) -> list[str]:
+    def _valid_country_list(cls, v, info) -> list[str]:
         """Two-letter codes, upper-cased ("uk" -> "GB"), each once. A typo
         or an unquoted NO (YAML's false) is an error, never ignored."""
+        field = info.field_name
         if v is None or v == "":
             return []
         if isinstance(v, str):
             v = v.split(",")
         if not isinstance(v, (list, tuple)):
             raise ValueError(
-                'skip_countries must be a list of two-letter country codes, e.g. ["US"].')
+                f'{field} must be a list of two-letter country codes, e.g. ["US"].')
         codes: list[str] = []
         for item in v:
             if isinstance(item, bool):
                 raise ValueError(
-                    f"an entry in skip_countries was read as {item}. YAML turns an unquoted "
-                    'NO or ON into true/false, so quote the code, e.g. skip_countries: ["NO"].')
+                    f"an entry in {field} was read as {item}. YAML turns an unquoted "
+                    f'NO or ON into true/false, so quote the code, e.g. {field}: ["NO"].')
             if not isinstance(item, str):
                 raise ValueError(
-                    f"'{item}' in skip_countries is not a two-letter country code such as US or GB.")
+                    f"'{item}' in {field} is not a two-letter country code such as US or GB.")
             code = item.strip().upper()
             code = {"UK": "GB", "USA": "US"}.get(code, code)
             if not code:
                 continue
             if not (len(code) == 2 and code.isascii() and code.isalpha()):
                 raise ValueError(
-                    f"'{code}' in skip_countries is not a two-letter country code such as US or GB.")
+                    f"'{code}' in {field} is not a two-letter country code such as US or GB.")
             if code not in codes:
                 codes.append(code)
         return codes
@@ -853,6 +861,11 @@ class PreclearedConfig(BaseModel):
                 "compliance.precleared.sender_country must be GB or US "
                 "when the check is enabled."
             )
+        both = sorted(set(self.skip_countries) & set(self.consent_countries))
+        if both:
+            raise ValueError(
+                f"compliance.precleared: {', '.join(both)} is in both skip_countries (send without "
+                "a check) and consent_countries (hold without a check); keep it in one.")
         return self
 
 

@@ -44,7 +44,11 @@ waiting.
 A recipient Harvey is sure is in one of ``skip_countries`` (the same sure
 country as above, never the prospects' country) isn't checked at all: no
 call, no check spent, and the email is clear to send. A verdict already
-stored for the address still applies.
+stored for the address still applies. One sure to be in one of
+``consent_countries`` (from that country, or the address's country domain,
+".com.au") isn't checked either: it is held as ``consent_needed``, which is
+what a check there always answers, so the day's checks go to people who can
+be written to.
 
 Without an API key Precleared allows 10 checks a day; a free key
 (https://precleared.dev/get-key, PRECLEARED_API_KEY) allows 25 a day.
@@ -160,6 +164,7 @@ class PreclearedClient:
         default_country: str = "",
         skip_countries: list[str] | tuple[str, ...] | str = (),
         transport: httpx.AsyncBaseTransport | None = None,
+        consent_countries: list[str] | tuple[str, ...] | str = (),
     ):
         self.sender_country = sender_country
         self.api_key = api_key or ""
@@ -175,6 +180,11 @@ class PreclearedClient:
             skip_countries = skip_countries.split(",")
         codes = (_country(c) for c in skip_countries or ())
         self.skip_countries = frozenset("GB" if code == "UK" else code for code in codes if code)
+        # Recipients Harvey is sure are in one of these are held, unchecked.
+        if isinstance(consent_countries, str):
+            consent_countries = consent_countries.split(",")
+        codes = (_country(c) for c in consent_countries or ())
+        self.consent_countries = frozenset("GB" if code == "UK" else code for code in codes if code)
         self._transport = transport  # tests inject httpx.MockTransport
 
     @classmethod
@@ -193,6 +203,7 @@ class PreclearedClient:
             prospect_country=getattr(settings, "prospect_country", ""),
             default_country=icp_country(config),
             skip_countries=getattr(settings, "skip_countries", None) or (),
+            consent_countries=getattr(settings, "consent_countries", None) or (),
         )
 
     def _redact(self, text: str) -> str:
@@ -255,7 +266,29 @@ class PreclearedClient:
         country = _country(country)
         stored = self._cached(await state.get_setting(SETTINGS_PREFIX + email), country,
                               _name(company, MAX_COMPANY_NAME), _name(name, MAX_RECIPIENT_NAME))
-        return stored if stored is not None else self._skipped(email, country)
+        if stored is not None:
+            return stored
+        return self._skipped(email, country) or self._needs_consent(email, country)
+
+    def _needs_consent(self, email: str, country: str) -> Clearance | None:
+        """Held without a check when the recipient is in one of
+        consent_countries: sure from the company's location, or from the
+        address's own country domain (".com.au" is Australia). A country
+        domain is used only to hold, never to skip a check: the worst it can
+        do is keep one email back. Else None."""
+        if not self.consent_countries:
+            return None
+        found = country if country in self.consent_countries else ""
+        if not found:
+            tld = _domain_country(email)
+            found = tld if tld in self.consent_countries else ""
+        if not found:
+            return None
+        logger.debug(f"Precleared: not checking {email}: the recipient is in {found}, "
+                     "where cold email needs consent (compliance.precleared.consent_countries)")
+        return Clearance(allowed=False, skipped=True, verdict="consent_needed", country=found,
+                         reason=f"not checked: the recipient is in {found}, where a cold email "
+                                "needs their consent first (consent_countries)")
 
     def _skipped(self, email: str, country: str) -> Clearance | None:
         """Clear to send without a check when the recipient is in a skipped
@@ -490,6 +523,16 @@ def _country(value) -> str:
     """A two-letter country code, from Precleared's facts or the sender, or ""."""
     code = value.strip().upper() if isinstance(value, str) else ""
     return code if len(code) == 2 and code.isascii() and code.isalpha() else ""
+
+
+def _domain_country(email: str) -> str:
+    """The country an address's domain is registered under, from its top-level
+    domain ("shop.com.au" -> "AU", ".uk" -> "GB"), or "" for a generic one
+    (.com, .shop) or anything malformed."""
+    domain = (email or "").strip().lower().rpartition("@")[2].rstrip(".")
+    tld = domain.rpartition(".")[2] if "." in domain else ""
+    code = _country(tld)
+    return "GB" if code == "UK" else code
 
 
 def _text(value) -> str:

@@ -440,7 +440,8 @@ vm.runInThisContext("const _cohort = {require: new Set(['A']), exclude: new Set(
     result = subprocess.run([node, '-e', script, str(web / 'auth.js'), str(web / 'app.js')],
                             text=True, encoding="utf-8", capture_output=True, check=True)
     data = json.loads(result.stdout)
-    assert all(c['auth'] == 'Bearer ' + 'T' * 43 and c['redirect'] == 'error' for c in data['calls'])
+    # 'manual': a redirect is never followed; it comes back as an opaqueredirect.
+    assert all(c['auth'] == 'Bearer ' + 'T' * 43 and c['redirect'] == 'manual' for c in data['calls'])
     assert data['calls'][0]['url'] == 'http://127.0.0.1:5555/api/cohort.csv?require=A&exclude=B'
     assert len(data['links']) == 1
     assert data['links'][0]['clicked'] and data['links'][0]['removed']

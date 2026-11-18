@@ -138,6 +138,21 @@ def search_phrase(label: str) -> str:
 # without a consent check (owner, 2026-11-14: "utilize the mailing capacity to
 # the fullest"; Precleared holds most EU and Australian addresses).
 MAP_WEIGHT = {"united states": 3}
+# A MAP_CITIES country's two-letter code, for compliance.precleared.consent_countries.
+MAP_COUNTRY_CODES = {"united states": "US", "united kingdom": "GB", "australia": "AU",
+                     "canada": "CA", "india": "IN"}
+
+
+def map_places(config) -> list[str]:
+    """icp.geography without the countries where a cold email needs consent
+    (compliance.precleared.consent_countries): every first email to a shop
+    found there would only be held (owner, 2026-11-18: Australian shops used
+    up the day's checks and none could be written to)."""
+    held = set(getattr(getattr(getattr(config, "compliance", None), "precleared", None),
+                       "consent_countries", None) or ())
+    places = [p for p in (getattr(config.icp, "geography", None) or [])
+              if MAP_COUNTRY_CODES.get(p.strip().lower()) not in held]
+    return places
 
 
 # Overture Maps (open business data): one city a cycle, in the same weighted
@@ -155,7 +170,7 @@ def city_rotation(config) -> list[str]:
     """The cities of icp.geography in map order (MAP_WEIGHT cities a round
     for a country listed there), each once."""
     cities, weights = [], []
-    for place in getattr(config.icp, "geography", None) or []:
+    for place in map_places(config):
         known = MAP_CITIES.get(place.strip().lower())
         cities.append(list(known) if known else [place.strip()])
         weights.append(max(1, MAP_WEIGHT.get(place.strip().lower(), 1)))
@@ -179,7 +194,7 @@ def map_rotation(config, osm) -> list[tuple[str, str]]:
         return []
     cities: list[list[str]] = []
     weights: list[int] = []
-    for place in icp.geography or []:
+    for place in map_places(config):
         known = MAP_CITIES.get(place.strip().lower())
         cities.append(list(known) if known else [place.strip()])
         weights.append(max(1, MAP_WEIGHT.get(place.strip().lower(), 1)))

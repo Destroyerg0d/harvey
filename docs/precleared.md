@@ -23,6 +23,7 @@ compliance:
     address_source: "unknown"   # unless copied from the businesses' own sites
     prospect_country: ""        # e.g. "US" if all prospects are in one country
     skip_countries: []          # optional, e.g. ["US"]: see "Skipping countries"
+    consent_countries: []       # optional, e.g. ["AU"]: see "Countries that need consent"
 ```
 
 Quote `prospect_country` (YAML reads an unquoted `NO` as false).
@@ -42,6 +43,22 @@ whose country Harvey is not sure of is still checked, even when every
 prospect is meant to be in a skipped country. A verdict Precleared already
 gave for the address still applies. Codes are two letters (`UK` is read as
 `GB`); quote `NO`. The default, an empty list, skips nothing.
+
+## Countries that need consent
+
+Some countries need the recipient's consent for a cold email whatever a check
+finds: Australia's Spam Act 2003 is one. Every check spent on a shop there comes
+back `consent_needed`, and with 25 free checks a day they can use up the day
+before anyone who can be written to is reached. A recipient Harvey is sure is
+in one of `consent_countries` is held without a check, the email marked failed
+with the reason, as a `consent_needed` verdict would be; its follow-ups are
+cancelled in turn, and Scout's map steps stop looking for shops there.
+
+"Sure" is the company's location, as for `skip_countries`, or here also the
+address's own country domain (`.com.au` is Australia). A country domain only
+ever holds an email: it never skips a check, since the worst it can do is keep
+one email back. A verdict Precleared already gave still comes first. A country
+can't be in both lists.
 
 ## What is sent
 
