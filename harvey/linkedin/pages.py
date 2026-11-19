@@ -378,6 +378,25 @@ def profile_headline(html: str) -> str:
     return ""
 
 
+def profile_location(html: str) -> str:
+    """The location line in the profile's top card ("Austin, Texas, United
+    States", "Greater Sydney Area"), or "": the first short line after the name
+    that names a country or a known metro, the headline left out."""
+    from harvey.targeting import location_country
+    card = _top_card(soup_of(html))
+    name = card.find("h1") if card is not None else None
+    if name is None:
+        return ""
+    own, headline = clean_text(name.get_text(" ")), profile_headline(html)
+    for el in name.find_all_next(["span", "div", "p"], limit=40):
+        text = clean_text(el.get_text(" "))
+        if not text or text in (own, headline) or len(text) > 90:
+            continue
+        if location_country(text):
+            return text
+    return ""
+
+
 def _top_card(s: BeautifulSoup):
     """The profile's own header, not the "people also viewed" sidebar."""
     for selector in ("main .pv-top-card", "main section.artdeco-card", "main"):

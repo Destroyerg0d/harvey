@@ -9,6 +9,15 @@ minor versions can still change behaviour.
 
 ### Added
 
+- **`targeting`: cold outreach only to the countries and decision makers you choose**
+  (harvey/targeting.py). `targeting.countries` (two-letter codes) and
+  `targeting.decision_makers_only` cover cold email (every step), LinkedIn connects, and
+  LinkedIn's first message and follow-up to a new connection. A country comes from the
+  company's location, a LinkedIn profile's location line (metros like "San Francisco Bay
+  Area" included) or an address's country domain (".co.in"); unknown still gets a cold
+  email, but never a connect. A decision maker is a founder, owner, chief officer,
+  president, managing director or partner, never an assistant, intern or former one.
+  Replies, website-chat follow-ups and anyone who wrote first are never filtered.
 - **Needs you names everything waiting on you** (harvey/needs_you.py). Today used to show LinkedIn
   and WhatsApp drafts as counts and never named a site review waiting for approval or a write-up
   Harvey had promised and not written. Each is now its own item, site reviews first: a review

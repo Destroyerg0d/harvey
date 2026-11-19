@@ -233,6 +233,18 @@ class Sender:
                 f"{getattr(prospect, 'email', '?')}, using quiet_hours.timezone: {e}")
             return operator_timezone(self.config)
 
+    async def _off_target(self, item: dict, prospect) -> str:
+        """Why the owner's targeting rules this cold email out, or "". The
+        country is the one Harvey is sure of (the company's location), else
+        the address's country domain; unknown still goes."""
+        from harvey import targeting
+        if not targeting.active(self.config):
+            return ""
+        country = await self._recipient_country(prospect) if prospect is not None else ""
+        country = country or targeting.email_country(item.get("to_email") or "")
+        title = (getattr(prospect, "title", "") or "") if prospect is not None else ""
+        return targeting.cold_reason(self.config, country=country, title=title)
+
     async def _recipient_country(self, prospect) -> str:
         """The recipient's country when Harvey is sure of it, for the
         compliance check (see send_window.recipient_country). A failure to
@@ -1383,6 +1395,16 @@ class Sender:
             if order:
                 await self.state.update_outbox_item(item["id"], status=order[0], error=order[1])
                 continue
+            # The owner's targeting (harvey/targeting.py): cold email only to the
+            # countries and decision makers they chose. Website-chat follow-ups
+            # and replies aren't cold.
+            if is_cold and not is_inbound(item.get("angle")):
+                why = await self._off_target(item, prospect)
+                if why:
+                    await self.state.update_outbox_item(
+                        item["id"], status="failed", error=f"targeting: {why}"[:300])
+                    logger.info(f"Sender: not sending to {item['to_email']}: {why}")
+                    continue
             # The recipient's country when Harvey is sure of it, and the
             # company's and person's names: they go with the compliance
             # check, and a cached verdict is keyed on them.

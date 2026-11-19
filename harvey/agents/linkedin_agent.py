@@ -46,7 +46,7 @@ from harvey.linkedin.pages import (
     COMPOSER, CONNECTIONS_URL, CONVERSATION_LIST, FEED_URL, INVITE_NOTE_BOX, MESSAGING_URL,
     SEND_BUTTON, SENT_INVITES_URL, clean_text, compose_link_from_profile, invite_confirmed,
     names_match, note_limit_reached, parse_connections, parse_conversation_list,
-    parse_sent_invitations, parse_thread, profile_connect_state, profile_headline, profile_summary,
+    parse_sent_invitations, parse_thread, profile_connect_state, profile_headline, profile_location, profile_summary,
     profile_url,
     recipient_confirmed, signed_in_from,
 )
@@ -868,6 +868,17 @@ class LinkedInAgent:
                 continue
             if due > now:
                 continue
+            from harvey import targeting
+            if targeting.active(self.config):
+                await self.research(lead)         # the profile, once (kept 14 days)
+                profile = await self._profile_cache(lead)
+                why = self.off_target(lead, location=profile.get("location") or "",
+                                      headline=profile.get("headline") or "")
+                if why:
+                    await self.state.li_update_lead(
+                        lead["id"], no_message_reason=f"not messaged: {why}"[:300])
+                    self.report["off_target"] = self.report.get("off_target", 0) + 1
+                    continue
             history = await self.state.li_messages(lead_id=lead["id"])
             body = await self.draft(lead, which, history=history)
             if body and await self.add_draft(lead, "message", body):
@@ -889,7 +900,8 @@ class LinkedInAgent:
         stopped = sorted(EMAIL_STOPPED)
         rows = await self.state._li_query(
             "SELECT p.id, p.first_name, p.last_name, p.title, p.linkedin_url, p.company_id, "
-            "p.company, COALESCE(c.name, '') AS company_name FROM prospects p "
+            "p.company, p.email, COALESCE(c.name, '') AS company_name, "
+            "COALESCE(c.location, '') AS company_location FROM prospects p "
             "LEFT JOIN companies c ON c.id = p.company_id "
             "WHERE lower(p.linkedin_url) LIKE '%linkedin.com/in/%' "
             f"AND p.status NOT IN ({', '.join('?' for _ in stopped)}) AND ({title_sql}) "
@@ -902,6 +914,12 @@ class LinkedInAgent:
             if not slug or await self.state.li_get_lead_by_slug(slug):
                 continue
             if row["id"] and await self.state.colleague_who_replied(row["id"]):
+                continue
+            from harvey import targeting
+            if targeting.active(self.config) and targeting.cold_reason(
+                    self.config, title=row["title"] or "",
+                    country=(targeting.location_country(row["company_location"])
+                             or targeting.email_country(row["email"] or ""))):
                 continue
             row["slug"] = slug
             out.append(row)
@@ -972,7 +990,7 @@ class LinkedInAgent:
         except ValueError:
             cached = {}
         at = _parse(cached.get("at"))
-        if cached.get("text") and at and self.now() - at < PROFILE_FRESH:
+        if cached.get("text") and "location" in cached and at and self.now() - at < PROFILE_FRESH:
             return cached["text"]
         url = lead.get("profile_url") or (profile_url(lead["slug"]) if lead.get("slug") else "")
         if self.driver is None or self.dry_run or not url:
@@ -990,8 +1008,30 @@ class LinkedInAgent:
             await self.state.li_update_lead(lead["id"], headline=headline[:220])
             lead["headline"] = headline[:220]
         if text:
-            await self.state.set_setting(key, json.dumps({"at": self.now().isoformat(), "text": text}))
+            await self.state.set_setting(key, json.dumps({
+                "at": self.now().isoformat(), "text": text,
+                "location": profile_location(html), "headline": headline[:220]}))
         return text
+
+    async def _profile_cache(self, lead: dict) -> dict:
+        try:
+            data = json.loads(await self.state.get_setting(PROFILE_KEY + lead["id"]) or "{}")
+        except ValueError:
+            data = {}
+        return data if isinstance(data, dict) else {}
+
+    def off_target(self, lead: dict, *, location: str = "", headline: str = "",
+                   required: bool = False) -> str:
+        """Why the owner's targeting (harvey/targeting.py) rules this lead out
+        for cold outreach, or "". ``required``: an unread location or role
+        rules them out too (a connect)."""
+        from harvey import targeting
+        if not targeting.active(self.config):
+            return ""
+        return targeting.cold_reason(
+            self.config, country=targeting.location_country(location),
+            title=headline or lead.get("headline") or "",
+            country_required=required, title_required=required)
 
     def _history(self, history) -> str:
         out = []
@@ -1259,6 +1299,16 @@ FACTS about them:
             await self.state.li_update_message(item["id"], status="skipped",
                                                error="you're already connected")
             await self.state.li_set_stage(lead["id"], "accepted", accepted_at=self.now())
+            return False, ""
+        # The owner's targeting: their profile must show a country you chose and
+        # a decision maker's role (harvey/targeting.py).
+        why = self.off_target(lead, location=profile_location(html),
+                              headline=profile_headline(html), required=True)
+        if why:
+            await self.state.li_update_message(item["id"], status="skipped",
+                                               error=f"not invited: {why}"[:300])
+            await self.state.li_update_lead(lead["id"], no_message_reason=f"not invited: {why}"[:300])
+            self.report["off_target"] = self.report.get("off_target", 0) + 1
             return False, ""
         ok, _ = await self._open_connect(html)
         if not ok:

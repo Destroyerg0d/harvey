@@ -58,6 +58,8 @@ class Person:
     pending_age: str = "Sent 3 days ago"
     thread: list = field(default_factory=list)   # [(sender, body)]
     urn: str = ""
+    headline: str = ""                # the top card's line under the name
+    location: str = ""                # the top card's location line
 
     @property
     def thread_url(self) -> str:
@@ -140,7 +142,10 @@ class FakeLinkedIn:
         sidebar = ('<aside><a href="/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3AOTHER'
                    '&recipient=OTHER" aria-label="Message Riley Other">Message</a></aside>')
         return (f"<html><body>{NAV}{sidebar}<main><section class=\"artdeco-card pv-top-card\">"
-                f"<h1>{e(p.name)}</h1>{buttons}</section>{modal}"
+                f"<h1>{e(p.name)}</h1>"
+                + (f'<div class="text-body-medium">{e(p.headline)}</div>' if p.headline else "")
+                + (f'<span class="text-body-small">{e(p.location)}</span>' if p.location else "")
+                + f"{buttons}</section>{modal}"
                 f"{toast}</main></body></html>")
 
 

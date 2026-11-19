@@ -1170,6 +1170,33 @@ class CareersConfig(BaseModel):
     linkedin_url: str = ""   # the company's LinkedIn page
 
 
+class TargetingConfig(BaseModel):
+    """Who cold outreach goes to (harvey/targeting.py; owner, 2026-11-19). Empty
+    countries and decision_makers_only false: no rule. Covers cold email,
+    LinkedIn connects and LinkedIn's first message and follow-up; replies and
+    anyone who wrote first are never filtered."""
+    countries: list[str] = []          # two-letter codes, e.g. ["US", "GB", "CA"]
+    decision_makers_only: bool = False  # founders, owners, chief officers, presidents, MDs
+
+    @field_validator("countries", mode="before")
+    @classmethod
+    def _codes(cls, v) -> list[str]:
+        if v is None or v == "":
+            return []
+        if isinstance(v, str):
+            v = v.split(",")
+        out = []
+        for item in v:
+            if isinstance(item, bool) or not isinstance(item, str):
+                raise ValueError(f"'{item}' in targeting.countries is not a two-letter code; quote it")
+            code = {"UK": "GB", "USA": "US"}.get(item.strip().upper(), item.strip().upper())
+            if code and not (len(code) == 2 and code.isalpha()):
+                raise ValueError(f"'{code}' in targeting.countries is not a two-letter country code")
+            if code and code not in out:
+                out.append(code)
+        return out
+
+
 class DashboardConfig(BaseModel):
     """The dashboard reached from other computers (owner, 2026-11-18: "make harvey
     online so my employee can see and manage it"). ``public_url`` is the one
@@ -1204,6 +1231,7 @@ class HarveyConfig(BaseModel):
     careers: CareersConfig = CareersConfig()
     site_review: SiteReviewConfig = SiteReviewConfig()
     dashboard: DashboardConfig = DashboardConfig()
+    targeting: TargetingConfig = TargetingConfig()
     # The file it was loaded from, so a running Harvey can re-read the
     # sending mode from that same file (refresh_sending_mode).
     _source_path: str | None = PrivateAttr(default=None)
