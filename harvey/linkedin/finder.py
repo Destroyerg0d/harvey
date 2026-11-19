@@ -63,9 +63,10 @@ def search_terms(config) -> list[str]:
 def queries(config) -> list[str]:
     """Every search, in the order the cursor walks them: each niche, for each
     role, across the target countries round-robin by weight."""
-    from harvey import targeting
-    countries, _ = targeting.settings(config)
-    places = [c for c in (countries or ("US",)) if c in COUNTRY_NAMES]
+    listed = [str(c).strip().upper() for c in
+              (getattr(getattr(config, "targeting", None), "countries", None) or [])]
+    places = [c for c in listed if c in COUNTRY_NAMES] or ["US"]
+    places.sort(key=lambda c: -COUNTRY_WEIGHT.get(c, 1))      # the US first; ties keep your order
     ordered: list[str] = []
     for code in places:
         ordered += [code] * COUNTRY_WEIGHT.get(code, 1)
@@ -97,14 +98,23 @@ def parse_result(item: dict) -> dict | None:
     headline = " - ".join(parts[1:]) if len(parts) > 1 else ""
     company = parts[2] if len(parts) > 2 else ""
     snippet = " ".join(str(item.get("snippet") or item.get("description") or "").split())
+    # TinyFish's title is often just the name; its snippet starts "# Name <headline>"
+    # and carries "**Location:** City, Region, Country" (live, 2026-11-19).
+    if not headline and name and snippet.startswith("#"):
+        body = re.sub(r"^#\s*" + re.escape(name) + r"\s*", "", snippet, flags=re.IGNORECASE)
+        if body != snippet:
+            headline = re.split(r"\s+-\s+\*\*|\*\*|\s#\s", body)[0].strip(" -|")[:220]
     location = ""
-    for piece in re.split(r"[·|]|Location:\s*", snippet):
-        piece = piece.strip(" .")
+    m = re.search(r"\*\*Location:\*\*\s*([^*#]+?)(?=\s+-\s+\*\*|\s+#|\*\*|$)", snippet)
+    if m and targeting.location_country(m.group(1).strip(" .")):
+        location = m.group(1).strip(" .")
+    for piece in ([] if location else re.split(r"[·|]|Location:\s*", snippet)):
+        piece = piece.strip(" .*")
         if 3 <= len(piece) <= 80 and targeting.location_country(piece):
             location = piece
             break
     return {"url": profile_url(slug), "slug": slug, "name": name, "headline": headline,
-            "company": company, "location": location}
+            "company": company, "location": location, "snippet": snippet[:300]}
 
 
 async def search(query: str, key: str, client: httpx.AsyncClient | None = None) -> list[dict]:
@@ -155,7 +165,7 @@ async def find_people(state, config, key: str, wanted: int, client: httpx.AsyncC
                 continue
             why = targeting.cold_reason(
                 config, country=targeting.location_country(person["location"]),
-                title=person["headline"], title_required=True)
+                title=person["headline"] or person["snippet"], title_required=True)
             if why:
                 report["skipped"] += 1
                 continue

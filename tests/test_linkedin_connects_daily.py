@@ -25,17 +25,24 @@ def result(slug, title, snippet=""):
 def test_a_search_result_reads_as_a_profile():
     p = finder.parse_result(result("jane-doe-7", "Jane Doe - Founder - Lumen Candles | LinkedIn",
                                    "Austin, Texas, United States · Founder at Lumen Candles"))
-    assert p == {"url": "https://www.linkedin.com/in/jane-doe-7/", "slug": "jane-doe-7", "name": "Jane Doe",
-                 "headline": "Founder - Lumen Candles", "company": "Lumen Candles",
-                 "location": "Austin, Texas, United States"}
+    assert {k: p[k] for k in ("url", "slug", "name", "headline", "company", "location")} == {
+        "url": "https://www.linkedin.com/in/jane-doe-7/", "slug": "jane-doe-7", "name": "Jane Doe",
+        "headline": "Founder - Lumen Candles", "company": "Lumen Candles",
+        "location": "Austin, Texas, United States"}
     assert finder.parse_result({"url": "https://www.linkedin.com/company/lumen/", "title": "Lumen"}) is None
+    # TinyFish's own shape: the title is the name, the snippet has the rest (live, 2026-11-19).
+    q = finder.parse_result({"url": "https://www.linkedin.com/in/fred-h/", "title": "Fred H",
+                             "snippet": "# Fred H Co-Founder & CEO | Example Goods | DTC skincare - **Location:** "
+                                        "Stockholm, Stockholm County, Sweden # Experience"})
+    assert q["headline"] == "Co-Founder & CEO | Example Goods | DTC skincare"
+    assert q["location"] == "Stockholm, Stockholm County, Sweden"
 
 
 def test_searches_cover_roles_niches_and_countries_the_us_most():
     config = World.__new__(World)
     from tests.linkedin_fakes import make_config
     config = make_config()
-    config.targeting = TargetingConfig(countries=["US", "GB"])
+    config.targeting = TargetingConfig(countries=["GB", "SE", "US"])       # the US still goes first
     config.icp.industries = ["DTC Ecommerce (Shopify / Shopify Plus brands)"]
     qs = finder.queries(config)
     assert qs[0] == 'site:linkedin.com/in "founder" "DTC Ecommerce" "United States"'
