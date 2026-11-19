@@ -122,6 +122,10 @@ async def _promised(state) -> list[dict]:
     from harvey.site_review import promised
     out = []
     for p in await promised(state):
+        if p.get("lead_id"):
+            lead = await state.li_get_lead(p["lead_id"]) or {}
+            if (lead.get("no_message_reason") or "").startswith("owner:"):
+                continue        # you said to leave them be
         channel = "LinkedIn" if p.get("channel") == "linkedin" else "email"
         name = _first(p.get("who") or p.get("name") or "")
         if p.get("site"):

@@ -936,6 +936,11 @@ class LinkedInAgent:
                 break
             if await self.state.li_pending_for(lead["id"]):
                 continue
+            # Set aside (by you, or after failed sends): no catch-up. Targeting's
+            # own marks don't count: someone who wrote to you is still answered.
+            reason = lead.get("no_message_reason") or ""
+            if reason and not reason.startswith(("not messaged:", "not invited:")):
+                continue
             history = await self.state.li_messages(lead_id=lead["id"])
             if not li_catch_up_due(history, self.cfg, now):
                 continue

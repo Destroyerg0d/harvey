@@ -181,3 +181,24 @@ def test_the_owner_s_own_update_failing_never_pauses_whatsapp(tmp_path):
     w.go()
     assert run(guards.active_pause(w.state)) is None
     assert run(w.state.get_setting(guards.FAILED_KEY, "0")) in ("0", "")
+
+
+def test_no_catch_up_to_someone_set_aside_but_targeting_s_own_mark_doesn_t_stop_one(tmp_path):
+    from tests.linkedin_fakes import Person as LiPerson
+    from tests.test_linkedin_agent import World as LiWorld, run as li_run
+    w = LiWorld(tmp_path, [LiPerson(slug="jane-doe-1", name="Jane Doe", connected=True),
+                           LiPerson(slug="raj-k-2", name="Raj K", connected=True)])
+    li_run(w.state.set_setting(LI_AUTOPILOT, "on"))
+    at = naive(w.at)
+    leads = {}
+    for slug, name, reason in (("jane-doe-1", "Jane Doe", "owner: skip for now"),
+                               ("raj-k-2", "Raj K", "not messaged: outside your target countries (IN)")):
+        lead = w.lead(slug, stage="replied", name=name, profile_url=f"https://www.linkedin.com/in/{slug}/")
+        li_run(w.state.li_update_lead(lead, no_message_reason=reason))
+        for direction, kind, days in (("out", "message", 9), ("in", "message", 8), ("out", "reply", 8)):
+            li_run(w.state.li_add_message(lead, direction=direction, kind=kind, status="sent",
+                                          body=f"{slug} {kind} {days}", sent_at=at - timedelta(days=days)))
+        leads[slug] = lead
+    li_run(w.agent().draft_messages())
+    assert [x["kind"] for x in w.msgs(leads["jane-doe-1"]) if x["status"] == "approved"] == []
+    assert [x["kind"] for x in w.msgs(leads["raj-k-2"]) if x["status"] == "approved"] == ["catch_up"]
