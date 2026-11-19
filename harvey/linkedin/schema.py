@@ -5,7 +5,7 @@ is untouched). No imports: harvey.state reads this at import time."""
 # Where a lead is. Forward moves only (store.advance_stage); declined is final.
 STAGES = ("found", "invited", "accepted", "messaged", "replied", "warm", "meeting",
           "declined", "withdrawn")
-MESSAGE_KINDS = ("invite_note", "message", "reply")
+MESSAGE_KINDS = ("invite_note", "message", "reply", "catch_up")
 MESSAGE_STATUSES = ("draft", "approved", "sent", "failed", "skipped")
 
 LINKEDIN_SCHEMA = """

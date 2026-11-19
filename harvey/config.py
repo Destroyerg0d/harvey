@@ -593,6 +593,11 @@ class LinkedInChannelConfig(BaseModel):
     follow_up_min_days: int = 5
     follow_up_max_days: int = 7
     max_unanswered: int = 3
+    # A conversation that went quiet after Harvey's last message (they had
+    # replied): a short catch-up after catch_up_after_days, at most
+    # max_catch_ups times, then nothing (owner, 2026-11-19).
+    max_catch_ups: int = 2
+    catch_up_after_days: float = 3
     # A short note with each invite while the account allows notes.
     invite_notes: bool = True
     invite_note_max_chars: int = 200
@@ -690,6 +695,10 @@ class WhatsAppChannelConfig(BaseModel):
     follow_up_min_days: int = 3
     follow_up_max_days: int = 5
     max_unanswered: int = 3
+    # A chat that went quiet after Harvey's last message (they had replied): a
+    # short catch-up after catch_up_after_days, at most max_catch_ups times.
+    max_catch_ups: int = 2
+    catch_up_after_days: float = 2
     # How long `harvey whatsapp login` waits for you to scan the QR code.
     login_timeout_minutes: int = 30
     # Numbers never to message, cold or in reply (compliance.do_not_contact

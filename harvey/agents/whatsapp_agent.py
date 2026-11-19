@@ -35,6 +35,7 @@ from harvey.meeting_alert import POSITIVE_INTENTS
 from harvey.meeting_slot import asks_to_meet, prompt_block
 from harvey.whatsapp.schema import OWNER_STAGE
 from harvey.kept_browser import KeptBrowser
+from harvey.chat_style import parts as chat_parts, squash, strip_repeat_name
 
 ALERT_KIND = "alert"     # a meeting alert to your own phone (harvey/meeting_alert.py)
 ALERT_PROOF_CHARS = 120  # the opening of an alert that must show in the chat
@@ -77,7 +78,27 @@ OFFLINE_RECHECK_SECONDS = 15
 MEDIA_BODY = "[a photo, voice note or file: open the chat on your phone]"
 
 # Under these many words, as the prompt says.
-WORD_LIMITS = {"first": 60, "follow_up": 35, "reply": 80}
+WORD_LIMITS = {"first": 60, "follow_up": 35, "reply": 80, "catch_up": 40}
+# The model sees this many of the conversation's sent messages (owner,
+# 2026-11-19: "you forget to catch up the same convo").
+HISTORY_MESSAGES = 20
+
+
+def catch_up_due(rows: list[dict], cfg, now: datetime) -> bool:
+    """A chat that went quiet after Harvey's last message, where they had
+    written before: due once catch_up_after_days have passed, at most
+    max_catch_ups times since their last message."""
+    sent = [m for m in rows if m["status"] == "sent" and m["kind"] != "alert"]
+    if not sent or sent[-1]["direction"] != "out":
+        return False
+    last_in = max((i for i, m in enumerate(sent) if m["direction"] == "in"), default=-1)
+    if last_in < 0:
+        return False           # they never wrote: the one follow-up covers that
+    since = sent[last_in + 1:]
+    if sum(m["kind"] == "catch_up" for m in since) >= getattr(cfg, "max_catch_ups", 2):
+        return False
+    last_at = _parse(sent[-1].get("sent_at"))
+    return bool(last_at) and now - last_at >= timedelta(days=getattr(cfg, "catch_up_after_days", 2))
 
 _EMOJI_RE = re.compile("[\U0001F1E6-\U0001F1FF\U0001F300-\U0001FAFF\u2600-\u27bf\ufe0f\u200d]")
 _DASH_RE = re.compile(r"[\u2013\u2014\u2015]|[ \t]-[ \t]")
@@ -511,7 +532,11 @@ class WhatsAppAgent:
         mine = await self.state.wa_messages(contact_id=contact["id"])
         ids = {m["wa_id"] for m in mine if m["wa_id"]}
         known_in = {clean_text(m["body"]) for m in mine if m["direction"] == "in"}
-        known_out = {clean_text(m["body"]) for m in mine if m["direction"] == "out"}
+        known_out = set()
+        for m in mine:
+            if m["direction"] == "out":
+                known_out.add(squash(m["body"]))
+                known_out.update(squash(p) for p in chat_parts(m["body"]))
         base = self.now() - timedelta(seconds=len(messages) + 1)
         new_in = 0
         for i, message in enumerate(messages):
@@ -528,8 +553,8 @@ class WhatsAppAgent:
                                                    status="sent", sent_at=at, wa_id=message.wa_id,
                                                    intent="escalate" if not message.text else ""):
                     new_in += 1
-            elif flat not in known_out:
-                known_out.add(flat)
+            elif squash(flat) not in known_out:
+                known_out.add(squash(flat))
                 await self.state.wa_add_message(contact["id"], direction="out", kind="reply", body=body,
                                                 status="sent", sent_at=at, wa_id=message.wa_id,
                                                 approved_by="you on WhatsApp")
@@ -780,6 +805,20 @@ class WhatsAppAgent:
             if body and await self.add_draft(contact, which, body):
                 room -= 1
                 first_room -= which == "first"
+        # Catch-ups: a chat that went quiet after Harvey's last message.
+        for contact in await self.state.wa_contacts(stages=("replied", "warm"), oldest_first=True):
+            if room <= 0 or not self._time_left() or self._brain_paused():
+                break
+            if await self.state.wa_pending_for(contact["id"]):
+                continue
+            history = await self.state.wa_messages(contact_id=contact["id"])
+            if not catch_up_due(history, self.cfg, now):
+                continue
+            if await stop_reason(self.state, self.config, contact):
+                continue
+            body = await self.draft(contact, "catch_up", history=history)
+            if body and await self.add_draft(contact, "catch_up", body):
+                room -= 1
 
     # ── Drafting ──
 
@@ -797,10 +836,11 @@ class WhatsAppAgent:
 
     def _history(self, history) -> str:
         out = []
-        for m in (history or [])[-12:]:
+        sent = [m for m in (history or []) if m["status"] == "sent" and m["body"]
+                and m["kind"] != "alert"]
+        for m in sent[-HISTORY_MESSAGES:]:
             who = "Them" if m["direction"] == "in" else "You"
-            if m["status"] == "sent" and m["body"]:
-                out.append(f"{who}: {m['body']}")
+            out.append(f"{who}: {m['body']}")
         return "\n\n".join(out)
 
     async def draft(self, contact: dict, which: str, intent: str = "", history=None,
@@ -833,19 +873,27 @@ class WhatsAppAgent:
                 booking = getattr(getattr(product, "offer", None), "meeting_link", "") or ""
             else:
                 booking = getattr(getattr(product, "offer", None), "booking_url", "") or ""
+        chat = (" Write it as one to three short messages separated by a blank line, like texts "
+                "sent one after another.")
         task = {
-            "first": ("Write the first message to this person. Say how we got their number, one useful "
-                      "thing from WHAT THEY TOLD US if there is one, and finish with the way out: reply "
-                      "no and I won't message again. No link, no price. Under 60 words."),
+            "first": ("Write the first message to this person. You may use their first name once here. "
+                      "Say how we got their number, one useful thing from WHAT THEY TOLD US if there is "
+                      "one, and finish with a friendly way out: if now's not a good time, just reply no "
+                      "and I'll leave it there. No link, no price. Under 60 words in all." + chat),
             "follow_up": ("They haven't answered the first message. Write the one follow-up: something "
-                          "useful or a different angle, no guilt, no \"bumping this\". No link, no "
-                          "price. Under 35 words."),
-            "reply": (f"They replied (read as: {intent}). Answer what they said, in their language. "
+                          "useful or a different angle, no guilt, no \"bumping this\". Don't use their "
+                          "name. No link, no price. Under 35 words in all." + chat),
+            "reply": (f"They replied (read as: {intent}). React to what they said first, then answer "
+                      "it, in their language, like a person texting. Don't use their name. "
                       + ("They asked to talk: the time and its link are below. " if slot_block
                          else f"They asked to talk: the booking link is {booking}. " if booking
                          else "No link. ")
                       + "No price, even if they ask. If they ask whether this is automated, say yes, "
-                        "honestly. Under 80 words."),
+                        "honestly. Under 80 words in all." + chat),
+            "catch_up": ("The chat went quiet after your last message. Pick it up where it stopped: "
+                         "something useful about what they were talking about, or a light, easy "
+                         "question about it. No guilt, no \"just checking in\", no \"bumping this\". "
+                         "Don't use their name. No link, no price. Under 40 words in all." + chat),
         }[which]
         prompt += f"\n\n{UNTRUSTED_RULE}\n\nWHAT WE KNOW:\n{fence(self._facts(contact), 'what they told us')}\n"
         if history and self._history(history):
@@ -862,6 +910,10 @@ class WhatsAppAgent:
                 continue
             if text.lower().startswith(("i can't", "i cannot", "as an ai", "sorry,")):
                 continue
+            # Their name once in a conversation, never again (owner, 2026-11-19).
+            first_name = (contact.get("name") or "").split(" ")[0]
+            text = strip_repeat_name(text, first_name, [
+                m["body"] for m in (history or []) if m["direction"] == "out" and m["status"] == "sent"])
             problem = draft_problem(which, text, booking)
             if not problem:
                 return text
@@ -896,7 +948,12 @@ class WhatsAppAgent:
         if contact["stage"] in ("declined", "no_whatsapp", "needs_review") or not contact.get("phone"):
             return f"they are {contact['stage']}"
         rows = await self.state.wa_messages(contact_id=contact["id"])
-        if item["kind"] != "reply":
+        if item["kind"] == "catch_up":
+            drafted = item.get("created_at") or ""
+            if any(m["direction"] == "in" and (m.get("sent_at") or m.get("created_at") or "") > drafted
+                   for m in rows):
+                return "they wrote after this was drafted"
+        elif item["kind"] != "reply":
             if any(m["direction"] == "in" for m in rows):
                 return "they wrote after this was drafted"
             if item["kind"] == "follow_up" and sum(
@@ -907,7 +964,7 @@ class WhatsAppAgent:
         return await stop_reason(self.state, self.config, contact, replying=item["kind"] == "reply")
 
     async def send_approved(self):
-        order = {ALERT_KIND: -1, "reply": 0, "follow_up": 1, "first": 2}
+        order = {ALERT_KIND: -1, "reply": 0, "follow_up": 1, "catch_up": 1, "first": 2}
         fresh = {c["id"] for c in await self.state.wa_contacts(stages=("queued",)) if self._fresh(c)}
         # Replies first, then someone who just chatted, then the rest in order.
         items = sorted(await self.state.wa_messages(statuses=("approved",), direction="out"),
@@ -993,6 +1050,10 @@ class WhatsAppAgent:
         else:
             self.report["maybe_sent"] += 1
         logger.warning(f"WhatsApp: a {item['kind']} wasn't confirmed: {detail or outcome}")
+        if item.get("kind") == ALERT_KIND:
+            # The owner's own update or alert: it never pauses messages to leads
+            # (live, 2026-11-18: three updates in a row did, overnight).
+            return
         failures = await self.state.increment_setting(guards.FAILED_KEY)
         if failures >= self.cfg.max_failed_sends_in_a_row:
             reason = (f"{failures} sends in a row didn't go through, which usually means WhatsApp "
@@ -1028,13 +1089,44 @@ class WhatsAppAgent:
             return "failed", "this chat already has messages, so a first message would be wrong; check it"
         if item["kind"] not in ("first", ALERT_KIND) and not messages:
             return "failed", "couldn't read the chat, so can't tell whether they replied"
+        # A lead's message goes as its parts, one message each, a few seconds
+        # apart (harvey/chat_style.py); your own alert goes whole.
+        pieces = [body] if alert else (chat_parts(body) or [body])
+        for i, piece in enumerate(pieces):
+            outcome, detail = await self._send_piece(contact, item, piece, alert=alert, first=i == 0)
+            if outcome == "sent":
+                if i < len(pieces) - 1:
+                    await self.driver.wait(self.rng.uniform(2.0, 5.0))
+                continue
+            if i == 0:
+                return outcome, detail
+            # Some of it went: never sent again, and you're told what went.
+            note = (f"sent {i} of {len(pieces)} messages, then: {detail or outcome}. Look at the chat "
+                    "on your phone: Harvey won't send this again.")
+            await self.state.wa_update_message(item["id"], status="maybe_sent", error=note[:300])
+            return "maybe_sent", note
+        sent_at = self.now()
+        await self.state.wa_mark_sent(item["id"], at=sent_at)
+        if item["kind"] == "first":
+            wait = self.rng.uniform(self.cfg.follow_up_min_days, self.cfg.follow_up_max_days)
+            await self.state.wa_update_contact(contact["id"], next_action_at=sent_at + timedelta(days=wait))
+        elif item["kind"] == "follow_up":
+            await self.state.wa_update_contact(contact["id"], next_action_at=None)
+        return "sent", ""
+
+    async def _send_piece(self, contact: dict, item: dict, text: str, *, alert: bool,
+                          first: bool) -> tuple[str, str]:
+        """Type one message, check the box holds it, press Enter, and wait for
+        the chat to show it: ("sent" | "failed" | "held" | "maybe_sent", why).
+        ``first``: the first piece of the item, which claims it before Enter."""
+        phone, name = contact["phone"], contact.get("name") or ""
         if clean_text(await self.driver.text_of(COMPOSER)):
             await self.driver.clear(COMPOSER)
             if clean_text(await self.driver.text_of(COMPOSER)):
                 return "failed", "the message box already held text that wouldn't clear"
-        if not await self.driver.type_text(COMPOSER, body):
+        if not await self.driver.type_text(COMPOSER, text):
             return "failed", "couldn't find the message box, so nothing was typed"
-        want = clean_text(body)
+        want = clean_text(text)
         if clean_text(await self.driver.text_of(COMPOSER)) != want:
             await self.driver.clear(COMPOSER)
             return "failed", "the message box didn't hold exactly the draft, so it wasn't sent"
@@ -1044,34 +1136,38 @@ class WhatsAppAgent:
             await self.driver.clear(COMPOSER)
             return "failed", "the open chat changed while typing, so nothing was sent"
         # A long alert shows collapsed behind "Read more": its opening is the proof.
-        # (A lead's message is short, and must show whole.)
-        seen_as = want[:ALERT_PROOF_CHARS] if alert else want
-        before = sum(1 for m in parse_messages(html) if m.direction == "out" and seen_as in clean_text(m.body))
-        # Typing takes half a minute. Stopped meanwhile: nothing goes, and it stays approved.
-        if await self._held():
-            await self.driver.clear(COMPOSER)
-            return "held", ""
-        # From here it may have gone: only a confirmed bubble clears maybe_sent.
-        if not await self.state.wa_claim(item["id"]):
-            await self.driver.clear(COMPOSER)
-            return "held", ""
+        # (A lead's message is short, and must show whole.) Spacing is ignored
+        # (chat_style.squash), and a new bubble is told by WhatsApp's own id for
+        # it: the chat only draws its latest messages, so counting bubbles with
+        # the same words fails when an older one scrolls out (live, 2026-11-18).
+        seen_as = squash(want[:ALERT_PROOF_CHARS] if alert else want)
+        earlier = [m for m in parse_messages(html) if m.direction == "out"]
+        before_ids = {m.wa_id for m in earlier if m.wa_id}
+        before = sum(1 for m in earlier if seen_as in squash(m.body))
+        if first:
+            # Typing takes half a minute. Stopped meanwhile: nothing goes, and it stays approved.
+            if await self._held():
+                await self.driver.clear(COMPOSER)
+                return "held", ""
+            # From here it may have gone: only a confirmed bubble clears maybe_sent.
+            if not await self.state.wa_claim(item["id"]):
+                await self.driver.clear(COMPOSER)
+                return "held", ""
         await self.driver.press_enter()
-        if not alert:
+        if first and not alert:
             await self.pacing.record(item["kind"])
         for _ in range(SEND_POLLS):
             await self.driver.wait(1.5)
             html = await self.driver.html()
             await self._guard(html)
             mine = [m for m in parse_messages(html) if m.direction == "out"]
-            shown = [m for m in mine if seen_as in clean_text(m.body)]
-            if mine and seen_as in clean_text(mine[-1].body) and not mine[-1].pending and len(shown) > before:
-                sent_at = self.now()
-                await self.state.wa_mark_sent(item["id"], at=sent_at)
-                if item["kind"] == "first":
-                    wait = self.rng.uniform(self.cfg.follow_up_min_days, self.cfg.follow_up_max_days)
-                    await self.state.wa_update_contact(contact["id"], next_action_at=sent_at + timedelta(days=wait))
-                elif item["kind"] == "follow_up":
-                    await self.state.wa_update_contact(contact["id"], next_action_at=None)
+            if not mine or mine[-1].pending or seen_as not in squash(mine[-1].body):
+                continue
+            last = mine[-1]
+            if last.wa_id:
+                if last.wa_id not in before_ids:
+                    return "sent", ""
+            elif sum(1 for m in mine if seen_as in squash(m.body)) > before:
                 return "sent", ""
         return "maybe_sent", "Enter was pressed but the chat didn't show the message"
 

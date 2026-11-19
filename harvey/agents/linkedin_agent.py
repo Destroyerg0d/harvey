@@ -34,6 +34,7 @@ from types import SimpleNamespace
 from harvey import channel_login
 from harvey.careers import CAREERS_APPROVED, JOB_SEEKER, NOT_A_CLIENT, careers_reply
 from harvey.kept_browser import KeptBrowser
+from harvey.chat_style import parts as chat_parts, squash, strip_repeat_name
 from harvey.meeting_alert import POSITIVE_INTENTS
 from harvey.meeting_slot import (
     asks_to_meet, chat_instead_block, declines_call, offer as meeting_offer, prompt_block,
@@ -70,6 +71,25 @@ PROFILE_KEY = "linkedin:profile:"
 PROFILE_FRESH = timedelta(days=14)
 ENABLED_KEY = "linkedin:enabled"
 NOTES_OFF_KEY = "linkedin:notes_unavailable_until"
+# The model sees this many of the conversation's sent messages.
+HISTORY_MESSAGES = 20
+
+
+def li_catch_up_due(rows: list[dict], cfg, now) -> bool:
+    """A conversation that went quiet after Harvey's last message, where they
+    had written before: due after catch_up_after_days, at most max_catch_ups
+    times since their last message (owner, 2026-11-19)."""
+    sent = [m for m in rows if m["status"] == "sent"]
+    if not sent or sent[-1]["direction"] != "out":
+        return False
+    last_in = max((i for i, m in enumerate(sent) if m["direction"] == "in"), default=-1)
+    if last_in < 0:
+        return False
+    since = sent[last_in + 1:]
+    if sum(m["kind"] == "catch_up" for m in since) >= getattr(cfg, "max_catch_ups", 2):
+        return False
+    last_at = _parse(sent[-1].get("sent_at"))
+    return bool(last_at) and now - last_at >= timedelta(days=getattr(cfg, "catch_up_after_days", 3))
 
 DECLINE_INTENTS = {"not_interested", "unsubscribe"}
 REPLY_INTENTS = {"interested", "question", "objection", "wrong_person"}
@@ -401,7 +421,13 @@ class LinkedInAgent:
         messages (the lead moves to replied) and any you sent by hand."""
         mine = await self.state.li_messages(lead_id=lead["id"])
         known_in = {clean_text(m["body"]) for m in mine if m["direction"] == "in"}
-        known_out = {clean_text(m["body"]) for m in mine if m["direction"] == "out"}
+        known_out = set()
+        for m in mine:
+            if m["direction"] == "out":
+                known_out.add(clean_text(m["body"]))
+                known_out.update(clean_text(p) for p in chat_parts(m["body"]))
+                known_out.add(squash(m["body"]))
+                known_out.update(squash(p) for p in chat_parts(m["body"]))
         base = self.now() - timedelta(seconds=len(thread.messages) + 1)
         new_in = 0
         for i, message in enumerate(thread.messages):
@@ -415,7 +441,7 @@ class LinkedInAgent:
                                                    body=message.body, status="sent",
                                                    sent_at=at, thread_url=url):
                     new_in += 1
-            elif message.sender and body not in known_out and not any(
+            elif message.sender and body not in known_out and squash(body) not in known_out and not any(
                     k.startswith(body[:60]) or body.startswith(k[:60]) for k in known_out if k):
                 known_out.add(body)
                 await self.state.li_add_message(lead["id"], direction="out", kind="reply",
@@ -904,6 +930,20 @@ class LinkedInAgent:
             body = await self.draft(lead, which, history=history)
             if body and await self.add_draft(lead, "message", body):
                 room -= 1
+        # Catch-ups: a conversation that went quiet after Harvey's last message.
+        for lead in await self.state.li_leads(stages=("replied", "warm")):
+            if room <= 0 or not self._time_left() or self._brain_paused():
+                break
+            if await self.state.li_pending_for(lead["id"]):
+                continue
+            history = await self.state.li_messages(lead_id=lead["id"])
+            if not li_catch_up_due(history, self.cfg, now):
+                continue
+            if await self.email_block(lead) or await said_no(self.state, self.config, lead):
+                continue
+            body = await self.draft(lead, "catch_up", history=history)
+            if body and await self.add_draft(lead, "catch_up", body):
+                room -= 1
 
     # ── 4. Invites ──
 
@@ -1102,11 +1142,11 @@ class LinkedInAgent:
 
     def _history(self, history) -> str:
         out = []
-        for m in (history or [])[-12:]:
+        sent = [m for m in (history or []) if m["status"] == "sent" and m["body"]]
+        for m in sent[-HISTORY_MESSAGES:]:
             who = "Them" if m["direction"] == "in" else "You"
             kind = " (connection note)" if m["kind"] == "invite_note" else ""
-            if m["status"] == "sent" and m["body"]:
-                out.append(f"{who}{kind}: {m['body']}")
+            out.append(f"{who}{kind}: {m['body']}")
         return "\n\n".join(out)
 
     async def draft(self, lead: dict, which: str, intent: str = "", history=None,
@@ -1143,17 +1183,26 @@ class LinkedInAgent:
                 slot = await self.meeting_slot(lead)
                 if slot is not None:
                     slot_block, booking = prompt_block(slot, self.config), ""
+        CHAT = (" Write it as one to three short messages separated by a blank line, like messages "
+                "sent one after another.")
         task = {
             "invite": (f"Write the note for a LinkedIn connection request to this person. At most "
                        f"{self.cfg.invite_note_max_chars} characters, one or two sentences, a reason to "
                        "connect that is about them. No pitch, no link, no question about a call."),
             "first": ("They accepted the connection request. Write the first message: value first, "
-                      "one specific, useful observation from the facts, and one easy question."),
+                      "one specific, useful observation from the facts, and one easy question. You may "
+                      "use their first name once here." + CHAT),
             "follow_up": ("They haven't answered the first message. Write one short follow-up, "
-                          "a different angle or something useful, no guilt, no \"bumping this\"."),
-            "reply": (f"They replied (read as: {intent}). Answer what they said. "
+                          "a different angle or something useful, no guilt, no \"bumping this\". "
+                          "Don't use their name." + CHAT),
+            "reply": (f"They replied (read as: {intent}). React to what they said first, then answer "
+                      "it, like a person messaging. Don't use their name. "
                       + (f"If they ask to talk, the booking link is {booking}. " if booking else "")
-                      + "If they ask whether this is automated, say yes, honestly."),
+                      + "If they ask whether this is automated, say yes, honestly." + CHAT),
+            "catch_up": ("The conversation went quiet after your last message. Pick it up where it "
+                         "stopped: something useful about what they were talking about, or a light, "
+                         "easy question about it. No guilt, no \"just checking in\", no \"bumping "
+                         "this\". Don't use their name. Under 40 words in all." + CHAT),
         }[which]
         profile = await self.research(lead) if which in ("first", "follow_up", "reply") else ""
         prompt += f"""
@@ -1186,6 +1235,11 @@ FACTS about them:
                 continue
             if text.lower().startswith(("i can't", "i cannot", "as an ai", "sorry,")):
                 continue
+            if which != "invite":
+                # Their name once in a conversation, never again (owner, 2026-11-19).
+                first_name = lead.get("first_name") or (lead.get("name") or "").split(" ")[0]
+                text = strip_repeat_name(text, first_name, [
+                    m["body"] for m in (history or []) if m["direction"] == "out" and m["status"] == "sent"])
             return text
         return ""
 
@@ -1215,7 +1269,7 @@ FACTS about them:
     # ── 5. Sending ──
 
     async def send_approved(self):
-        order = {"reply": 0, "message": 1, "invite_note": 2}
+        order = {"reply": 0, "message": 1, "catch_up": 1, "invite_note": 2}
         items = sorted(await self.state.li_messages(statuses=("approved",), direction="out"),
                        key=lambda m: (order.get(m["kind"], 3), m["created_at"] or ""))
         replies_any_time = bool(getattr(self.cfg, "replies_any_time", False))
@@ -1252,7 +1306,7 @@ FACTS about them:
                 if why:
                     await self.state.li_update_message(item["id"], status="skipped", error=why)
                     continue
-            if item["kind"] == "message" and (lead.get("last_inbound_at") or "") > (
+            if item["kind"] in ("message", "catch_up") and (lead.get("last_inbound_at") or "") > (
                     item["created_at"] or ""):
                 await self.state.li_update_message(
                     item["id"], status="skipped",
@@ -1314,33 +1368,23 @@ FACTS about them:
         html = await self._visit(link)
         if not recipient_confirmed(html, name):
             return False, f"the message window didn't show {name} as the recipient"
-        if item["kind"] == "message":
+        if item["kind"] in ("message", "catch_up"):
             thread = parse_thread(html)
             if any(names_match(m.sender, name) for m in thread.messages):
                 if await self.record_thread(lead, thread, self.driver.url):
                     return False, "they had written to you on LinkedIn; read it before sending this"
-        if not await self.driver.type_text(COMPOSER, body):
-            return False, "couldn't find the message box"
-        typed = clean_text(await self.driver.text_of(COMPOSER))
-        if typed != clean_text(body):
-            await self.driver.clear(COMPOSER)
-            return False, "the message box didn't hold exactly the draft, so it wasn't sent"
-        if await self._held():          # stopped while typing: it stays approved
-            await self.driver.clear(COMPOSER)
-            return False, ""
-        if not await self.driver.click(SEND_BUTTON):
-            await self.driver.clear(COMPOSER)
-            return False, "couldn't press Send"
-        want = clean_text(body)
-        for _ in range(6):
-            await self.driver.wait(1.5)
-            html = await self.driver.html()
-            await self._guard(html)
-            last = parse_thread(html).last()
-            if last and clean_text(last.body).startswith(want):
-                break
-        else:
-            return False, (MAYBE_SENT + "Send was pressed but the thread didn't show the message. "
+        # The draft goes as its parts, one message each, a few seconds apart
+        # (harvey/chat_style.py).
+        pieces = chat_parts(body) or [body]
+        for i, piece in enumerate(pieces):
+            if i:
+                await self.driver.wait(self.rng.uniform(2.0, 5.0))
+            ok, detail = await self._send_piece(piece, first=i == 0)
+            if ok:
+                continue
+            if i == 0:
+                return False, detail
+            return False, (MAYBE_SENT + f"Sent {i} of {len(pieces)} messages, then: {detail or 'stopped'}. "
                            "Check the conversation on LinkedIn before sending anything else.")
         sent_at = self.now()
         await self.state.li_mark_sent(item["id"], thread_url=self.driver.url, at=sent_at)
@@ -1348,6 +1392,33 @@ FACTS about them:
             wait = self.rng.uniform(self.cfg.follow_up_min_days, self.cfg.follow_up_max_days)
             await self.state.li_update_lead(lead["id"], next_action_at=sent_at + timedelta(days=wait))
         return True, ""
+
+    async def _send_piece(self, text: str, first: bool) -> tuple[bool, str]:
+        """Type one message in the open conversation, check the box holds it,
+        press Send, and wait for the thread to show it. ``first``: a stop
+        while typing leaves the whole item approved."""
+        if not await self.driver.type_text(COMPOSER, text):
+            return False, "couldn't find the message box"
+        typed = clean_text(await self.driver.text_of(COMPOSER))
+        if typed != clean_text(text):
+            await self.driver.clear(COMPOSER)
+            return False, "the message box didn't hold exactly the draft, so it wasn't sent"
+        if first and await self._held():          # stopped while typing: it stays approved
+            await self.driver.clear(COMPOSER)
+            return False, ""
+        if not await self.driver.click(SEND_BUTTON):
+            await self.driver.clear(COMPOSER)
+            return False, "couldn't press Send"
+        want = squash(text)
+        for _ in range(6):
+            await self.driver.wait(1.5)
+            html = await self.driver.html()
+            await self._guard(html)
+            last = parse_thread(html).last()
+            if last and squash(last.body).startswith(want):
+                return True, ""
+        return False, (MAYBE_SENT + "Send was pressed but the thread didn't show the message. "
+                       "Check the conversation on LinkedIn before sending anything else.")
 
     async def _open_connect(self, html: str) -> tuple[bool, str]:
         state = profile_connect_state(html)

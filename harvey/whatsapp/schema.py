@@ -11,7 +11,7 @@ STAGES = ("queued", "messaged", "replied", "warm", "meeting", "declined", "no_wh
 # harvey/meeting_alert.py). Never a lead: nothing is drafted to it, its chat
 # isn't read, and none of a lead's rules (hours, caps, replies) apply.
 OWNER_STAGE = "owner"
-MESSAGE_KINDS = ("first", "follow_up", "reply", "alert")
+MESSAGE_KINDS = ("first", "follow_up", "reply", "alert", "catch_up")
 # maybe_sent: Enter was pressed and the bubble couldn't be confirmed. Held for
 # the owner and never retried: a double message is worse than a missed one.
 MESSAGE_STATUSES = ("draft", "approved", "sent", "failed", "skipped", "maybe_sent")

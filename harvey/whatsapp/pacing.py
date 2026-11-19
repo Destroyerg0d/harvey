@@ -22,7 +22,7 @@ from harvey.whatsapp.numbers import digits_of
 COUNT_PREFIX = "whatsapp:count:"
 LINKED_AT_KEY = "whatsapp:linked_at"
 LINKED_NUMBER_KEY = "whatsapp:linked_number"
-KINDS = ("first", "follow_up", "reply")
+KINDS = ("first", "follow_up", "reply", "catch_up")
 NANP_SPAN = ("America/New_York", "America/Los_Angeles")
 
 

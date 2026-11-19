@@ -9,6 +9,17 @@ minor versions can still change behaviour.
 
 ### Added
 
+- **WhatsApp and LinkedIn chat like a person** (harvey/chat_style.py). A message is drafted as one
+  to three short messages separated by a blank line, and each goes out as its own message a few
+  seconds apart, each one confirmed in the chat; if one fails after others went, the item is
+  marked as may-have-gone with how many went, and never sent again. Their first name appears at
+  most once in a conversation: a reply or follow-up that opens with it has it taken off. The
+  prompts ask for a warmer, chattier voice that reacts to what they said, and the model now sees
+  the last 20 sent messages of the conversation (WhatsApp saw at most 12 rows of any status).
+- **Catch-ups when a chat goes quiet** (kind `catch_up`). When someone had replied, Harvey
+  answered, and nothing came back for `catch_up_after_days` (WhatsApp 2, LinkedIn 3), Harvey
+  drafts a short catch-up that picks the conversation up, at most `max_catch_ups` (2) times; never
+  to anyone who said no. Before, nothing was ever sent again once a conversation went quiet.
 - **LinkedIn finds new people to connect with, and tracks every day**
   (harvey/linkedin/finder.py, harvey/linkedin/daily.py). When fewer than two days of invites are
   waiting, Harvey searches the web (TinyFish, `TINYFISH_API_KEY`) for `site:linkedin.com/in`
@@ -745,6 +756,13 @@ minor versions can still change behaviour.
 
 ### Fixed
 
+- **A WhatsApp message that went could still read as not confirmed, and pause WhatsApp.** Two
+  causes, both seen live: an address or link in the message is drawn as its own element, so
+  reading the bubble back spaced it apart ("you@shop.example :") and the text no longer matched;
+  and a message with the same words as an earlier one was counted among the bubbles on screen,
+  which stops growing once older ones scroll out. The check now ignores spacing and tells a new
+  bubble by WhatsApp's own id for it. And the owner's own updates and alerts no longer count
+  towards the three-failures pause, which had stopped messages to leads overnight.
 - **A LinkedIn message naming the person's own website no longer waits for you.** The link check
   didn't know the lead's site (it only knew an email recipient's domain), so "saw your-shop.com"
   held the message. And the owner's own WhatsApp update no longer counts as "WhatsApp: 1 sent",

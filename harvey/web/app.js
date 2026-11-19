@@ -3683,7 +3683,7 @@ function chWarningsHtml(list) {
 // ── LinkedIn: invites, messages, follow-ups and replies ──
 
 let _li = null, _liEditing = null, _liArmed = false, _liBusy = false;
-const LI_KIND = {invite_note: 'Invite', message: 'Message', reply: 'Reply'};
+const LI_KIND = {invite_note: 'Invite', message: 'Message', reply: 'Reply', catch_up: 'Catch-up'};
 const LI_STAGE = {found: 'Found', invited: 'Invited', accepted: 'Accepted', messaged: 'Messaged',
   replied: 'Replied', warm: 'Warm', meeting: 'Meeting', declined: 'Declined', withdrawn: 'Withdrawn'};
 
@@ -4000,7 +4000,7 @@ async function liSetMode(mode) {
 // ── WhatsApp: first messages, one follow-up and replies (harvey/whatsapp/) ──
 
 let _wa = null, _waEditing = null, _waFixing = null, _waArmed = false, _waBusy = false;
-const WA_KIND = {first: 'First message', follow_up: 'Follow-up', reply: 'Reply',
+const WA_KIND = {first: 'First message', follow_up: 'Follow-up', reply: 'Reply', catch_up: 'Catch-up',
                  alert: 'Meeting alert to your phone'};
 const WA_STAGE = {queued: 'Queued', messaged: 'Messaged', replied: 'Replied', warm: 'Warm', meeting: 'Meeting',
   declined: 'Declined', no_whatsapp: 'Not on WhatsApp', needs_review: 'Check number'};
