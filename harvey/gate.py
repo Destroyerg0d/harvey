@@ -478,7 +478,8 @@ def _instruction_runs(root) -> dict[tuple, str]:
     return _leak_cache["runs"]
 
 
-def autopilot_review(subject: str, body: str, config, root=None, recipient: str = "") -> list[str]:
+def autopilot_review(subject: str, body: str, config, root=None, recipient: str = "",
+                     own_sites=()) -> list[str]:
     """Why an email nobody approved must wait for a human, or [] to send.
 
     Two things a planted instruction would try: point the reader somewhere
@@ -491,6 +492,12 @@ def autopilot_review(subject: str, body: str, config, root=None, recipient: str 
     allowed = allowed_link_domains(config)
     if "@" in (recipient or ""):
         allowed.add(_host(recipient.rsplit("@", 1)[1]))
+    # Their own website ("https://their-shop.com/"), where a channel knows it
+    # but has no address (LinkedIn): theirs too.
+    for site in own_sites or ():
+        host = (site or "").split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0]
+        if host:
+            allowed.add(_host(host))
     prefixes = _owner_link_prefixes(config)
     prefix = _booking_prefix(config)
     foreign = list(dict.fromkeys(

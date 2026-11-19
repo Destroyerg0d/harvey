@@ -541,6 +541,13 @@ class LinkedInAgent:
                     continue
                 hold.append(f"they said yes to the site review, and Harvey couldn't write it: "
                             f"{review.why}")
+                # Said once on Today and on your phone (harvey/needs_you.py, owner_updates).
+                try:
+                    await self.state.log_action("site_review", "linkedin", {
+                        "ok": False, "why": review.why, "channel": "linkedin",
+                        "name": lead.get("name") or lead.get("first_name") or ""})
+                except Exception:
+                    pass
             body = await self.draft(lead, "reply", intent=message["intent"], history=history,
                                     note=message.get("referral_note") or "")
             if body:
@@ -616,6 +623,17 @@ class LinkedInAgent:
         return await make_review(self.state, self.brain, self.config, getattr(self, "env", None),
                                  site=site, name=name, their_words=their_words, channel="linkedin")
 
+    async def _own_sites(self, lead: dict) -> tuple[str, ...]:
+        """The lead's own website, when known: a message may name it to them."""
+        try:
+            from harvey.site_review import site_for
+            prospect = (await self.state.get_prospect(lead["prospect_id"])
+                        if lead.get("prospect_id") else None)
+            site = await site_for(self.state, prospect=prospect, company_id=lead.get("company_id") or "")
+        except Exception:
+            return ()
+        return (site,) if site else ()
+
     async def add_review(self, lead: dict, body: str, thread_url: str = "") -> str | None:
         """A review waits for you, unless reviews autopilot is on (then the
         autopilot review for planted links still applies)."""
@@ -624,7 +642,7 @@ class LinkedInAgent:
         body = _clean_draft(tidy(body)) or body
         status, approved_by, error = "draft", "", HELD_FOR_REVIEW + HELD_REASON
         if await reviews_autopilot(self.state):
-            reasons = autopilot_review("", body, self.config)
+            reasons = autopilot_review("", body, self.config, own_sites=await self._own_sites(lead))
             if reasons:
                 error = HELD_FOR_REVIEW + "; ".join(reasons)
             else:
@@ -1072,7 +1090,9 @@ FACTS about them:
         status, approved_by, error = "draft", "", ""
         if not self.dry_run and await autopilot_on(self.state, self.config):
             from harvey.gate import autopilot_review
-            reasons = list(hold or []) + (autopilot_review("", body, self.config) if body else [])
+            reasons = list(hold or []) + (
+                autopilot_review("", body, self.config, own_sites=await self._own_sites(lead))
+                if body else [])
             if reasons:
                 error = HELD_FOR_REVIEW + "; ".join(reasons)
             else:

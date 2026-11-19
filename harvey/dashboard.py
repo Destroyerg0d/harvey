@@ -2770,6 +2770,11 @@ async def get_today():
         from harvey.whatsapp.web import today_items as whatsapp_today_items
         items.extend(await whatsapp_today_items(state))
 
+        # One item per site review waiting, promise not kept, message held and
+        # number to check (harvey/needs_you.py).
+        from harvey.needs_you import items as needs_you_items
+        items.extend(await needs_you_items(state))
+
         # Lessons from results waiting for you (harvey/lessons.py).
         from harvey.lessons import count_lessons, today_items as lesson_today_items
         items.extend(await lesson_today_items(state))

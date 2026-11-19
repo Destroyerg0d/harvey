@@ -91,8 +91,12 @@ def lines_for(rows: list[tuple[str, dict]]) -> list[str]:
         elif kind == "inbound_draft":
             line = f"Website lead {_who(d)}: follow-up written."
         elif kind == "site_review":
-            line = (f"Site review for {str(d.get('site') or '')[:_WHO]} written, waiting for you."
-                    if d.get("ok") else f"Couldn't write a site review for {str(d.get('site') or '')[:_WHO]}.")
+            what = str(d.get("site") or d.get("name") or "")[:_WHO]
+            line = (f"Site review for {what} written, waiting for you."
+                    if d.get("ok") else f"Couldn't write a site review for {what}"
+                    + (f" ({str(d.get('why'))[:80]})." if d.get("why") else "."))
+        elif kind == "needs_you":
+            line = f"Needs you: {str(d.get('title') or '')[:160]}"
         elif kind == "whatsapp_run":
             line = _channel_line("WhatsApp", d, (("sent", "sent", "sent"),
                                                  ("inbound", "reply in", "replies in")))

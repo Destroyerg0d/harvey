@@ -148,7 +148,9 @@ async def today_items(state) -> list[dict]:
                 "detail": "Enter was pressed but the chat didn't show it. Harvey won't send it again. "
                           "Check the chat on your phone and say whether it went.",
                 "action": "Open WhatsApp", "tab": "whatsapp"})
-        drafts = await state.wa_messages(statuses=("draft",), direction="out")
+        # Held ones are listed one by one (harvey/needs_you.py).
+        drafts = [m for m in await state.wa_messages(statuses=("draft",), direction="out")
+                  if not (m.get("error") or "").startswith(HELD_FOR_REVIEW)]
         if drafts:
             n = len(drafts)
             items.append({

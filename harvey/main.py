@@ -671,7 +671,11 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
 
             # 6b. A short update to your phone on what this cycle did
             # (harvey/owner_updates.py); in quiet hours it waits for the morning.
-            from harvey import owner_updates
+            from harvey import needs_you, owner_updates
+            try:
+                await needs_you.announce(state)
+            except Exception as e:
+                logger.warning(f"Needs you announce failed: {e}")
             await owner_updates.send(state, config, quiet=in_quiet_hours(config))
 
             # 7. Sleep until next heartbeat

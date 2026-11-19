@@ -9,6 +9,12 @@ minor versions can still change behaviour.
 
 ### Added
 
+- **Needs you names everything waiting on you** (harvey/needs_you.py). Today used to show LinkedIn
+  and WhatsApp drafts as counts and never named a site review waiting for approval or a write-up
+  Harvey had promised and not written. Each is now its own item, site reviews first: a review
+  waiting, a promise not kept and why (no website known), a LinkedIn or WhatsApp message held and
+  why, a WhatsApp number to check. Each new one is also said once in your WhatsApp update
+  (`needs_you` action). A LinkedIn review that can't be written is now logged, as email's is.
 - **`compliance.precleared.offer_packs: false`**: when the free checks run out, the Today page,
   `harvey status` and the log say only that the waiting emails go out after midnight UK time,
   with no pack to buy and no link. On by default, as before.
@@ -719,6 +725,10 @@ minor versions can still change behaviour.
 
 ### Fixed
 
+- **A LinkedIn message naming the person's own website no longer waits for you.** The link check
+  didn't know the lead's site (it only knew an email recipient's domain), so "saw your-shop.com"
+  held the message. And the owner's own WhatsApp update no longer counts as "WhatsApp: 1 sent",
+  which made another update.
 - **WhatsApp paused itself over the owner's own updates.** WhatsApp Web's message box turns a
   typed "- " at the start of a line into a bulleted list, so it never held an update ("Harvey
   update / - Sent 1 follow-up.") word for word, the send was refused, and three refusals in a row

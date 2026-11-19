@@ -144,7 +144,9 @@ async def today_items(state) -> list[dict]:
                 "detail": "Press Connect on the LinkedIn tab and sign in in the Chrome window that opens "
                           "on this PC.",
                 "action": "Open LinkedIn", "tab": "linkedin"})
-        drafts = await state.li_messages(statuses=("draft",), direction="out")
+        # Held ones are listed one by one (harvey/needs_you.py).
+        drafts = [m for m in await state.li_messages(statuses=("draft",), direction="out")
+                  if not (m.get("error") or "").startswith(HELD_FOR_REVIEW)]
         if drafts:
             n = len(drafts)
             items.append({

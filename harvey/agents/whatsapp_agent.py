@@ -972,7 +972,12 @@ class WhatsAppAgent:
 
     async def _after_send(self, contact: dict, item: dict, outcome: str, detail: str):
         if outcome == "sent":
-            self.report["sent"] += 1
+            if item.get("kind") == ALERT_KIND:
+                # The owner's own update or alert: counting it made "WhatsApp: 1
+                # sent." in the next update, which was then sent, and so on.
+                self.report["alerts"] = self.report.get("alerts", 0) + 1
+            else:
+                self.report["sent"] += 1
             await self.state.set_setting(guards.FAILED_KEY, "0")
             if item.get("approved_by") == CAREERS_APPROVED:
                 # Pointed to HR: nothing more from Harvey on WhatsApp.
