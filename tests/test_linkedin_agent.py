@@ -180,10 +180,10 @@ def test_config_autopilot_is_overridden_by_the_dashboard_switch(tmp_path):
     assert w.driver.sent == [] and len(w.msgs(lead, statuses=("draft",))) == 1
 
 
-def test_autopilot_holds_a_reply_to_are_you_a_bot(tmp_path):
+def test_autopilot_holds_a_reply_to_are_you_a_bot_that_dodges_it(tmp_path):
     w = World(tmp_path, [jane(thread=[(OWNER, "Jane, a first message."),
                                       ("Jane Doe", "Is this automated? Are you a bot?")])],
-              brain=FakeBrain(intent="question", text="Yes, I use an AI assistant to draft these."))
+              brain=FakeBrain(intent="question", text="Ha, good question. What made you ask?"))
     run(w.state.set_setting(AUTOPILOT_KEY, "on"))
     lead = w.lead("jane-doe-1", stage="messaged", name="Jane Doe")
     run(w.state.li_add_message(lead, body="Jane, a first message.", status="sent",
@@ -194,6 +194,21 @@ def test_autopilot_holds_a_reply_to_are_you_a_bot(tmp_path):
     assert replies[0]["error"].startswith(HELD_FOR_REVIEW) and "automated" in replies[0]["error"]
     assert w.driver.sent == []
     assert run(w.state.li_get_lead(lead))["stage"] == "replied"
+
+
+def test_an_honest_yes_to_are_you_a_bot_goes_on_its_own(tmp_path):
+    # Owner, 2026-11-20: "not waiting for approval". The honest answer goes.
+    w = World(tmp_path, [jane(thread=[(OWNER, "Jane, a first message."),
+                                      ("Jane Doe", "Is this automated? Are you a bot?")])],
+              brain=FakeBrain(intent="question", text="Yes, I use an AI assistant to draft these."))
+    run(w.state.set_setting(AUTOPILOT_KEY, "on"))
+    lead = w.lead("jane-doe-1", stage="messaged", name="Jane Doe")
+    run(w.state.li_add_message(lead, body="Jane, a first message.", status="sent",
+                               sent_at=naive(IN_HOURS) - timedelta(days=1)))
+    w.go()
+    replies = w.msgs(lead, kinds=("reply",), direction="out")
+    assert len(replies) == 1 and replies[0]["status"] == "sent"
+    assert w.driver.sent == [("jane-doe-1", "Yes, I use an AI assistant to draft these.")]
 
 
 def test_asks_if_automated():

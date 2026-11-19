@@ -170,10 +170,17 @@ async def find_people(state, config, key: str, wanted: int, client: httpx.AsyncC
                 report["skipped"] += 1
                 continue
             first = person["name"].split(" ")[0] if person["name"] else ""
-            await state.li_upsert_lead(
+            lead_id, _ = await state.li_upsert_lead(
                 person["slug"], stage="found", name=person["name"][:120], first_name=first[:60],
                 headline=person["headline"][:220], company=person["company"][:120],
                 profile_url=person["url"], source=SOURCE)
+            if person["location"] or person["headline"]:
+                # What the search saw, for when their profile page shows neither
+                # (LinkedInAgent._profile_cache, _invite_profile).
+                import json
+                from harvey.agents.linkedin_agent import FOUND_KEY
+                await state.set_setting(FOUND_KEY + lead_id, json.dumps(
+                    {"location": person["location"][:120], "headline": person["headline"][:220]}))
             report["added"] += 1
     await state.set_setting(CURSOR_KEY, str(cursor % max(1, len(plan))))
     return report

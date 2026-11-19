@@ -1125,6 +1125,43 @@ a.btn, a.btn:hover { text-decoration: none; }
 .li-why.bad { color: var(--bad); }
 .li-edit { width: 100%; }
 #li-convos .convo-card, #li-queue .convo-card { margin-bottom: var(--sp-3); }
+
+/* LinkedIn and WhatsApp: important things first, a line per conversation
+   (owner, 2026-11-20: "very long ... important things on top"). */
+.ch-list { display: flex; flex-direction: column; gap: 2px; margin-bottom: var(--sp-3); }
+.ch-list .convo-card { margin: var(--sp-2) 0; }
+.ch-row {
+  display: grid; grid-template-columns: minmax(0, 15rem) minmax(0, 1fr) auto; align-items: center;
+  gap: var(--sp-3); width: 100%; text-align: left; padding: 10px var(--sp-4); min-height: 44px;
+  background: var(--surface); border: 0; border-radius: var(--r-md); box-shadow: var(--shadow-border);
+  color: var(--text); font: inherit; font-size: var(--fs-ui); cursor: pointer;
+}
+.ch-row:hover { background: var(--surface-2); }
+.ch-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ch-row.needs { box-shadow: inset 3px 0 0 var(--wait), var(--shadow-border); }
+.ch-row-who { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ch-row-who .tag { font-weight: 400; }
+.ch-row-snip { color: var(--text-2); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ch-row-meta { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; font-size: var(--fs-caption); }
+.ch-going { margin-bottom: var(--sp-3); }
+.ch-going-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--sp-3); flex-wrap: wrap; }
+.ch-going-head > div { min-width: 0; flex: 1 1 260px; overflow-wrap: anywhere; }
+.ch-going-head .li-why { margin: 4px 0 0; }
+.ch-going-list { margin-top: var(--sp-3); }
+.ch-going-list .convo-card { margin-bottom: var(--sp-2); }
+.wa-checks { padding-top: var(--sp-2); padding-bottom: var(--sp-2); }
+.wa-check { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); flex-wrap: wrap; padding: var(--sp-2) 0; }
+.wa-check + .wa-check { border-top: 1px solid var(--line); }
+.wa-check-who { min-width: 0; flex: 1 1 280px; overflow-wrap: anywhere; font-size: var(--fs-ui); }
+.wa-check-who .li-why { margin: 2px 0 0; }
+.wa-check-actions { display: flex; gap: var(--sp-2); }
+.ch-details { margin-top: var(--sp-5); }
+.ch-details > summary { font-size: var(--fs-h3); font-weight: 600; padding: var(--sp-2) 0; }
+.ch-details > summary .hint { font-weight: 400; }
+@media (max-width: 760px) {
+  .ch-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .ch-row-snip { grid-column: 1 / -1; grid-row: 2; }
+}
 #li-due .figure .k { min-width: 0; overflow-wrap: anywhere; }
 #li-limits .figure .v { text-align: right; }
 

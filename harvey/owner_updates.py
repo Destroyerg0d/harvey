@@ -105,6 +105,10 @@ def lines_for(rows: list[tuple[str, dict]]) -> list[str]:
                     "messages and replies carry on.")
         elif kind == "needs_you":
             line = f"Needs you: {str(d.get('title') or '')[:160]}"
+        elif kind == "meeting_booked":
+            company = f" ({str(d.get('company'))[:_WHO]})" if d.get("company") else ""
+            line = (f"Meeting booked: {_who(d)}{company}, {str(d.get('time') or 'the time offered')[:120]}, "
+                    f"on {d.get('channel') or 'LinkedIn'}, on your Meet link.")
         elif kind == "whatsapp_run":
             line = _channel_line("WhatsApp", d, (("sent", "sent", "sent"),
                                                  ("inbound", "reply in", "replies in")))

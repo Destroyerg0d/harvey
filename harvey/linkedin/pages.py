@@ -365,12 +365,55 @@ def profile_summary(html: str, max_chars: int = 2500) -> str:
     return "\n".join(lines)[:max_chars]
 
 
+# The small lines under a name that aren't about them: the connection degree
+# and pronouns ("· 1st", "He/Him").
+_MARKER_RE = re.compile(
+    r"^(?:[·•]\s*)?(?:1st|2nd|3rd\+?|\d+(?:st|nd|rd|th))$|^(?:he|she|they)\s*/\s*\w+$", re.IGNORECASE)
+# Lines a profile's top shows in its first dozen or so: the name, markers, the
+# headline, the current company, the school ("· Some School") and the location.
+SUMMARY_TOP_LINES = 12
+# A school or university line names a city often ("San Diego State University").
+_SCHOOL_RE = re.compile(r"\b(?:university|universit[àéy]|college|school|institute|academy|"
+                        r"polytechnic|hochschule|universidad|universidade|università)\b", re.IGNORECASE)
+
+
+def _summary_lines(text: str) -> list[str]:
+    """The top of a profile summary (profile_summary), the name and the
+    degree and pronoun markers left out."""
+    lines = [line for line in (text or "").split("\n") if line.strip()]
+    return [line for line in lines[1:SUMMARY_TOP_LINES] if not _MARKER_RE.match(line.strip())]
+
+
+def summary_headline(text: str) -> str:
+    """The headline from a profile summary: the first line after the name
+    that is long enough to be one."""
+    for line in _summary_lines(text):
+        if 8 <= len(line) <= 220 and not line.startswith(("·", "•")):
+            return line
+    return ""
+
+
+def summary_location(text: str) -> str:
+    """The location from a profile summary: the first short line near the top
+    that names a country or a known metro, not the headline and not a school."""
+    from harvey.targeting import location_country
+    headline = summary_headline(text)
+    for line in _summary_lines(text):
+        if line == headline or len(line) > 90 or line.startswith(("·", "•")) or _SCHOOL_RE.search(line):
+            continue
+        if location_country(line):
+            return line
+    return ""
+
+
 def profile_headline(html: str) -> str:
-    """The line under their name in the profile's top card, or ""."""
+    """The line under their name in the profile's top card, or "". LinkedIn's
+    profile page has no ``h1`` any more (live, 2026-11-20): then the top of
+    the page's text is read (summary_headline)."""
     card = _top_card(soup_of(html))
     name = card.find("h1") if card is not None else None
     if name is None:
-        return ""
+        return summary_headline(profile_summary(html))
     for el in name.find_all_next(["div", "p", "span"], limit=12):
         text = clean_text(el.get_text(" "))
         if text and text != clean_text(name.get_text(" ")) and 8 <= len(text) <= 220:
@@ -381,12 +424,13 @@ def profile_headline(html: str) -> str:
 def profile_location(html: str) -> str:
     """The location line in the profile's top card ("Austin, Texas, United
     States", "Greater Sydney Area"), or "": the first short line after the name
-    that names a country or a known metro, the headline left out."""
+    that names a country or a known metro, the headline left out. With no
+    ``h1`` (LinkedIn's page today), the top of the page's text."""
     from harvey.targeting import location_country
     card = _top_card(soup_of(html))
     name = card.find("h1") if card is not None else None
     if name is None:
-        return ""
+        return summary_location(profile_summary(html))
     own, headline = clean_text(name.get_text(" ")), profile_headline(html)
     for el in name.find_all_next(["span", "div", "p"], limit=40):
         text = clean_text(el.get_text(" "))

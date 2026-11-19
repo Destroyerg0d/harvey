@@ -3380,7 +3380,7 @@ const CH_STATE = {
   not_connected: ['Not connected', 't-idle'], waiting: ['Waiting for you', 't-waiting'],
   connected: ['Connected', 't-good'], signed_out: ['Signed out', 't-bad'],
 };
-const CH_THREAD_TAIL = 6, CH_PAGE = 20;
+const CH_THREAD_TAIL = 6, CH_PAGE = 15;
 const _chArmed = {linkedin: false, whatsapp: false};
 const _chBusy = {linkedin: false, whatsapp: false};
 const _chPoll = {linkedin: null, whatsapp: null};
@@ -3390,12 +3390,79 @@ const _chOpen = new Set();      // conversations showing all their messages
 
 // Tags for a LinkedIn or WhatsApp conversation, like the email tab's filters:
 // from the latest reply's intent, the person's stage and any draft waiting.
-const _chTag = {linkedin: 'all', whatsapp: 'all'};
+const _chTag = {linkedin: 'reply', whatsapp: 'reply'};
+// Conversations opened from their one-line row, and the boxes opened on the tab
+// (what's waiting to go, what didn't go). Both survive every redraw.
+const _chExpanded = new Set(), _chBoxOpen = new Set();
+
+function chExpand(ch, id) {
+  if (_chExpanded.has(id)) _chExpanded.delete(id); else _chExpanded.add(id);
+  chDrawConvos(ch);
+}
+
+function chToggleBox(ch, key) {
+  if (_chBoxOpen.has(key)) _chBoxOpen.delete(key); else _chBoxOpen.add(key);
+  if (ch === 'linkedin') renderLinkedIn(_li); else renderWhatsApp(_wa);
+}
+
+// One line per conversation: who, the last message cut short, when. A click
+// opens the whole card (thread, draft, reply box).
+function chRowHtml(ch, id, who, stage, c) {
+  const last = (c.thread || [])[(c.thread || []).length - 1];
+  const snip = last ? (last.direction === 'out' ? 'You: ' : '') + String(last.body || '').replace(/\s+/g, ' ').slice(0, 110) : '';
+  const badges = chTagBadges(c) || (c.latest_in && c.latest_in.intent ? badge(c.latest_in.intent) : '');
+  return '<button type="button" class="ch-row' + (c.needs_reply ? ' needs' : '') + '" aria-expanded="false" ' +
+      'onclick="chExpand(' + jsq(ch) + ',' + jsq(id) + ')">' +
+    '<span class="ch-row-who">' + escHtml(who) + (stage ? ' <span class="tag">' + escHtml(stage) + '</span>' : '') + '</span>' +
+    '<span class="ch-row-snip">' + escHtml(snip) + '</span>' +
+    '<span class="ch-row-meta">' + badges + '<span class="muted">' + relTime(c.last_at) + '</span></span></button>';
+}
+
+function chCloseHtml(ch, id) {
+  return '<button class="btn btn-ghost btn-sm" onclick="chExpand(' + jsq(ch) + ',' + jsq(id) + ')">Close</button>';
+}
+
+// Approved and waiting, as one line with its reasons; the list on a click.
+function chGoingHtml(ch, approved, failed, itemsHtml, labels, empty, when) {
+  let html = '';
+  if (!approved.length) {
+    html += '<div class="card muted">' + empty + '</div>';
+  } else {
+    const counts = Object.entries(labels).map(([k, [one, many]]) => {
+      const n = approved.filter(m => (k === 'message' ? ['message', 'catch_up', 'first', 'follow_up'].includes(m.kind) : m.kind === k)).length;
+      return n ? mbxNum(n) + ' ' + (n === 1 ? one : many) : '';
+    }).filter(Boolean);
+    const why = {};
+    approved.forEach(m => { const e = String(m.error || ''); if (e.startsWith('waiting: ')) why[e.slice(9)] = (why[e.slice(9)] || 0) + 1; });
+    const reasons = Object.entries(why).sort((a, b) => b[1] - a[1]).slice(0, 2)
+      .map(([w, n]) => mbxNum(n) + ' wait: ' + escHtml(w)).join('; ');
+    const key = ch + '-going', open = _chBoxOpen.has(key);
+    html += '<div class="card ch-going"><div class="ch-going-head"><div><b>' + (counts.join(', ') || mbxNum(approved.length) + ' approved') +
+      '</b> approved. ' + when + (reasons ? '<p class="li-why">' + reasons + '</p>' : '') + '</div>' +
+      '<button class="btn btn-ghost btn-sm" onclick="chToggleBox(' + jsq(ch) + ',' + jsq(key) + ')">' + (open ? 'Hide' : 'Show them') + '</button></div>' +
+      (open ? '<div class="ch-going-list">' + itemsHtml(approved) + '</div>' : '') + '</div>';
+  }
+  if (failed.length) {
+    const key = ch + '-failed', open = _chBoxOpen.has(key);
+    html += '<div class="card ch-going"><div class="ch-going-head"><div><b>Didn’t go (' + mbxNum(failed.length) + ')</b> ' +
+      '<span class="muted">the latest per person, last 3 days. Retry or skip each.</span></div>' +
+      '<button class="btn btn-ghost btn-sm" onclick="chToggleBox(' + jsq(ch) + ',' + jsq(key) + ')">' + (open ? 'Hide' : 'Show them') + '</button></div>' +
+      (open ? '<div class="ch-going-list">' + itemsHtml(failed) + '</div>' : '') + '</div>';
+  }
+  return html;
+}
+
+function chKpi(label, value, note) {
+  return '<div class="kpi"><div class="kpi-label">' + label + '</div>' +
+    '<div class="kpi-main"><span class="kpi-value' + (String(value).startsWith('0') ? ' zero' : '') + '">' + value +
+    '</span></div><span class="kpi-note">' + note + '</span></div>';
+}
 const chIntent = c => ((c.latest_in || {}).intent || '').toLowerCase();
 const chStage = c => ((c.lead || c.contact || {}).stage || '').toLowerCase();
 const chOursLast = c => { const t = c.thread || []; return !t.length || t[t.length - 1].direction !== 'in'; };
 const CH_TAGS = [
   ['all', 'All', () => true],
+  ['reply', 'Needs a reply', c => !!c.needs_reply],
   ['needs', 'Needs you', c => (c.draft && c.draft.status === 'draft') || chIntent(c) === 'escalate' ||
     chStage(c) === 'needs_review'],
   ['interested', 'Interested', c => chIntent(c) === 'interested' || chStage(c) === 'warm'],
@@ -3635,7 +3702,8 @@ function chDrawConvos(ch) {
     });
   }
   const all = data.conversations || [];
-  const tag = CH_TAGS.find(t => t[0] === _chTag[ch]) || CH_TAGS[0];
+  let tag = CH_TAGS.find(t => t[0] === _chTag[ch]) || CH_TAGS[0];
+  if (tag[0] !== 'all' && !all.some(tag[2])) tag = CH_TAGS[0];     // nothing there: everyone
   const convos = all.filter(tag[2]);
   const bar = '<div class="toolbar"><div class="segmented" role="group" aria-label="Filter conversations">' +
     CH_TAGS.map(t => {
@@ -3644,7 +3712,8 @@ function chDrawConvos(ch) {
       return '<button class="' + (t[0] === tag[0] ? 'on' : '') + '" aria-pressed="' + (t[0] === tag[0]) +
         '" onclick="chSetTag(' + jsq(ch) + ',' + jsq(t[0]) + ')">' + t[1] + ' <span class="n">' + n + '</span></button>';
     }).join('') + '</div></div>';
-  liEl(id, bar + (ch === 'linkedin' ? liConvosHtml : waConvosHtml)(convos.slice(0, _chShown[ch])) + chMoreHtml(ch, convos.length));
+  liEl(id, bar + '<div class="ch-list">' + (ch === 'linkedin' ? liConvosHtml : waConvosHtml)(convos.slice(0, _chShown[ch])) +
+    '</div>' + chMoreHtml(ch, convos.length));
   Object.entries(kept).forEach(([key, value]) => {
     const t = document.getElementById(key);
     if (t && !t.disabled) t.value = value;
@@ -3714,9 +3783,15 @@ function renderLinkedIn(data) {
       ? '<button class="btn btn-secondary btn-sm" onclick="liPause(\'resume\')">Resume LinkedIn</button>'
       : '<button class="btn btn-danger btn-sm" onclick="liPause(\'pause\')">Pause LinkedIn</button>'));
   if (data.connection) chShow('linkedin', data.connection);
+  const q = data.queue || [];
   liEl('li-banner', liBannerHtml(data));
+  liEl('li-needs', liNeedsHtml(q.filter(m => m.status === 'draft' || m.maybe_sent), data));
   liEl('li-summary', liSummaryHtml(data));
-  liEl('li-queue', liQueueHtml(data.queue || []));
+  liEl('li-queue', chGoingHtml('linkedin', q.filter(m => m.status === 'approved'),
+    q.filter(m => m.status === 'failed' && !m.maybe_sent), liQueueHtml,
+    {invite_note: ['connect', 'connects'], message: ['message', 'messages'], reply: ['reply', 'replies']},
+    'Nothing approved and waiting. Harvey writes and sends as it goes.',
+    'They go on the next run, in LinkedIn hours and within the limits.'));
   chDrawConvos('linkedin');
   liEl('li-due', liDueHtml(data.follow_ups_due || []));
   liEl('li-chart', liChartHtml(data.chart || {}));
@@ -3733,28 +3808,32 @@ function liBannerHtml(d) {
       '<p>' + escHtml(d.pause.reason || '') + '. Nothing is read or sent on LinkedIn meanwhile. ' +
       'Look at the LinkedIn window before you resume.</p></div></div>';
   }
-  if (d.autopilot && d.enabled) {
-    return '<div class="banner wait">' + icon('alert') + '<div><b>LinkedIn autopilot is on</b>' +
-      '<p>Harvey sends what it writes on LinkedIn without asking. It still holds anything with a link that ' +
-      'isn’t yours, or a reply to someone asking whether this is automated.</p></div></div>';
-  }
-  return '';
+  return '';      // autopilot on or off shows under Today
+}
+
+// What needs you: held drafts (with why) and sends that may have gone. The
+// rest Harvey does itself.
+function liNeedsHtml(items, d) {
+  const marked = (d.conversations || []).filter(c => chIntent(c) === 'escalate' && !c.draft).length;
+  const flag = marked ? '<div class="card ch-going"><div class="ch-going-head"><div><b>' + mbxNum(marked) +
+      ' conversation' + (marked === 1 ? '' : 's') + ' marked for you</b> <span class="muted">Harvey won’t answer these itself.</span></div>' +
+      '<button class="btn btn-ghost btn-sm" onclick="chSetTag(\'linkedin\',\'needs\')">Show them</button></div></div>' : '';
+  if (!items.length) return flag || '<div class="card muted">Nothing needs you on LinkedIn right now.</div>';
+  return flag + liQueueHtml(items);
 }
 
 function liSummaryHtml(d) {
-  const u = d.used || {}, c = d.caps || {};
-  const card = (label, value, note) => '<div class="kpi"><div class="kpi-label">' + label + '</div>' +
-    '<div class="kpi-main"><span class="kpi-value' + (String(value).startsWith('0') ? ' zero' : '') + '">' + value +
-    '</span></div><span class="kpi-note">' + note + '</span></div>';
-  const last = d.last_run || {};
+  const u = d.used || {}, c = d.caps || {}, t = d.today || {}, last = d.last_run || {};
+  const ran = last.started ? mbxNum(last.sent_invites) + ' invites, ' + mbxNum(last.sent_messages) + ' messages' +
+    (last.found_people ? ', found ' + mbxNum(last.found_people) : '') + (last.off_target ? ', ' + mbxNum(last.off_target) + ' off target' : '') : 'not run yet';
   return '<div class="kpis mbx-kpis">' +
-    card('Invites today', mbxNum(u.invites_today) + '<small> / ' + mbxNum(c.invites_today) + '</small>',
-      '<b>' + mbxNum(u.invites_week) + '</b> of ' + mbxNum(c.invites_week) + ' this week') +
-    card('Messages today', mbxNum(u.messages_today) + '<small> / ' + mbxNum(c.messages_today) + '</small>',
-      'first messages, follow-ups and replies') +
-    card('Waiting for you', mbxNum(d.drafts_waiting), 'drafts to approve, edit or skip') +
-    card('Last run', last.started ? relTime(last.started) : '&ndash;',
-      d.running ? 'running now' : escHtml(last.outcome || 'not run yet')) +
+    chKpi('Connects today', mbxNum(t.sent !== undefined ? t.sent : u.invites_today) + '<small> / ' +
+      mbxNum(t.target || c.invites_today) + '</small>',
+      '<b>' + mbxNum(t.accepted) + '</b> accepted today · ' + mbxNum(t.week_sent) + ' sent this week') +
+    chKpi('Messages, last 24h', mbxNum(t.messages_24h), '<b>' + mbxNum(t.replies_24h) + '</b> of them replies') +
+    chKpi('To answer', mbxNum(t.needs_reply), '<b>' + mbxNum(t.meetings) + '</b> meetings booked') +
+    chKpi('Runs', d.running ? 'Running' : (last.started ? relTime(last.started) : '&ndash;'),
+      (d.autopilot ? 'autopilot on' : '<b>autopilot off</b>') + ' · every ' + mbxNum(d.next_run_minutes) + ' min · last: ' + ran) +
   '</div>';
 }
 
@@ -3810,6 +3889,10 @@ function liConvosHtml(convos) {
   if (!convos.length) return '<div class="card muted">No messages on LinkedIn yet.</div>';
   return convos.map(c => {
     const l = c.lead || {}, inbound = c.latest_in;
+    if (!_chExpanded.has(l.id)) {
+      return chRowHtml('linkedin', l.id, (l.name || l.first_name || 'Them') + (l.company ? ' · ' + l.company : ''),
+        own(LI_STAGE, l.stage) || l.stage || '', c);
+    }
     const thread = chThreadHtml('linkedin', l.id, c.thread || [], l.first_name || l.name || 'Them');
     const draft = c.draft ? '<div class="thread-draft"><div class="sender">' + icon('pen') + 'Reply ' +
       (c.draft.status === 'approved' ? 'approved, sends next run' : 'drafted, waiting for you') + '</div>' +
@@ -3823,7 +3906,7 @@ function liConvosHtml(convos) {
       '<div class="tags">' + (chTagBadges(c) || (inbound && inbound.intent ? badge(inbound.intent) : '')) + '</div></div>' +
       '<div class="thread">' + thread + draft + '</div>' +
       chReplyHtml('linkedin', l.id, c.reply_blocked, 'It goes through the queue, inside LinkedIn hours and the limits.') +
-      '<div class="convo-actions">' + stageBtns + '</div></div>';
+      '<div class="convo-actions">' + stageBtns + chCloseHtml('linkedin', l.id) + '</div></div>';
   }).join('');
 }
 
@@ -4029,10 +4112,16 @@ function renderWhatsApp(data) {
       ? '<button class="btn btn-secondary btn-sm" onclick="waPause(\'resume\')">Resume WhatsApp</button>'
       : '<button class="btn btn-danger btn-sm" onclick="waPause(\'pause\')">Stop WhatsApp now</button>'));
   if (data.connection) chShow('whatsapp', data.connection);
+  const q = data.queue || [];
   liEl('wa-banner', waBannerHtml(data));
+  liEl('wa-needs', waNeedsHtml(q.filter(m => m.status === 'draft' || m.status === 'maybe_sent'), data));
+  liEl('wa-review-wrap', waReviewHtml(data.review || [], []));
+  liEl('wa-stopped', waReviewHtml([], data.stopped || []));
   liEl('wa-summary', waSummaryHtml(data));
-  liEl('wa-queue', waQueueHtml(data.queue || []));
-  liEl('wa-review-wrap', waReviewHtml(data.review || [], data.stopped || []));
+  liEl('wa-queue', chGoingHtml('whatsapp', q.filter(m => m.status === 'approved'), q.filter(m => m.status === 'failed'),
+    waQueueHtml, {first: ['first message', 'first messages'], message: ['message', 'messages'], reply: ['reply', 'replies']},
+    'Nothing approved and waiting. Harvey writes and sends as it goes.',
+    'They go inside each person’s own daytime and within the limits.'));
   chDrawConvos('whatsapp');
   liEl('wa-due', waDueHtml(data.follow_ups_due || []));
   liEl('wa-funnel', waFunnelHtml(data.funnel || {}));
@@ -4048,32 +4137,26 @@ function waBannerHtml(d) {
       '<p>' + escHtml(d.pause.reason || '') + '. Nothing is read or sent on WhatsApp meanwhile. ' +
       'Look at the WhatsApp window and your phone before you resume.</p></div></div>';
   }
-  if (d.autopilot && d.enabled) {
-    return '<div class="banner wait">' + icon('alert') + '<div><b>WhatsApp autopilot is on</b>' +
-      '<p>Harvey sends what it writes on WhatsApp without asking, replies to real people included. It still ' +
-      'holds anything with a link that isn’t yours, or a reply to someone asking whether this is automated.</p></div></div>';
+  return '';      // autopilot on or off shows under Today
+}
+
+function waNeedsHtml(items, d) {
+  if (!items.length) {
+    return (d.review || []).length ? '' : '<div class="card muted">Nothing needs you on WhatsApp right now.</div>';
   }
-  return '';
+  return waQueueHtml(items);
 }
 
 function waSummaryHtml(d) {
-  const u = d.used || {}, c = d.caps || {};
-  const card = (label, value, note) => '<div class="kpi"><div class="kpi-label">' + label + '</div>' +
-    '<div class="kpi-main"><span class="kpi-value' + (String(value).startsWith('0') ? ' zero' : '') + '">' + value +
-    '</span></div><span class="kpi-note">' + note + '</span></div>';
-  const last = d.last_run || {};
+  const u = d.used || {}, c = d.caps || {}, t = d.today || {}, last = d.last_run || {};
   return '<div class="kpis mbx-kpis">' +
-    card('Phone', d.linked ? 'Linked' : 'Not linked',
-      (d.number ? '<b>' + escHtml(d.number) + '</b>' : 'no number set') +
-      (d.linked ? ' since ' + relTime(d.linked_at) : '')) +
-    card('First messages today', mbxNum(u.first_today) + '<small> / ' + waCap(c.first_today) + '</small>',
-      d.new_number ? 'new number: the low limit for ' + mbxNum(d.new_number_days) + ' days' : 'no ramp') +
-    card('All messages today', mbxNum(u.messages_today) + '<small> / ' + waCap(c.messages_today) + '</small>',
-      '<b>' + mbxNum(u.messages_hour) + '</b> this hour' + (waCap(c.messages_hour) === 'no cap' ? '' : ' of ' + waCap(c.messages_hour))) +
-    card('Waiting for you', mbxNum((d.drafts_waiting || 0) + (d.maybe_sent || 0)),
-      d.maybe_sent ? mbxNum(d.maybe_sent) + ' may have gone out' : 'drafts to approve, edit or skip') +
-    card('Last run', last.started ? relTime(last.started) : '&ndash;',
-      d.running ? 'running now' : escHtml(last.outcome || 'not run yet')) +
+    chKpi('Messages, last 24h', mbxNum(t.messages_24h),
+      '<b>' + mbxNum(t.replies_24h) + '</b> replies · first messages today ' + mbxNum(u.first_today) + ' / ' + waCap(c.first_today)) +
+    chKpi('To answer', mbxNum(t.needs_reply), '<b>' + mbxNum(t.meetings) + '</b> meetings booked') +
+    chKpi('Phone', d.linked ? 'Linked' : 'Not linked',
+      (d.number ? '<b>' + escHtml(d.number) + '</b>' : 'no number set') + (d.linked ? ' since ' + relTime(d.linked_at) : '')) +
+    chKpi('Runs', d.running ? 'Running' : (last.started ? relTime(last.started) : '&ndash;'),
+      (d.autopilot ? 'autopilot on' : '<b>autopilot off</b>') + ' · last: ' + (last.started ? mbxNum(last.sent) + ' sent' : 'not run yet')) +
   '</div>';
 }
 
@@ -4133,21 +4216,21 @@ function waReviewHtml(review, stopped) {
   if (review.length) {
     html += '<div class="subhead">Numbers to check <span class="hint">the country code couldn’t be established, ' +
       'and Harvey never guesses: a wrong guess messages a stranger</span></div>' +
-      review.map(c => {
+      // One row each (owner, 2026-11-20: the tab was very long).
+      '<div class="card wa-checks">' + review.map(c => {
         const id = jsq(c.id);
         const fixing = _waFixing === c.id;
-        return '<div class="convo-card li-item"><div class="convo-head"><div><h3>' + escHtml(c.name || 'No name') +
-          ' <span class="muted">· ' + escHtml(c.raw_phone || '') + '</span></h3><div class="sub">They gave it: ' +
-          escHtml(c.source || '') + '</div></div></div>' +
-          '<p class="li-why">' + escHtml(c.review_reason || '') + '</p>' +
+        return '<div class="wa-check"><div class="wa-check-who"><b>' + escHtml(c.name || 'No name') + '</b> ' +
+          '<span class="muted">' + escHtml(c.raw_phone || '') + ' · they gave it: ' + escHtml(c.source || '') + '</span>' +
+          '<p class="li-why">' + escHtml(c.review_reason || '') + '</p></div>' +
           (fixing ? '<div class="convo-actions mode-confirm"><input class="form-input" id="wa-fix-' + escHtml(c.id) +
               '" placeholder="The number with its + country code" autocomplete="off">' +
               '<button class="btn btn-primary btn-sm" onclick="waFixSave(' + id + ')">Save</button>' +
               '<button class="btn btn-ghost btn-sm" onclick="waFixCancel()">Cancel</button></div>'
-            : '<div class="convo-actions"><button class="btn btn-secondary btn-sm" onclick="waFix(' + id + ')">Fix the number</button>' +
+            : '<div class="wa-check-actions"><button class="btn btn-secondary btn-sm" onclick="waFix(' + id + ')">Fix the number</button>' +
               '<button class="btn btn-ghost btn-sm" onclick="waStage(' + id + ',\'declined\',true)">Drop it</button></div>') +
           '</div>';
-      }).join('');
+      }).join('') + '</div>';
   }
   if (stopped.length) {
     html += '<div class="subhead">Held by another channel <span class="hint">Harvey won’t message these while this stands</span></div>' +
@@ -4162,6 +4245,9 @@ function waConvosHtml(convos) {
   if (!convos.length) return '<div class="card muted">No messages on WhatsApp yet.</div>';
   return convos.map(c => {
     const l = c.contact || {}, inbound = c.latest_in;
+    if (!_chExpanded.has(l.id)) {
+      return chRowHtml('whatsapp', l.id, l.name || l.phone || l.raw_phone || 'Them', own(WA_STAGE, l.stage) || l.stage || '', c);
+    }
     const first = (l.name || '').split(' ')[0];
     const thread = chThreadHtml('whatsapp', l.id, c.thread || [], first || 'Them');
     const draft = c.draft ? '<div class="thread-draft"><div class="sender">' + icon('pen') + 'Reply ' +
@@ -4177,7 +4263,7 @@ function waConvosHtml(convos) {
       '<div class="thread">' + thread + draft + '</div>' +
       chReplyHtml('whatsapp', l.id, c.reply_blocked,
         'Under 80 words, no price, emoji or dash. It goes through the queue, inside their hours and the limits.') +
-      '<div class="convo-actions">' + stageBtns + '</div></div>';
+      '<div class="convo-actions">' + stageBtns + chCloseHtml('whatsapp', l.id) + '</div></div>';
   }).join('');
 }
 
@@ -4239,6 +4325,8 @@ function waLimitsHtml(d) {
     row('Last run', last.started ? formatDate(last.started) : '&ndash;') +
     (last.outcome ? row('Outcome', escHtml(last.outcome)) : '') +
     (last.started ? row('Sent last run', mbxNum(last.sent)) : '') +
+    row('Updates to your phone', d.updates_to_you ? (d.updates_to_you.last_sent ? 'last sent ' + relTime(d.updates_to_you.last_sent) : 'none sent yet') +
+      ' · ' + mbxNum(d.updates_to_you.sent_24h) + ' in 24h' + (d.updates_to_you.not_sent_24h ? ', ' + mbxNum(d.updates_to_you.not_sent_24h) + ' didn’t go' : '') : '&ndash;') +
   '</div>';
 }
 

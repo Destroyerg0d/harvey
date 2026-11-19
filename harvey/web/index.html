@@ -349,31 +349,42 @@
   </div>
   <div id="li-connection"></div>
   <div id="li-banner"></div>
+
+  <!-- Important things first (owner, 2026-11-20): what needs you, today, the
+       conversations to answer; what's waiting to go; the rest under Details. -->
+  <div class="subhead">Needs you <span class="hint">only what Harvey can't do on its own</span></div>
+  <div id="li-needs"></div>
+
+  <div class="subhead">Today</div>
   <div id="li-summary"></div>
 
-  <div class="subhead">Queue <span class="hint">drafts to approve, approved items waiting to send, and failed sends</span></div>
+  <div class="subhead">Conversations <span class="hint">the ones waiting for an answer first; click one to open it</span></div>
+  <div id="li-convos"></div>
+
+  <div class="subhead">Waiting to go</div>
   <div id="li-queue"></div>
 
-  <div class="grid-main mbx-lower">
-    <div>
-      <div class="subhead">Conversations <span class="hint">everyone a message has passed between, with the whole history</span></div>
-      <div id="li-convos"></div>
-      <div class="subhead">Follow-ups due</div>
-      <div id="li-due"></div>
-      <div class="subhead">Last 14 days <span class="hint">invites and messages sent, replies received</span></div>
-      <div class="card" id="li-chart"></div>
+  <details class="ch-details">
+    <summary>Details <span class="hint">follow-ups due, the last 14 days, funnel, limits, warnings, autopilot</span></summary>
+    <div class="grid-main mbx-lower">
+      <div>
+        <div class="subhead">Follow-ups due</div>
+        <div id="li-due"></div>
+        <div class="subhead">Last 14 days <span class="hint">invites and messages sent, replies received</span></div>
+        <div class="card" id="li-chart"></div>
+      </div>
+      <aside>
+        <div class="subhead">Funnel</div>
+        <div class="card" id="li-funnel"></div>
+        <div class="subhead">Limits and runs</div>
+        <div class="card" id="li-limits"></div>
+        <div class="subhead">Warnings and pauses</div>
+        <div class="card" id="li-warnings"></div>
+        <div class="subhead">Autopilot</div>
+        <div id="li-mode"></div>
+      </aside>
     </div>
-    <aside>
-      <div class="subhead">Funnel</div>
-      <div class="card" id="li-funnel"></div>
-      <div class="subhead">Limits and runs</div>
-      <div class="card" id="li-limits"></div>
-      <div class="subhead">Warnings and pauses</div>
-      <div class="card" id="li-warnings"></div>
-      <div class="subhead">Autopilot</div>
-      <div id="li-mode"></div>
-    </aside>
-  </div>
+  </details>
 </div>
 
 <!-- WhatsApp: first messages, one follow-up and replies (harvey/whatsapp/) -->
@@ -389,53 +400,62 @@
   </div>
   <div id="wa-connection"></div>
   <div id="wa-banner"></div>
-  <div id="wa-summary"></div>
 
-  <div class="subhead">Queue <span class="hint">drafts to approve, approved items waiting to send, and sends that need you</span></div>
-  <div id="wa-queue"></div>
-
-  <div class="subhead">Add a contact <span class="hint">one person who gave you their number themselves. There is no list upload, on purpose.</span></div>
-  <div class="card add-contact">
-    <div class="form-row">
-      <div class="form-group">
-        <label class="form-label" for="wa-add-phone">Phone, with its + and country code</label>
-        <input class="form-input" id="wa-add-phone" type="tel" autocomplete="off" placeholder="+14155550100">
-      </div>
-      <div class="form-group">
-        <label class="form-label" for="wa-add-name">Name</label>
-        <input class="form-input" id="wa-add-name" type="text" autocomplete="off" placeholder="Jane Doe">
-      </div>
-      <div class="form-group">
-        <label class="form-label" for="wa-add-source">Where they gave you the number</label>
-        <input class="form-input" id="wa-add-source" type="text" autocomplete="off" placeholder="Website contact form">
-      </div>
-      <div class="form-group add-contact-go">
-        <button class="btn btn-primary" onclick="waAddContact(this)">Add to the queue</button>
-      </div>
-    </div>
-    <p class="add-contact-result" id="wa-add-result" role="status"></p>
-  </div>
-
+  <!-- Important things first (owner, 2026-11-20), as on the LinkedIn tab. -->
+  <div class="subhead">Needs you <span class="hint">only what Harvey can't do on its own</span></div>
+  <div id="wa-needs"></div>
   <div id="wa-review-wrap"></div>
 
-  <div class="grid-main mbx-lower">
-    <div>
-      <div class="subhead">Conversations <span class="hint">everyone a message has passed between, with the whole history</span></div>
-      <div id="wa-convos"></div>
-      <div class="subhead">Follow-ups due</div>
-      <div id="wa-due"></div>
+  <div class="subhead">Today</div>
+  <div id="wa-summary"></div>
+
+  <div class="subhead">Conversations <span class="hint">the ones waiting for an answer first; click one to open it</span></div>
+  <div id="wa-convos"></div>
+
+  <div class="subhead">Waiting to go</div>
+  <div id="wa-queue"></div>
+
+  <details class="ch-details">
+    <summary>Details <span class="hint">add a contact, follow-ups due, funnel, limits, warnings, autopilot</span></summary>
+    <div class="subhead">Add a contact <span class="hint">one person who gave you their number themselves. There is no list upload, on purpose.</span></div>
+    <div class="card add-contact">
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label" for="wa-add-phone">Phone, with its + and country code</label>
+          <input class="form-input" id="wa-add-phone" type="tel" autocomplete="off" placeholder="+14155550100">
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="wa-add-name">Name</label>
+          <input class="form-input" id="wa-add-name" type="text" autocomplete="off" placeholder="Jane Doe">
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="wa-add-source">Where they gave you the number</label>
+          <input class="form-input" id="wa-add-source" type="text" autocomplete="off" placeholder="Website contact form">
+        </div>
+        <div class="form-group add-contact-go">
+          <button class="btn btn-primary" onclick="waAddContact(this)">Add to the queue</button>
+        </div>
+      </div>
+      <p class="add-contact-result" id="wa-add-result" role="status"></p>
     </div>
-    <aside>
-      <div class="subhead">Funnel</div>
-      <div class="card" id="wa-funnel"></div>
-      <div class="subhead">Limits and runs</div>
-      <div class="card" id="wa-limits"></div>
-      <div class="subhead">Warnings and pauses</div>
-      <div class="card" id="wa-warnings"></div>
-      <div class="subhead">Autopilot</div>
-      <div id="wa-mode"></div>
-    </aside>
-  </div>
+    <div class="grid-main mbx-lower">
+      <div>
+        <div class="subhead">Follow-ups due</div>
+        <div id="wa-due"></div>
+        <div id="wa-stopped"></div>
+      </div>
+      <aside>
+        <div class="subhead">Funnel</div>
+        <div class="card" id="wa-funnel"></div>
+        <div class="subhead">Limits and runs</div>
+        <div class="card" id="wa-limits"></div>
+        <div class="subhead">Warnings and pauses</div>
+        <div class="card" id="wa-warnings"></div>
+        <div class="subhead">Autopilot</div>
+        <div id="wa-mode"></div>
+      </aside>
+    </div>
+  </details>
 </div>
 
 <!-- Learning: lessons from results, for you to approve (harvey/lessons.py) -->

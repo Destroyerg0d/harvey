@@ -247,18 +247,26 @@ async def linkedin_overview(tz: int = 0):
         for m in await state.li_messages(limit=100000):
             messages.setdefault(m["lead_id"], []).append(m)
 
-        queue = []
-        for m in await state.li_messages(statuses=("draft", "approved", "failed"), direction="out",
-                                         limit=500):
-            # Failed sends older than two weeks drop off, unless one may have gone out.
-            stale = (m.get("created_at") or "") < (now - timedelta(days=14)).isoformat()
-            if m["status"] == "failed" and stale and not (m["error"] or "").startswith(MAYBE_SENT):
-                continue
+        # What's waiting, only (owner, 2026-11-20: "so many messages showing in
+        # queue, not needed"): drafts, approved items, and of the failed sends
+        # only the latest per person from the last 3 days, unless one may have
+        # gone out.
+        queue, failed_seen = [], set()
+        recent = (now - timedelta(days=3)).isoformat()
+        rows_out = await state.li_messages(statuses=("draft", "approved", "failed"), direction="out",
+                                           limit=5000)
+        for m in reversed(rows_out):                   # newest first, for "latest per person"
+            maybe = (m["error"] or "").startswith(MAYBE_SENT)
+            if m["status"] == "failed" and not maybe:
+                if (m.get("created_at") or "") < recent or m["lead_id"] in failed_seen:
+                    continue
+                failed_seen.add(m["lead_id"])
             queue.append({**{k: m[k] for k in ("id", "kind", "body", "status", "error", "created_at",
                                                "approved_by")},
                           "held": (m["error"] or "").startswith(HELD_FOR_REVIEW),
-                          "maybe_sent": (m["error"] or "").startswith(MAYBE_SENT),
+                          "maybe_sent": maybe,
                           "lead": _lead_view(by_id.get(m["lead_id"]))})
+        queue.reverse()
 
         # Everyone a message has actually passed between: all of them, each with
         # the whole history. An invite on its own isn't a conversation yet.
@@ -273,7 +281,11 @@ async def linkedin_overview(tz: int = 0):
             inbound = [m for m in rows if m["direction"] == "in"]
             draft = next((m for m in reversed(rows) if m["direction"] == "out"
                           and m["kind"] == "reply" and m["status"] in ("draft", "approved")), None)
+            spoken_rows = [m for m in thread if m["kind"] != "invite_note" and m["status"] == "sent"]
+            needs_reply = bool(spoken_rows) and spoken_rows[-1]["direction"] == "in" and lead["stage"] != "declined"
             conversations.append({
+                "needs_reply": needs_reply,
+                "rank": 0 if needs_reply else 1 if lead["stage"] in ("warm", "meeting") else 2,
                 "lead": _lead_view(lead),
                 "latest_in": ({"body": inbound[-1]["body"], "intent": inbound[-1]["intent"],
                                "at": inbound[-1]["sent_at"] or inbound[-1]["created_at"]}
@@ -284,7 +296,20 @@ async def linkedin_overview(tz: int = 0):
                 "last_at": max([m["at"] or "" for m in thread] + [lead.get("last_inbound_at") or ""]),
                 "reply_blocked": await _reply_block(state, config, lead, rows, entries),
             })
+        # Hot first: they wrote last and it isn't answered, then warm and meetings.
         conversations.sort(key=lambda c: c["last_at"], reverse=True)
+        conversations.sort(key=lambda c: c["rank"])
+        from harvey.linkedin.daily import numbers
+        today = await numbers(state, config)
+        sent_today = await state._li_query(
+            "SELECT kind, COUNT(*) AS n FROM linkedin_messages WHERE direction = 'out' AND status = 'sent' "
+            "AND kind != 'invite_note' AND sent_at >= ? GROUP BY kind",
+            ((now - timedelta(hours=24)).isoformat(),))
+        by_kind = {r["kind"]: r["n"] for r in sent_today}
+        today.update({"replies_24h": int(by_kind.get("reply", 0)),
+                      "messages_24h": sum(int(v) for v in by_kind.values()),
+                      "needs_reply": sum(1 for c in conversations if c["needs_reply"]),
+                      "meetings": sum(1 for lead in leads if lead["stage"] == "meeting")})
 
         override = (await state.get_setting(AUTOPILOT_KEY) or "").strip().lower()
         connection = await _connection(state, config)
@@ -304,6 +329,8 @@ async def linkedin_overview(tz: int = 0):
             "funnel": await state.li_funnel(),
             "queue": queue,
             "drafts_waiting": sum(1 for q in queue if q["status"] == "draft"),
+            "today": today,
+            "next_run_minutes": cfg.run_every_minutes,
             "conversations": conversations,
             "follow_ups_due": _due_follow_ups(leads, messages, cfg, now),
             "chart": await state.li_daily_activity(14, tz),

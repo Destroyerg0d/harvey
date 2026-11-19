@@ -37,7 +37,9 @@ from harvey.kept_browser import KeptBrowser
 from harvey.chat_style import parts as chat_parts, squash, strip_repeat_name
 from harvey.meeting_alert import POSITIVE_INTENTS
 from harvey.meeting_slot import (
-    asks_to_meet, chat_instead_block, declines_call, offer as meeting_offer, prompt_block,
+    asks_to_meet, chat_instead_block, confirm_block, confirms_slot, declines_call,
+    offer as meeting_offer, offered as offered_slot, offered_link_in, prompt_block, remember_offer,
+    still_ahead, wants_next_step,
 )
 from harvey.site_review import HELD_REASON as REVIEW_HELD_REASON, REVIEW_AUTOPILOT, reviews_autopilot
 from harvey.linkedin import guards
@@ -49,7 +51,7 @@ from harvey.linkedin.pages import (
     names_match, note_limit_reached, parse_connections, parse_conversation_list,
     parse_sent_invitations, parse_thread, profile_connect_state, profile_headline, profile_location, profile_summary,
     profile_url,
-    recipient_confirmed, signed_in_from,
+    recipient_confirmed, signed_in_from, summary_headline, summary_location,
 )
 from harvey.linkedin.store import HELD_FOR_REVIEW, MAYBE_SENT, _iso
 from harvey.untrusted import UNTRUSTED_RULE, fence
@@ -73,6 +75,15 @@ ENABLED_KEY = "linkedin:enabled"
 NOTES_OFF_KEY = "linkedin:notes_unavailable_until"
 # The model sees this many of the conversation's sent messages.
 HISTORY_MESSAGES = 20
+# What the web search said about someone it found (harvey/linkedin/finder.py):
+# their location and headline, for when their profile page shows neither.
+FOUND_KEY = "linkedin:found:"
+# Once: people set aside only because their profile couldn't be read get
+# another go, now that it can be (2026-11-20).
+RETRY_UNREAD_KEY = "linkedin:retry_unread:2026-11-20"
+UNREAD_REASONS = ("not invited: their country couldn't be read", "not invited: their role couldn't be read")
+# Why an approved item didn't go this run, written on it (never silent).
+WAITING = "waiting: "
 
 
 def li_catch_up_due(rows: list[dict], cfg, now) -> bool:
@@ -108,6 +119,21 @@ _AUTOMATION_RE = re.compile(
 
 def asks_if_automated(text: str) -> bool:
     return bool(_AUTOMATION_RE.search(text or ""))
+
+
+_HONEST_YES_RE = re.compile(r"\b(?:yes|yeah|yep|yup|it is|i do|correct|that's right|true)\b", re.IGNORECASE)
+_AI_WORD_RE = re.compile(r"\b(?:ai|a\.i\.|assistant|automat\w*|bot)\b", re.IGNORECASE)
+_DENIES_RE = re.compile(
+    r"\b(?:not (?:a )?(?:bot|an? ai|automated)|i'?m (?:a )?(?:real|human)(?! person who)|"
+    r"100% (?:human|me)|no ai|written by me alone)\b", re.IGNORECASE)
+
+
+def answers_automation_honestly(body: str) -> bool:
+    """A reply to "is this automated?" that says yes, plainly: a yes and the
+    AI or the assistant named, and no denial. Such a reply goes on its own
+    (owner, 2026-11-20: "not waiting for approval"); any other waits for you."""
+    text = (body or "").replace("’", "'")
+    return bool(_HONEST_YES_RE.search(text) and _AI_WORD_RE.search(text)) and not _DENIES_RE.search(text)
 
 
 def _utcnow() -> datetime:
@@ -218,6 +244,8 @@ class LinkedInAgent:
         self.deadline = None
         self.report: dict = {}
         self._failed_leads: set[str] = set()
+        self._waiting: dict[str, int] = {}
+        self._in_break = False
 
     def now(self) -> datetime:
         """Naive UTC, as stored."""
@@ -273,6 +301,7 @@ class LinkedInAgent:
         self.dry_run = dry_run
         self.replies_only = replies_only
         self._failed_leads = set()
+        self._waiting = {}
         started = self.now()
         self.deadline = started + timedelta(
             minutes=INBOX_CHECK_MINUTES if replies_only else self.cfg.max_run_minutes)
@@ -281,10 +310,11 @@ class LinkedInAgent:
                        "invite_drafts": 0, "sent_messages": 0, "sent_invites": 0, "failed": 0,
                        "would_send": []}
         await self.state.set_setting(RUNNING_KEY, _iso(started))
-        if replies_only:
-            # A check between full runs: it doesn't push the next full run back.
-            await self.state.set_setting(INBOX_CHECK_KEY, _iso(started))
-        else:
+        self._in_break = False
+        # Every run reads the inbox first; a replies-only check doesn't push the
+        # next full run back.
+        await self.state.set_setting(INBOX_CHECK_KEY, _iso(started))
+        if not replies_only:
             await self.state.set_setting(LAST_RUN_KEY, json.dumps(
                 {"started": _iso(started), "finished": None, "outcome": "running"}))
         try:
@@ -304,6 +334,10 @@ class LinkedInAgent:
         finally:
             self.driver = None
             self.report["finished"] = _iso(self.now())
+            if self._waiting:
+                self.report["waiting"] = dict(self._waiting)
+                logger.info("LinkedIn: approved but not sent this run: " + "; ".join(
+                    f"{n} ({why})" for why, n in self._waiting.items()))
             await self.state.set_setting(RUNNING_KEY, "")
             if not replies_only:
                 await self.state.set_setting(LAST_RUN_KEY, json.dumps(
@@ -322,18 +356,75 @@ class LinkedInAgent:
     async def _steps(self):
         await self.pacing.prune()
         await self._check_signed_in()
-        steps = ((self.sync_inbox, self.handle_inbound, self.send_approved)
+        # Replies first (owner, 2026-11-20: "without waiting hours to send
+        # messages"): what's ready to answer goes before any drafting or invites,
+        # and the inbox is read again every reply_check_minutes during the run.
+        steps = ((self.sync_inbox, self.handle_inbound, self.release_held, self.send_approved)
                  if getattr(self, "replies_only", False) else
-                 (self.sync_inbox, self.sync_connections, self.sync_sent_invites,
-                  self.handle_inbound, self.draft_messages, self.find_people, self.pick_invites,
-                  self.send_approved))
+                 (self.retry_unread, self.sync_inbox, self.handle_inbound, self.release_held,
+                  self.send_replies, self.sync_connections, self.sync_sent_invites,
+                  self.draft_messages, self.find_people, self.pick_invites, self.send_approved))
         for step in steps:
             await self._still_on()
             await step()
         await self._still_on()      # stopped during the last step: say so, not "done"
 
+    async def _inbox_break(self):
+        """During a long full run: when reply_check_minutes have passed since the
+        inbox was last read, read it, answer what came in and send the replies
+        that are ready, then carry on."""
+        if (getattr(self, "replies_only", False) or getattr(self, "_in_break", False)
+                or self.dry_run or self.driver is None):
+            return
+        every = max(1, int(getattr(self.cfg, "reply_check_minutes", 10) or 10))
+        checked = _parse(await self.state.get_setting(INBOX_CHECK_KEY))
+        if checked and self.now() - checked < timedelta(minutes=every):
+            return
+        self._in_break = True
+        try:
+            await self.state.set_setting(INBOX_CHECK_KEY, _iso(self.now()))
+            await self.sync_inbox()
+            await self.handle_inbound()
+            await self.release_held()
+            await self.send_approved(only=("reply",))
+            self.report["inbox_breaks"] = self.report.get("inbox_breaks", 0) + 1
+        finally:
+            self._in_break = False
+
+    async def send_replies(self):
+        await self.send_approved(only=("reply",))
+
+    async def retry_unread(self):
+        """Once: people set aside only because their profile couldn't be read
+        (LinkedIn's page had changed) are invited again, now that it can be."""
+        if self.dry_run or await self.state.get_setting(RETRY_UNREAD_KEY):
+            return
+        rows = await self.state._li_query(
+            "SELECT id FROM linkedin_leads WHERE stage = 'found' AND ("
+            + " OR ".join("no_message_reason LIKE ?" for _ in UNREAD_REASONS) + ")",
+            tuple(r + "%" for r in UNREAD_REASONS))
+        for row in rows:
+            await self.state.li_update_lead(row["id"], no_message_reason="")
+        await self.state.set_setting(RETRY_UNREAD_KEY, json.dumps(
+            {"at": self.now().isoformat(), "leads": len(rows)}))
+        if rows:
+            logger.info(f"LinkedIn: {len(rows)} people whose profile couldn't be read get another go.")
+
     def _time_left(self) -> bool:
         return self.deadline is None or self.now() < self.deadline
+
+    async def _note_waiting(self, item: dict, why: str):
+        """Why an approved item didn't go this time, on the item (the tab shows
+        it). Written only when it changes."""
+        note = (WAITING + why)[:300]
+        if item.get("status") == "approved" and (item.get("error") or "") != note:
+            # Only while it is still approved: a reply sent meanwhile keeps no note.
+            async with self.state._connect() as db:
+                await db.execute("UPDATE linkedin_messages SET error = ? WHERE id = ? AND status = 'approved'",
+                                 (note, item["id"]))
+                await db.commit()
+            item["error"] = note
+        self._waiting[why] = self._waiting.get(why, 0) + 1
 
     async def _still_on(self):
         """The switch works mid-run, not just at the start of one."""
@@ -560,7 +651,7 @@ class LinkedInAgent:
                 await self.not_a_client(lead, intent, thread_url=message.get("thread_url") or "")
                 latest.pop(lead["id"], None)
                 continue
-            if intent == "interested":
+            if intent == "interested" and lead["stage"] != "meeting":
                 await self.state.li_set_stage(lead["id"], "warm")
             if intent in REPLY_INTENTS or intent == "escalate":
                 await self.stop_email_pitch(lead, keep=referred["keep"])
@@ -595,13 +686,48 @@ class LinkedInAgent:
                         "name": lead.get("name") or lead.get("first_name") or ""})
                 except Exception:
                     pass
+            # A yes to the time we offered: the meeting is booked (stage, your phone).
+            booked = await self.booking_confirmed(lead, message["body"], history)
+            if booked is not None and not self.dry_run:
+                await self.book_meeting(lead, booked)
             body = await self.draft(lead, "reply", intent=message["intent"], history=history,
-                                    note=message.get("referral_note") or "")
+                                    note=message.get("referral_note") or "", booked=booked)
             if body:
-                if asks_if_automated(message["body"]):
+                # An honest yes goes on its own; anything else waits for you.
+                if asks_if_automated(message["body"]) and not answers_automation_honestly(body):
                     hold.append("they asked whether this is automated")
                 await self.add_draft(lead, "reply", body, hold=hold,
                                      thread_url=message.get("thread_url") or "")
+
+    async def booking_confirmed(self, lead: dict, latest: str, history) -> str | None:
+        """The time they said yes to, when our last message offered the
+        meeting link and their answer confirms it (meeting_slot.confirms_slot);
+        None otherwise. An offer whose time has passed isn't confirmed."""
+        ours = [m["body"] for m in history or [] if m["direction"] == "out" and m["status"] == "sent"]
+        if not ours or not offered_link_in(ours[-1:], self.config):
+            return None
+        offer = await offered_slot(self.state, "linkedin:" + lead["id"])
+        if offer and not still_ahead(offer, self._now()):
+            return None
+        if not confirms_slot(latest, offer.get("text", "")):
+            return None
+        return offer.get("text") or ""
+
+    async def book_meeting(self, lead: dict, time_text: str):
+        """They confirmed: the lead moves to Meeting, and your phone hears it once."""
+        await self.state.li_set_stage(lead["id"], "meeting")
+        key = "meeting:booked:linkedin:" + lead["id"]
+        if await self.state.get_setting(key):
+            return
+        await self.state.set_setting(key, self.now().isoformat())
+        self.report["meetings_booked"] = self.report.get("meetings_booked", 0) + 1
+        try:
+            await self.state.log_action("meeting_booked", "linkedin", {
+                "name": lead.get("name") or lead.get("first_name") or "", "company": lead.get("company") or "",
+                "time": time_text, "channel": "LinkedIn", "linkedin_lead_id": lead["id"]})
+        except Exception:
+            pass
+        logger.info(f"LinkedIn: meeting booked with {lead.get('name') or 'a lead'} ({time_text or 'the time offered'}).")
 
     async def decline(self, lead: dict, text: str, intent: str):
         """A no: the lead is declined for good, nothing queued goes, and their
@@ -623,7 +749,7 @@ class LinkedInAgent:
     async def meeting_slot(self, lead: dict):
         """The owner's next meeting window, in their time when their email
         contact says where they are (never a guess), or None."""
-        from harvey.send_window import recipient_zone
+        from harvey.send_window import recipient_zone, zone_for
         zone = ""
         try:
             if lead.get("prospect_id"):
@@ -631,7 +757,14 @@ class LinkedInAgent:
                 zone = await recipient_zone(self.state, prospect, None) if prospect else ""
         except Exception:
             zone = ""
-        return meeting_offer(self.config, their_zone=zone or "")
+        if not zone:
+            # Their LinkedIn location ("London Area, United Kingdom"), when read.
+            try:
+                location = (await self._profile_cache(lead)).get("location") or ""
+                zone = zone_for(location=location) if location else ""
+            except Exception:
+                zone = ""
+        return meeting_offer(self.config, now=self._now(), their_zone=zone or "")
 
     async def meeting_alert(self, lead: dict, latest: str) -> None:
         """Close to a meeting: a WhatsApp message to your phone
@@ -671,15 +804,27 @@ class LinkedInAgent:
                                  site=site, name=name, their_words=their_words, channel="linkedin")
 
     async def _own_sites(self, lead: dict) -> tuple[str, ...]:
-        """The lead's own website, when known: a message may name it to them."""
+        """The lead's own website, when known: a message may name it to them.
+        A site their own LinkedIn profile shows counts too (2026-11-20: drafts
+        naming the site from their profile were held as "not one of your
+        domains")."""
+        sites: list[str] = []
         try:
             from harvey.site_review import site_for
             prospect = (await self.state.get_prospect(lead["prospect_id"])
                         if lead.get("prospect_id") else None)
             site = await site_for(self.state, prospect=prospect, company_id=lead.get("company_id") or "")
+            if site:
+                sites.append(site)
         except Exception:
-            return ()
-        return (site,) if site else ()
+            pass
+        try:
+            from harvey.gate import find_links
+            text = (await self._profile_cache(lead)).get("text") or ""
+            sites += [host for host, _ in find_links(text)]
+        except Exception:
+            pass
+        return tuple(dict.fromkeys(s for s in sites if s))
 
     async def add_review(self, lead: dict, body: str, thread_url: str = "") -> str | None:
         """A review waits for you, unless reviews autopilot is on (then the
@@ -880,6 +1025,7 @@ class LinkedInAgent:
         for lead in await self.state.li_leads(stages=("accepted", "messaged")):
             if room <= 0 or not self._time_left():
                 break
+            await self._inbox_break()
             if lead.get("no_message_reason") or await self.state.li_pending_for(
                     lead["id"], kinds=("message", "reply")):
                 continue
@@ -968,7 +1114,8 @@ class LinkedInAgent:
             "SELECT l.* FROM linkedin_leads l WHERE l.stage = 'found' "
             "AND COALESCE(l.no_message_reason, '') = '' AND COALESCE(l.slug, '') != '' "
             "AND NOT EXISTS (SELECT 1 FROM linkedin_messages m WHERE m.lead_id = l.id "
-            "AND m.kind = 'invite_note') "
+            "AND m.kind = 'invite_note' AND NOT (m.status = 'skipped' "
+            "AND COALESCE(m.error, '') LIKE 'not invited:%')) "
             "ORDER BY CASE l.source WHEN 'harvey_prospect' THEN 0 WHEN 'web_search' THEN 2 ELSE 1 END, "
             "l.created_at LIMIT ?", (limit,))
         return [dict(r) for r in rows]
@@ -1040,6 +1187,9 @@ class LinkedInAgent:
         if notes and self._brain_paused():
             return
         for lead in await self.found_to_invite(room):
+            if not self._time_left():
+                return
+            await self._inbox_break()
             if await self.email_block(lead):
                 continue
             note = ""
@@ -1051,6 +1201,8 @@ class LinkedInAgent:
         if room <= 0:
             return
         for row in await self.invite_candidates(room):
+            if not self._time_left():
+                return
             name = " ".join(x for x in (row["first_name"], row["last_name"]) if x)
             lead_id, _ = await self.state.li_upsert_lead(
                 row["slug"], name=name, first_name=row["first_name"], headline=row["title"],
@@ -1126,8 +1278,29 @@ class LinkedInAgent:
         return text
 
     async def _profile_cache(self, lead: dict) -> dict:
+        """What Harvey has read about them: the profile page (location and
+        headline, from its text when the page's own lines weren't found), else
+        what the web search that found them said."""
         try:
             data = json.loads(await self.state.get_setting(PROFILE_KEY + lead["id"]) or "{}")
+        except ValueError:
+            data = {}
+        data = data if isinstance(data, dict) else {}
+        text = data.get("text") or ""
+        if text and not data.get("location"):
+            data["location"] = summary_location(text)
+        if text and not data.get("headline"):
+            data["headline"] = summary_headline(text)
+        if not data.get("location") or not data.get("headline"):
+            found = await self._found(lead)
+            data["location"] = data.get("location") or found.get("location") or ""
+            data["headline"] = data.get("headline") or found.get("headline") or ""
+        return data
+
+    async def _found(self, lead: dict) -> dict:
+        """What the web search said about them ({"location", "headline"}), or {}."""
+        try:
+            data = json.loads(await self.state.get_setting(FOUND_KEY + lead["id"]) or "{}")
         except ValueError:
             data = {}
         return data if isinstance(data, dict) else {}
@@ -1155,9 +1328,10 @@ class LinkedInAgent:
         return "\n\n".join(out)
 
     async def draft(self, lead: dict, which: str, intent: str = "", history=None,
-                    note: str = "") -> str:
+                    note: str = "", booked: str | None = None) -> str:
         """One message by the brain: which = invite | first | follow_up | reply.
-        ``note``: what a reply must say (a referral's thank-you)."""
+        ``note``: what a reply must say (a referral's thank-you). ``booked``:
+        they said yes to this offered time, so the reply confirms it."""
         persona, product = self.config.persona, self.config.product
         prompt = self.brain.load_prompt(
             "linkedin", persona_name=persona.name, persona_role=persona.role,
@@ -1176,18 +1350,34 @@ class LinkedInAgent:
         from harvey.lessons import lessons_block
         prompt += await lessons_block(getattr(self, "state", None), "linkedin")
         booking = getattr(getattr(product, "offer", None), "booking_url", "") or ""
-        # They asked to meet: the owner's fixed slot (harvey/meeting_slot.py), not a link.
+        if meeting_offer(self.config) is not None:
+            booking = ""          # the owner's fixed time and Meet link, never a booking page
+        # The owner's fixed slot (harvey/meeting_slot.py), offered when they ask
+        # to meet and, directly, once they're interested (owner, 2026-11-20).
         slot_block = ""
+        ours = [m["body"] for m in history or [] if m["direction"] == "out" and m["status"] == "sent"]
+        offered_before = offered_link_in(ours, self.config)
         if which == "reply":
             theirs = [m for m in history or [] if m["direction"] == "in"]
             latest = theirs[-1]["body"] if theirs else ""
-            if declines_call(latest) and chat_instead_block(self.config):
+            why = ("asked" if asks_to_meet(latest) else
+                   "interested" if (intent == "interested" or wants_next_step(latest)) and not offered_before
+                   else "")
+            if booked is not None:
+                slot_block = confirm_block(booked, self.config)
+            elif declines_call(latest) and chat_instead_block(self.config):
                 # They can't do a call: chat on WhatsApp instead.
                 slot_block, booking = chat_instead_block(self.config), ""
-            elif asks_to_meet(latest):
+            elif why:
                 slot = await self.meeting_slot(lead)
                 if slot is not None:
-                    slot_block, booking = prompt_block(slot, self.config), ""
+                    slot_block, booking = prompt_block(slot, self.config, why), ""
+                    await remember_offer(self.state, "linkedin:" + lead["id"], slot)
+        elif which == "catch_up" and lead.get("stage") == "warm" and not offered_before:
+            slot = await self.meeting_slot(lead)
+            if slot is not None:
+                slot_block = prompt_block(slot, self.config, "catch_up")
+                await remember_offer(self.state, "linkedin:" + lead["id"], slot)
         CHAT = (" Write it as one to three short messages separated by a blank line, like messages "
                 "sent one after another.")
         task = {
@@ -1271,25 +1461,111 @@ FACTS about them:
         self.report["drafted"] = self.report.get("drafted", 0) + 1
         return message_id
 
+    async def release_held(self):
+        """Drafts held for a look, looked at again every run on autopilot
+        (owner, 2026-11-20: "not waiting for approval ... autopilot means auto
+        send"). A hold that no longer applies lets the draft go:
+
+        - a link check that passes now (their own website, once known);
+        - a site review, with reviews autopilot on;
+        - "is this automated?" answered with an honest yes.
+
+        A cold message still has to pass the targeting check, and a draft that
+        something later has overtaken (another message went to them since) is
+        set aside. Anything else (a link that isn't theirs or ours, quoted
+        instructions, a referral) keeps waiting for you."""
+        if self.dry_run or not await autopilot_on(self.state, self.config):
+            return
+        from harvey.gate import autopilot_review
+        reviews_on = await reviews_autopilot(self.state)
+        released = 0
+        for m in await self.state.li_messages(statuses=("draft",), direction="out"):
+            error = m.get("error") or ""
+            if not error.startswith(HELD_FOR_REVIEW) or m["kind"] == "invite_note":
+                continue
+            lead = await self.state.li_get_lead(m["lead_id"])
+            if lead is None or lead["stage"] == "declined":
+                continue
+            rows = await self.state.li_messages(lead_id=lead["id"])
+            later = [r for r in rows if r["direction"] == "out" and r["id"] != m["id"]
+                     and r["kind"] != "invite_note" and (r.get("created_at") or "") > (m.get("created_at") or "")
+                     and r["status"] in ("sent", "approved", "draft")]
+            if later:
+                await self.state.li_update_message(
+                    m["id"], status="skipped", error="overtaken: a later message to them was written or sent")
+                continue
+            reasons = [r.strip() for r in error[len(HELD_FOR_REVIEW):].split("; ") if r.strip()]
+            keep, review = [], False
+            for reason in reasons:
+                if reason.startswith(("links to ", "quotes Harvey")):
+                    continue                    # checked again just below
+                if reason.startswith(REVIEW_HELD_REASON[:24]):
+                    review = True
+                    if reviews_on:
+                        continue
+                if (reason.startswith("they asked whether this is automated")
+                        and answers_automation_honestly(m["body"])):
+                    continue
+                keep.append(reason)
+            if m["body"]:
+                review_of = autopilot_review("", m["body"], self.config, own_sites=await self._own_sites(lead))
+                if (review_of and not keep and self.driver is not None and self._time_left()
+                        and all(r.startswith("links to ") for r in review_of)
+                        and not (await self._profile_cache(lead)).get("text")):
+                    # Their profile, read once: the site it shows is theirs.
+                    await self.research(lead)
+                    review_of = autopilot_review("", m["body"], self.config,
+                                                 own_sites=await self._own_sites(lead))
+                keep += review_of
+            if keep:
+                if keep != reasons:
+                    await self.state.li_update_message(m["id"], error=(HELD_FOR_REVIEW + "; ".join(keep))[:300])
+                continue
+            if m["kind"] == "message":
+                profile = await self._profile_cache(lead)
+                why = self.off_target(lead, location=profile.get("location") or "",
+                                      headline=profile.get("headline") or "")
+                if why:
+                    await self.state.li_update_message(m["id"], status="skipped", error=f"not sent: {why}"[:300])
+                    await self.state.li_update_lead(lead["id"], no_message_reason=f"not messaged: {why}"[:300])
+                    continue
+            await self.state.li_update_message(m["id"], status="approved", error="",
+                                               approved_by=REVIEW_AUTOPILOT if review else "autopilot")
+            released += 1
+        if released:
+            self.report["released"] = self.report.get("released", 0) + released
+            logger.info(f"LinkedIn: {released} held drafts no longer need you; they go out.")
+
     # ── 5. Sending ──
 
-    async def send_approved(self):
+    async def send_approved(self, only=None):
+        """Send what is approved: replies, then messages, then invites.
+        ``only``: just these kinds (the replies that go first in a run). An
+        item that doesn't go says why on itself (_note_waiting)."""
         order = {"reply": 0, "message": 1, "catch_up": 1, "invite_note": 2}
         items = sorted(await self.state.li_messages(statuses=("approved",), direction="out"),
                        key=lambda m: (order.get(m["kind"], 3), m["created_at"] or ""))
+        if only:
+            items = [m for m in items if m["kind"] in only]
         replies_any_time = bool(getattr(self.cfg, "replies_any_time", False))
-        for item in items:
+        for n, item in enumerate(items):
             if not self._time_left():
+                for rest in items[n:]:
+                    await self._note_waiting(rest, "the run's time ran out first; it goes on the next run")
                 break
+            if not only:
+                await self._inbox_break()      # a reply that came in meanwhile goes first
             reply = item["kind"] == "reply"
             if getattr(self, "replies_only", False) and not reply:
                 continue        # an inbox check sends replies only
             if not self.pacing.in_hours() and not (reply and replies_any_time):
+                await self._note_waiting(item, f"outside LinkedIn hours ({self.pacing.hours_text()})")
                 continue        # invites and first messages keep to hours
             await self._still_on()
             if await active_pause(self.state, self.now()):
                 break
             if item["lead_id"] in self._failed_leads:
+                await self._note_waiting(item, "a send to them failed earlier this run; it's tried next run")
                 continue
             lead = await self.state.li_get_lead(item["lead_id"])
             if lead is None:
@@ -1326,13 +1602,31 @@ FACTS about them:
             kind = "invite" if item["kind"] == "invite_note" else "message"
             blocked = await self.pacing.blocked(kind)
             if blocked:
+                await self._note_waiting(item, blocked)
                 if "hour" in blocked:
+                    for rest in items[n + 1:]:
+                        await self._note_waiting(rest, blocked)
                     break
                 continue
             if self.dry_run:
                 self.report["would_send"].append(
                     {"kind": item["kind"], "lead": lead.get("name"), "body": item["body"]})
                 continue
+            html = None
+            if kind == "invite":
+                # Their profile first: someone it rules out is skipped without
+                # the wait between actions (2026-11-20: runs spent most of their
+                # time waiting before skips).
+                self._inviting = True
+                try:
+                    html = await self._invite_profile(lead, item)
+                except InviteLimitReached:
+                    await self._note_waiting(item, "LinkedIn's weekly invite limit; it goes when LinkedIn allows")
+                    continue
+                finally:
+                    self._inviting = False
+                if html is None:
+                    continue
             await self._wait_between_actions()
             await self._still_on()
             if await active_pause(self.state, self.now()):
@@ -1343,8 +1637,9 @@ FACTS about them:
             if kind == "invite":
                 self._inviting = True
                 try:
-                    ok, detail = await self.send_invite(lead, item)
+                    ok, detail = await self.send_invite(lead, item, html=html)
                 except InviteLimitReached:
+                    await self._note_waiting(item, "LinkedIn's weekly invite limit; it goes when LinkedIn allows")
                     continue        # stays approved: it goes when LinkedIn allows again
                 finally:
                     self._inviting = False
@@ -1360,6 +1655,10 @@ FACTS about them:
                 self.report["failed"] += 1
                 await self.state.li_update_message(item["id"], status="failed", error=detail)
                 logger.warning(f"LinkedIn: not sent to {lead.get('name')}: {detail}")
+            else:
+                fresh = await self.state.li_get_message(item["id"])
+                if fresh and fresh["status"] == "approved":
+                    await self._note_waiting(fresh, "stopped before it went (switched off or paused)")
 
     async def send_message(self, lead: dict, item: dict) -> tuple[bool, str]:
         """The recipe. (True, "") once the thread shows it; (False, why)
@@ -1436,29 +1735,52 @@ FACTS about them:
             return False, state
         return ok, state
 
-    async def send_invite(self, lead: dict, item: dict) -> tuple[bool, str]:
-        html = await self._visit(lead.get("profile_url") or profile_url(lead["slug"]), pause=False)
+    async def _invite_profile(self, lead: dict, item: dict) -> str | None:
+        """Their profile page, read before an invite: None when the invite is
+        skipped here (already pending, already connected, or outside the
+        owner's targeting), the page's HTML otherwise. What it shows is kept
+        (PROFILE_KEY), so their first message needs no second visit."""
+        html = await self._visit(lead.get("profile_url") or profile_url(lead["slug"]))
         state = profile_connect_state(html)
         if state == "pending":
             await self.state.li_update_message(item["id"], status="skipped",
                                                error="an invite to them was already pending")
             await self.state.li_set_stage(lead["id"], "invited")
-            return False, ""
+            return None
         if state == "connected":
             await self.state.li_update_message(item["id"], status="skipped",
                                                error="you're already connected")
             await self.state.li_set_stage(lead["id"], "accepted", accepted_at=self.now())
-            return False, ""
+            return None
+        location, headline = profile_location(html), profile_headline(html)
+        text = profile_summary(html)
+        if text:
+            await self.state.set_setting(PROFILE_KEY + lead["id"], json.dumps({
+                "at": self.now().isoformat(), "text": text, "location": location,
+                "headline": headline[:220]}))
+        if not location or not headline:
+            # The web search that found them saw both, often (finder.py).
+            found = await self._found(lead)
+            location = location or found.get("location") or ""
+            headline = headline or found.get("headline") or ""
         # The owner's targeting: their profile must show a country you chose and
         # a decision maker's role (harvey/targeting.py).
-        why = self.off_target(lead, location=profile_location(html),
-                              headline=profile_headline(html), required=True)
+        why = self.off_target(lead, location=location, headline=headline, required=True)
         if why:
             await self.state.li_update_message(item["id"], status="skipped",
                                                error=f"not invited: {why}"[:300])
             await self.state.li_update_lead(lead["id"], no_message_reason=f"not invited: {why}"[:300])
             self.report["off_target"] = self.report.get("off_target", 0) + 1
-            return False, ""
+            return None
+        return html
+
+    async def send_invite(self, lead: dict, item: dict, html: str | None = None) -> tuple[bool, str]:
+        """The invite. ``html``: their profile, already read and checked
+        (_invite_profile); read here when not."""
+        if html is None:
+            html = await self._invite_profile(lead, item)
+            if html is None:
+                return False, ""
         ok, _ = await self._open_connect(html)
         if not ok:
             return False, "couldn't find a Connect button on their profile"

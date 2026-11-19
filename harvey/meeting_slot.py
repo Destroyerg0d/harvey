@@ -145,8 +145,22 @@ def _offer_field(config, name: str) -> str:
     return (getattr(offer, name, "") or "").strip()
 
 
-def prompt_block(slot: Slot, config) -> str:
-    """What every channel's reply prompt gets when they ask to meet."""
+# Why the time is offered: they asked, or they showed interest and Harvey asks
+# for the call directly (owner, 2026-11-20: "optimized to book meeting ... on
+# this link and allot time asking directly").
+_LEAD_INS = {
+    "asked": "They asked to meet. Offer exactly this time",
+    "interested": ("They're interested, so move this to a short call now and ask for it directly, "
+                   "in a natural way after answering what they said. Offer exactly this time"),
+    "catch_up": ("They were interested before. Pick it up by proposing a short call, directly. "
+                 "Offer exactly this time"),
+}
+
+
+def prompt_block(slot: Slot, config, why: str = "asked") -> str:
+    """What a channel's prompt gets to offer the owner's slot: when they ask to
+    meet, when they're interested (``why`` "interested"), or in a catch-up to
+    someone who was ("catch_up")."""
     duration = _offer_field(config, "meeting_duration") or "short"
     who = _offer_field(config, "meeting_owner") or "our team"
     link = _offer_field(config, "meeting_link")
@@ -154,11 +168,104 @@ def prompt_block(slot: Slot, config) -> str:
               "invite: no separate calendar invite is needed. "
               if link else "Say the calendar invite follows once they confirm. ")
     return (
-        "\n\nTHE MEETING TIME. They asked to meet. Offer exactly this time, written as it is here, "
+        f"\n\nTHE MEETING TIME. {_LEAD_INS.get(why, _LEAD_INS['asked'])}, written as it is here, "
         f"for a call ({duration}) with {who}: {slot.text()}. {invite}Ask them to reply to confirm "
         "it suits. Do not ask them to suggest times or windows, and do not send a booking link. "
         "If it doesn't suit them, they can say so and we'll find another time. This overrides "
         "any other instruction about timing or booking.")
+
+
+def meeting_link(config) -> str:
+    return _offer_field(config, "meeting_link")
+
+
+# Someone interested in the work itself, not just polite: the price, the next
+# step, how to start. With intent "interested" this is when the call is offered.
+NEXT_STEP_RE = re.compile(
+    r"\b(?:price|pricing|prices|cost|costs|quote|how much|rates?|budget|next steps?|get started|"
+    r"how (?:do|would|can) (?:we|you|i) (?:start|begin|proceed|work)|work(?:ing)? together|"
+    r"tell me more|more (?:details|info|information)|let'?s do (?:it|this)|proposal|"
+    r"interested|sounds (?:good|great|interesting)|keen)\b", re.IGNORECASE)
+
+
+def wants_next_step(text: str) -> bool:
+    return bool(NEXT_STEP_RE.search(text or ""))
+
+
+# A yes to a time we offered: short, and no "but", "instead" or another day.
+CONFIRMS_RE = re.compile(
+    r"\b(?:yes|yeah|yep|yup|sure|ok(?:ay)?|perfect|great|works|suits|sounds good|see you|"
+    r"confirm(?:ed)?|booked|fine|good for me|looking forward|talk (?:then|soon)|done)\b", re.IGNORECASE)
+NOT_THAT_TIME_RE = re.compile(
+    r"\b(?:not|no|can'?t|cannot|won'?t|instead|another|different|other|later|earlier|reschedule|"
+    r"busy|unavailable|but|next week|\d{1,2}(?::\d{2})?\s*(?:am|pm))\b", re.IGNORECASE)
+_FRIENDLY_NO_RE = re.compile(r"\b(?:no problem|not a problem|no worries|no rush)\b", re.IGNORECASE)
+_WEEKDAY_RE = re.compile(r"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b", re.IGNORECASE)
+
+
+def confirms_slot(text: str, offered_text: str = "") -> bool:
+    """Their message says yes to the time we offered, and nothing else about
+    it (another day, a different hour, a "but"). A weekday they name must be
+    the one offered."""
+    t = " ".join((text or "").replace("’", "'").split())
+    if not t or len(t) > 220:
+        return False
+    t = _FRIENDLY_NO_RE.sub("", t)
+    days = {d.lower() for d in _WEEKDAY_RE.findall(t)}
+    if days and not days <= {d.lower() for d in _WEEKDAY_RE.findall(offered_text or "")}:
+        return False
+    return bool(CONFIRMS_RE.search(t)) and not NOT_THAT_TIME_RE.search(t) and not declines_call(t)
+
+
+OFFERED_KEY = "meeting:offered:"     # + channel:id -> {"text", "start"}
+
+
+async def remember_offer(state, key: str, slot: Slot) -> None:
+    import json
+    await state.set_setting(OFFERED_KEY + key, json.dumps(
+        {"text": slot.text(), "start": slot.start.astimezone(timezone.utc).isoformat()}))
+
+
+async def offered(state, key: str) -> dict:
+    """The slot last offered to them ({"text", "start"}), or {}."""
+    import json
+    try:
+        data = json.loads(await state.get_setting(OFFERED_KEY + key) or "{}")
+    except ValueError:
+        data = {}
+    return data if isinstance(data, dict) else {}
+
+
+def still_ahead(offer_: dict, now: datetime | None = None) -> bool:
+    try:
+        start = datetime.fromisoformat(str(offer_.get("start") or ""))
+    except ValueError:
+        return False
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    return start > now
+
+
+def confirm_block(time_text: str, config) -> str:
+    """What a reply prompt gets once they've said yes to the offered time."""
+    link = meeting_link(config)
+    return (
+        "\n\nTHE MEETING IS BOOKED. They said yes to the call at " + (time_text or "the time offered")
+        + ". Thank them in a few words, confirm that time exactly as written here"
+        + (f" and give the link again, written exactly: {link}" if link else "")
+        + ". Nothing else: no pitch, no new question. This overrides any other instruction.")
+
+
+def offered_link_in(texts, config) -> bool:
+    """One of these messages (ours, sent) carried the meeting link."""
+    link = meeting_link(config)
+    if not link:
+        return False
+    bare = link.split("://", 1)[-1].rstrip("/").lower()
+    return any(bare in (t or "").lower() for t in texts)
 
 
 # They can't, or would rather not, do a call (owner, 2026-11-15, on a client

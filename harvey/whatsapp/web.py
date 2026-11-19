@@ -18,6 +18,8 @@ from harvey.whatsapp.pacing import LINKED_AT_KEY, LINKED_NUMBER_KEY
 from harvey.whatsapp.schema import OWNER_STAGE
 from harvey.whatsapp.store import HELD_FOR_REVIEW
 
+ALERT_KIND = "alert"      # your own phone's updates (harvey/agents/whatsapp_agent.py)
+
 logger = logging.getLogger("harvey.dashboard")
 router = APIRouter()
 
@@ -246,17 +248,35 @@ async def whatsapp_overview():
         for m in await state.wa_messages(limit=100000):
             messages.setdefault(m["contact_id"], []).append(m)
 
-        queue = []
-        for m in await state.wa_messages(statuses=("draft", "approved", "failed", "maybe_sent"),
-                                         direction="out", limit=500):
-            # Failed sends older than two weeks drop off; one that may have gone never does.
-            stale = (m.get("created_at") or "") < (now - timedelta(days=14)).isoformat()
-            if m["status"] == "failed" and stale:
+        # What's waiting, only (owner, 2026-11-20: "improve the queue"): your own
+        # phone's updates leave it (one line under Details says how they went),
+        # and of the failed sends only the latest per person from the last 3 days.
+        queue, failed_seen = [], set()
+        updates = {"sent_24h": 0, "not_sent_24h": 0, "last_sent": ""}
+        recent = (now - timedelta(days=3)).isoformat()
+        day_ago = (now - timedelta(hours=24)).isoformat()
+        for m in await state.wa_messages(kinds=(ALERT_KIND,), direction="out", limit=5000):
+            at = m.get("sent_at") or m.get("created_at") or ""
+            if m["status"] == "sent":
+                updates["last_sent"] = max(updates["last_sent"], at)
+                updates["sent_24h"] += at >= day_ago
+            elif m["status"] in ("failed", "maybe_sent") and at >= day_ago:
+                updates["not_sent_24h"] += 1
+        rows_out = await state.wa_messages(statuses=("draft", "approved", "failed", "maybe_sent"),
+                                           direction="out", limit=5000)
+        for m in reversed(rows_out):                   # newest first, for "latest per person"
+            contact = by_id.get(m["contact_id"]) or {}
+            if m["kind"] == ALERT_KIND or contact.get("stage") == OWNER_STAGE:
                 continue
+            if m["status"] == "failed":
+                if (m.get("created_at") or "") < recent or m["contact_id"] in failed_seen:
+                    continue
+                failed_seen.add(m["contact_id"])
             queue.append({**{k: m[k] for k in ("id", "kind", "body", "status", "error", "created_at",
                                                "approved_by")},
                           "held": (m["error"] or "").startswith(HELD_FOR_REVIEW),
-                          "contact": _contact_view(by_id.get(m["contact_id"]))})
+                          "contact": _contact_view(contact or None)})
+        queue.reverse()
 
         # Everyone a message has actually passed between: all of them, each with
         # the whole history.
@@ -272,7 +292,11 @@ async def whatsapp_overview():
             inbound = [m for m in rows if m["direction"] == "in"]
             draft = next((m for m in reversed(rows) if m["direction"] == "out" and m["kind"] == "reply"
                           and m["status"] in ("draft", "approved")), None)
+            spoken = [m for m in thread if m["status"] == "sent"]
+            needs_reply = bool(spoken) and spoken[-1]["direction"] == "in" and contact["stage"] != "declined"
             conversations.append({
+                "needs_reply": needs_reply,
+                "rank": 0 if needs_reply else 1 if contact["stage"] in ("warm", "meeting") else 2,
                 "contact": _contact_view(contact),
                 "latest_in": ({"body": inbound[-1]["body"], "intent": inbound[-1]["intent"],
                                "at": inbound[-1]["sent_at"] or inbound[-1]["created_at"]}
@@ -284,7 +308,15 @@ async def whatsapp_overview():
                 "reply_blocked": await _reply_block(state, config, contact, rows, numbers=numbers,
                                                     scan_phones=False),
             })
+        # Hot first: they wrote last and it isn't answered, then warm and meetings.
         conversations.sort(key=lambda c: c["last_at"], reverse=True)
+        conversations.sort(key=lambda c: c["rank"])
+        sent_24h = [m for rows in messages.values() for m in rows
+                    if m["direction"] == "out" and m["status"] == "sent" and m["kind"] != ALERT_KIND
+                    and (m.get("sent_at") or "") >= day_ago]
+        today = {"messages_24h": len(sent_24h), "replies_24h": sum(m["kind"] == "reply" for m in sent_24h),
+                 "needs_reply": sum(1 for c in conversations if c["needs_reply"]),
+                 "meetings": sum(1 for c in contacts if c["stage"] == "meeting")}
 
         try:
             last_run = json.loads(await state.get_setting(LAST_RUN_KEY) or "{}")
@@ -313,6 +345,8 @@ async def whatsapp_overview():
             "caps": await pacing.caps(),
             "funnel": await state.wa_funnel(),
             "queue": queue,
+            "updates_to_you": updates,
+            "today": today,
             "drafts_waiting": sum(1 for q in queue if q["status"] == "draft"),
             "maybe_sent": sum(1 for q in queue if q["status"] == "maybe_sent"),
             "conversations": conversations,

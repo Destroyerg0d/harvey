@@ -9,6 +9,44 @@ minor versions can still change behaviour.
 
 ### Added
 
+- **The call is booked directly** (harvey/meeting_slot.py). On LinkedIn and WhatsApp, once someone
+  reads as interested (or asks about the price, the next step or how to start), the reply offers
+  the owner's fixed time (`product.offer.meeting_window` on the next working day) in their own
+  time zone with the video call link, and asks them to confirm. Before, the time went only to
+  someone who asked to meet. Their LinkedIn location now gives their time zone when no email
+  does. A catch-up to someone warm proposes the call once. When they say yes to the offered time,
+  they move to Meeting, the reply confirms the time and the link, and your WhatsApp update says
+  "Meeting booked" once (`meeting_booked`).
+- **Nothing approved waits without a reason.** An approved LinkedIn item that doesn't go says why
+  on itself ("waiting: outside LinkedIn hours", the day's cap, the hour's cap, the run's time),
+  shown on the tab and logged once a run.
+
+### Changed
+
+- **LinkedIn connects go out again.** LinkedIn's profile page no longer has an `h1`, so the
+  location and headline read as empty and 124 invites were skipped as "their country couldn't be
+  read". Both are now read from the top of the page's text when the old lines aren't there
+  (`pages.summary_location`, `summary_headline`), a school line never counts as the location, and
+  LinkedIn's own areas ("Greater Madrid Metropolitan Area") name their country. When the page
+  still shows none, the web search's location counts. The people skipped for this get one more
+  go. The profile is read before the wait between actions, so a skip costs no wait.
+- **Replies first, all run long.** A LinkedIn run sends approved replies right after reading the
+  inbox, before any drafting or invites, and reads the inbox again every `reply_check_minutes`
+  during the run (a full run used to keep the replies-only check from starting for an hour or
+  more). `first_message_min_days` and `max_days` take parts of a day.
+- **Autopilot looks at held drafts again every run** (LinkedIn and WhatsApp). One held for a
+  link that passes now (their own site), a site review with reviews autopilot on, or a reply to
+  "is this automated?" that says yes plainly goes on its own; a cold one still has to pass the
+  targeting check, and one a later message overtook is set aside. A link to a site that is
+  neither yours nor theirs, or quoted instructions, still waits for you.
+- **LinkedIn and WhatsApp tabs: important things first.** Needs you (only what Harvey can't do on
+  its own), then Today (connects against the target, accepted, messages and replies in the last
+  24 hours, conversations to answer, meetings, the last run), then the conversations as one line
+  each, those waiting for an answer first (a click opens one), then what's waiting to go as one
+  line with its reasons. Failed sends shrink to the latest per person from the last 3 days, your
+  own phone's updates leave the WhatsApp queue (one line under Details says how they went), and
+  the chart, funnel, limits, warnings, autopilot and Add a contact sit under Details.
+
 - **WhatsApp and LinkedIn chat like a person** (harvey/chat_style.py). A message is drafted as one
   to three short messages separated by a blank line, and each goes out as its own message a few
   seconds apart, each one confirmed in the chat; if one fails after others went, the item is

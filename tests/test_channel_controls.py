@@ -830,9 +830,12 @@ def test_every_conversation_shows_past_the_old_forty_with_its_whole_history(web)
         run(state.wa_add_message(c, kind="reply", body=f"Line {j}", status="sent", sent_at=f"2026-11-04T06:{j:02d}:00"))
     convos = web.get("/api/whatsapp").json()["conversations"]
     assert len(convos) == 45
-    assert convos[0]["contact"]["name"] == "Person 44"            # latest first
-    assert [m["body"] for m in convos[0]["thread"]][:2] == ["Hello", "Line 0"]
-    assert len(convos[0]["thread"]) == 10                         # not the old last six
+    # Waiting for an answer first, the latest first; the one we answered after them.
+    assert convos[0]["contact"]["name"] == "Person 43" and convos[0]["needs_reply"]
+    answered = next(c for c in convos if c["contact"]["name"] == "Person 44")
+    assert not answered["needs_reply"] and convos[-1] is not None
+    assert [m["body"] for m in answered["thread"]][:2] == ["Hello", "Line 0"]
+    assert len(answered["thread"]) == 10                          # not the old last six
 
 
 def test_someone_who_never_answered_is_a_conversation_too(web):

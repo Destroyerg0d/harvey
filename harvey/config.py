@@ -587,9 +587,10 @@ class LinkedInChannelConfig(BaseModel):
     pause_hours_on_warning: int = 48
     withdraw_after_days: int = 21
     # First message 1-3 days after they accept, one follow-up 5-7 days later
-    # if silent, never more than max_unanswered messages without a reply.
-    first_message_min_days: int = 1
-    first_message_max_days: int = 3
+    # if silent, never more than max_unanswered messages without a reply. Parts
+    # of a day are fine (0 to 0.08: within about two hours of the acceptance).
+    first_message_min_days: float = 1
+    first_message_max_days: float = 3
     follow_up_min_days: int = 5
     follow_up_max_days: int = 7
     max_unanswered: int = 3

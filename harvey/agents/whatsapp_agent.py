@@ -32,7 +32,10 @@ from types import SimpleNamespace
 from harvey import channel_login
 from harvey.careers import CAREERS_APPROVED, NOT_A_CLIENT, STOPPED_JOB
 from harvey.meeting_alert import POSITIVE_INTENTS
-from harvey.meeting_slot import asks_to_meet, prompt_block
+from harvey.meeting_slot import (
+    asks_to_meet, confirm_block, confirms_slot, offered as offered_slot, offered_link_in, prompt_block,
+    remember_offer, still_ahead, wants_next_step,
+)
 from harvey.whatsapp.schema import OWNER_STAGE
 from harvey.kept_browser import KeptBrowser
 from harvey.chat_style import parts as chat_parts, squash, strip_repeat_name
@@ -40,7 +43,8 @@ from harvey.chat_style import parts as chat_parts, squash, strip_repeat_name
 ALERT_KIND = "alert"     # a meeting alert to your own phone (harvey/meeting_alert.py)
 ALERT_PROOF_CHARS = 120  # the opening of an alert that must show in the chat
 from harvey.agents.linkedin_agent import (
-    DECLINE_INTENTS, REPLY_INTENTS, SwitchedOff, _clean_draft, asks_if_automated,
+    DECLINE_INTENTS, REPLY_INTENTS, SwitchedOff, _clean_draft, answers_automation_honestly,
+    asks_if_automated,
 )
 from harvey.gate import find_links
 from harvey.linkedin.pacing import wait_unless
@@ -222,7 +226,8 @@ def draft_problem(kind: str, text: str, booking_url: str = "") -> str:
     body = (text or "").strip()
     if not body:
         return "it is empty"
-    words, limit = len(body.split()), WORD_LIMITS[kind]
+    # A catch-up that proposes the call carries the time and the link.
+    words, limit = len(body.split()), WORD_LIMITS[kind] + (20 if booking_url and kind == "catch_up" else 0)
     if words >= limit:
         return f"it is {words} words, and must be under {limit}"
     if _EMOJI_RE.search(body):
@@ -234,7 +239,7 @@ def draft_problem(kind: str, text: str, booking_url: str = "") -> str:
     if _PRICE_RE.search(body):
         return "it mentions a price"
     links = find_links(body)
-    if links and kind != "reply":
+    if links and (kind not in ("reply", "catch_up") or (kind == "catch_up" and not booking_url)):
         return "it has a link"
     if links:
         booking = re.sub(r"^https?://", "", booking_url or "").rstrip("/").lower()
@@ -401,7 +406,7 @@ class WhatsAppAgent:
             steps = (self.sync_inbox, self.handle_inbound)
         else:
             steps = () if send_only else (self.sync_inbox, self.handle_inbound, self.draft_messages)
-        for step in (*steps, self.send_approved):
+        for step in (*steps, self.release_held, self.send_approved):
             await self._still_on()
             await step()
         await self._still_on()      # stopped during the last step: say so, not "done"
@@ -616,7 +621,7 @@ class WhatsAppAgent:
                 await self._stop_whatsapp(contact, "they said this is the wrong person")
                 latest.pop(contact["id"], None)
                 continue
-            if intent == "interested":
+            if intent == "interested" and contact["stage"] != "meeting":
                 await self.state.wa_set_stage(contact["id"], "warm")
             if intent in REPLY_INTENTS or intent == "escalate":
                 await self.stop_email_pitch(contact)
@@ -632,11 +637,46 @@ class WhatsAppAgent:
                 continue          # answered already (by you, on the phone)
             if await self.state.wa_pending_for(contact_id, kinds=("reply",)):
                 continue
+            # A yes to the time we offered: the meeting is booked (stage, your phone).
+            booked = await self.booking_confirmed(contact, message["body"], history)
+            if booked is not None and not self.dry_run:
+                await self.book_meeting(contact, booked)
             body = await self.draft(contact, "reply", intent=message["intent"], history=history,
-                                    their_text=message["body"])
+                                    their_text=message["body"], booked=booked)
             if body:
-                hold = ["they asked whether this is automated"] if asks_if_automated(message["body"]) else []
+                # An honest yes goes on its own; anything else waits for you.
+                hold = (["they asked whether this is automated"]
+                        if asks_if_automated(message["body"]) and not answers_automation_honestly(body) else [])
                 await self.add_draft(contact, "reply", body, hold=hold)
+
+    async def booking_confirmed(self, contact: dict, latest: str, history) -> str | None:
+        """The time they said yes to, when our last message offered the meeting
+        link and their answer confirms it; None otherwise."""
+        ours = [m["body"] for m in history or [] if m["direction"] == "out" and m["status"] == "sent"]
+        if not ours or not offered_link_in(ours[-1:], self.config):
+            return None
+        offer = await offered_slot(self.state, "whatsapp:" + contact["id"])
+        if offer and not still_ahead(offer, self._now()):
+            return None
+        if not confirms_slot(latest, offer.get("text", "")):
+            return None
+        return offer.get("text") or ""
+
+    async def book_meeting(self, contact: dict, time_text: str):
+        """They confirmed: the contact moves to Meeting, and your phone hears it once."""
+        await self.state.wa_set_stage(contact["id"], "meeting")
+        key = "meeting:booked:whatsapp:" + contact["id"]
+        if await self.state.get_setting(key):
+            return
+        await self.state.set_setting(key, self.now().isoformat())
+        self.report["meetings_booked"] = self.report.get("meetings_booked", 0) + 1
+        try:
+            await self.state.log_action("meeting_booked", "whatsapp", {
+                "name": contact.get("name") or contact.get("phone") or "", "time": time_text,
+                "channel": "WhatsApp", "whatsapp_contact_id": contact["id"]})
+        except Exception:
+            pass
+        logger.info(f"WhatsApp: meeting booked with {contact.get('name') or 'a contact'}.")
 
     async def _skip_waiting(self, contact: dict, why: str):
         for waiting in await self.state.wa_messages(contact_id=contact["id"], direction="out",
@@ -712,7 +752,7 @@ class WhatsAppAgent:
             zones = await recipient_zones(self.state, contact, None)
         except Exception:
             zones = []
-        return offer(self.config, their_zone=zones[0] if len(zones) == 1 else "")
+        return offer(self.config, now=self._now(), their_zone=zones[0] if len(zones) == 1 else "")
 
     async def meeting_alert(self, contact: dict, latest: str) -> None:
         """Close to a meeting: a WhatsApp message to your phone
@@ -844,7 +884,7 @@ class WhatsAppAgent:
         return "\n\n".join(out)
 
     async def draft(self, contact: dict, which: str, intent: str = "", history=None,
-                    their_text: str = "") -> str:
+                    their_text: str = "", booked: str | None = None) -> str:
         """One message by the brain: which = first | follow_up | reply. It has to
         pass ``draft_problem``; what doesn't after a few tries is left unwritten
         and comes up again next run. Nothing is sent to anyone from here."""
@@ -863,15 +903,29 @@ class WhatsAppAgent:
         from harvey.lessons import lessons_block
         prompt += await lessons_block(self.state, "whatsapp")
         booking, slot_block = "", ""
-        if which == "reply" and _ASKS_TO_TALK_RE.search(their_text or ""):
-            # The owner's fixed slot in their time (harvey/meeting_slot.py); the
-            # booking link only when no meeting window is set.
+        meet_link = getattr(getattr(product, "offer", None), "meeting_link", "") or ""
+        ours = [m["body"] for m in history or [] if m["direction"] == "out" and m["status"] == "sent"]
+        offered_before = offered_link_in(ours, self.config)
+        why = ""
+        if which == "reply":
+            why = ("asked" if _ASKS_TO_TALK_RE.search(their_text or "") or asks_to_meet(their_text or "") else
+                   "interested" if (intent == "interested" or wants_next_step(their_text or ""))
+                   and not offered_before else "")
+        elif which == "catch_up" and contact.get("stage") == "warm" and not offered_before:
+            why = "catch_up"
+        if which == "reply" and booked is not None:
+            slot_block, booking = confirm_block(booked, self.config), meet_link
+        elif why:
+            # The owner's fixed slot in their time (harvey/meeting_slot.py), offered
+            # when they ask and, directly, once they're interested (owner,
+            # 2026-11-20); the booking link only when no meeting window is set.
             slot = await self.meeting_slot(contact)
             if slot is not None:
-                slot_block = prompt_block(slot, self.config)
-                # The one link this reply may carry: the meeting room, if set.
-                booking = getattr(getattr(product, "offer", None), "meeting_link", "") or ""
-            else:
+                slot_block = prompt_block(slot, self.config, why)
+                # The one link this message may carry: the meeting room, if set.
+                booking = meet_link
+                await remember_offer(self.state, "whatsapp:" + contact["id"], slot)
+            elif which == "reply" and why == "asked":
                 booking = getattr(getattr(product, "offer", None), "booking_url", "") or ""
         chat = (" Write it as one to three short messages separated by a blank line, like texts "
                 "sent one after another.")
@@ -885,7 +939,7 @@ class WhatsAppAgent:
                           "name. No link, no price. Under 35 words in all." + chat),
             "reply": (f"They replied (read as: {intent}). React to what they said first, then answer "
                       "it, in their language, like a person texting. Don't use their name. "
-                      + ("They asked to talk: the time and its link are below. " if slot_block
+                      + ("The call time and its link are below. " if slot_block
                          else f"They asked to talk: the booking link is {booking}. " if booking
                          else "No link. ")
                       + "No price, even if they ask. If they ask whether this is automated, say yes, "
@@ -893,7 +947,8 @@ class WhatsAppAgent:
             "catch_up": ("The chat went quiet after your last message. Pick it up where it stopped: "
                          "something useful about what they were talking about, or a light, easy "
                          "question about it. No guilt, no \"just checking in\", no \"bumping this\". "
-                         "Don't use their name. No link, no price. Under 40 words in all." + chat),
+                         "Don't use their name. " + ("No price. Under 60 words in all." if slot_block
+                                                     else "No link, no price. Under 40 words in all.") + chat),
         }[which]
         prompt += f"\n\n{UNTRUSTED_RULE}\n\nWHAT WE KNOW:\n{fence(self._facts(contact), 'what they told us')}\n"
         if history and self._history(history):
@@ -939,6 +994,45 @@ class WhatsAppAgent:
                                                      status=status, error=error, approved_by=approved_by)
         self.report["drafted"] = self.report.get("drafted", 0) + 1
         return message_id
+
+    async def release_held(self):
+        """Drafts held for a look, looked at again every run on autopilot
+        (owner, 2026-11-20: "autopilot means auto send messages"): a link check
+        that passes now, or "is this automated?" answered with an honest yes,
+        lets the draft go. One something later has overtaken is set aside;
+        anything else keeps waiting for you. Never your own updates."""
+        if self.dry_run or not await autopilot_on(self.state, self.config):
+            return
+        from harvey.gate import autopilot_review
+        released = 0
+        for m in await self.state.wa_messages(statuses=("draft",), direction="out"):
+            error = m.get("error") or ""
+            if not error.startswith(HELD_FOR_REVIEW) or m["kind"] == ALERT_KIND:
+                continue
+            contact = await self.state.wa_get_contact(m["contact_id"])
+            if contact is None or contact["stage"] in ("declined", OWNER_STAGE):
+                continue
+            rows = await self.state.wa_messages(contact_id=contact["id"])
+            if any(r["direction"] == "out" and r["id"] != m["id"] and r["status"] in ("sent", "approved", "draft")
+                   and (r.get("created_at") or "") > (m.get("created_at") or "") for r in rows):
+                await self.state.wa_update_message(
+                    m["id"], status="skipped", error="overtaken: a later message to them was written or sent")
+                continue
+            reasons = [r.strip() for r in error[len(HELD_FOR_REVIEW):].split("; ") if r.strip()]
+            keep = [r for r in reasons if not r.startswith(("links to ", "quotes Harvey"))
+                    and not (r.startswith("they asked whether this is automated")
+                             and answers_automation_honestly(m["body"]))]
+            if m["body"]:
+                keep += autopilot_review("", m["body"], self.config)
+            if keep:
+                if keep != reasons:
+                    await self.state.wa_update_message(m["id"], error=(HELD_FOR_REVIEW + "; ".join(keep))[:300])
+                continue
+            await self.state.wa_update_message(m["id"], status="approved", approved_by="autopilot", error="")
+            released += 1
+        if released:
+            self.report["released"] = self.report.get("released", 0) + released
+            logger.info(f"WhatsApp: {released} held drafts no longer need you; they go out.")
 
     # ── 4. Sending ──
 

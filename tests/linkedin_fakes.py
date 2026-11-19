@@ -60,6 +60,7 @@ class Person:
     urn: str = ""
     headline: str = ""                # the top card's line under the name
     location: str = ""                # the top card's location line
+    plain_card: bool = False          # LinkedIn's page today: no h1, degree, company and school lines
 
     @property
     def thread_url(self) -> str:
@@ -141,6 +142,15 @@ class FakeLinkedIn:
         toast = state.get("toast", "")
         sidebar = ('<aside><a href="/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3AOTHER'
                    '&recipient=OTHER" aria-label="Message Riley Other">Message</a></aside>')
+        if p.plain_card:
+            # Live, 2026-11-20: the name isn't an h1, and the card carries the
+            # degree, the current company and a school before the location.
+            return (f"<html><body>{NAV}{sidebar}<main><section class=\"artdeco-card\">"
+                    f"<div><p>{e(p.name)}</p><span>· 2nd</span></div>"
+                    + (f'<p>{e(p.headline)}</p>' if p.headline else "")
+                    + "<p>Example Goods Ltd</p><p>· Example State University</p>"
+                    + (f'<p>{e(p.location)}</p>' if p.location else "")
+                    + f"{buttons}</section>{modal}{toast}</main></body></html>")
         return (f"<html><body>{NAV}{sidebar}<main><section class=\"artdeco-card pv-top-card\">"
                 f"<h1>{e(p.name)}</h1>"
                 + (f'<div class="text-body-medium">{e(p.headline)}</div>' if p.headline else "")
