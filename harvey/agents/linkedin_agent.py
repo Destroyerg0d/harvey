@@ -41,7 +41,7 @@ from harvey.meeting_slot import (
 from harvey.site_review import HELD_REASON as REVIEW_HELD_REASON, REVIEW_AUTOPILOT, reviews_autopilot
 from harvey.linkedin import guards
 from harvey.linkedin.guards import BreakerTripped, active_pause, detect_breaker
-from harvey.linkedin.pacing import Pacing, wait_unless
+from harvey.linkedin.pacing import INVITES_PAUSE_KEY, Pacing, wait_unless
 from harvey.linkedin.pages import (
     COMPOSER, CONNECTIONS_URL, CONVERSATION_LIST, FEED_URL, INVITE_NOTE_BOX, MESSAGING_URL,
     SEND_BUTTON, SENT_INVITES_URL, clean_text, compose_link_from_profile, invite_confirmed,
@@ -120,6 +120,10 @@ async def channel_on(state, config) -> bool:
     if value in ("on", "off"):
         return value == "on"
     return bool(config.channels.linkedin.enabled) or await autopilot_on(state, config)
+
+
+class InviteLimitReached(Exception):
+    """LinkedIn's weekly invite limit, seen while inviting: invites stop for now."""
 
 
 class SwitchedOff(Exception):
@@ -301,7 +305,8 @@ class LinkedInAgent:
         steps = ((self.sync_inbox, self.handle_inbound, self.send_approved)
                  if getattr(self, "replies_only", False) else
                  (self.sync_inbox, self.sync_connections, self.sync_sent_invites,
-                  self.handle_inbound, self.draft_messages, self.pick_invites, self.send_approved))
+                  self.handle_inbound, self.draft_messages, self.find_people, self.pick_invites,
+                  self.send_approved))
         for step in steps:
             await self._still_on()
             await step()
@@ -326,6 +331,22 @@ class LinkedInAgent:
 
     async def _guard(self, html: str):
         breaker = detect_breaker(self.driver.url, html)
+        if breaker and breaker.kind == "invite_limit":
+            # LinkedIn's weekly invite limit: invites wait, everything else goes
+            # on (owner, 2026-11-19: replies must never stop for it).
+            if not await self.pacing.invites_paused_until():
+                until = self.now() + timedelta(hours=self.cfg.pause_hours_on_warning)
+                await self.state.set_setting(INVITES_PAUSE_KEY, _iso(until))
+                logger.warning(f"LinkedIn: weekly invite limit reached; invites wait until "
+                               f"{until:%Y-%m-%d %H:%M} UTC, messages and replies carry on.")
+                try:
+                    await self.state.log_action("linkedin_invite_limit", "linkedin",
+                                                {"until": _iso(until)})
+                except Exception:
+                    pass
+            if getattr(self, "_inviting", False):
+                raise InviteLimitReached(breaker.reason)
+            return
         if breaker:
             await guards.trip(self.state, breaker, hours=self.cfg.pause_hours_on_warning)
             raise BreakerTripped(breaker)
@@ -892,6 +913,41 @@ class LinkedInAgent:
         until = _parse(await self.state.get_setting(NOTES_OFF_KEY))
         return not (until and until > self.now())
 
+    async def found_to_invite(self, limit: int) -> list[dict]:
+        """Leads already found (web search, referrals, shop sites) and never
+        invited: no invite drafted for them yet and nothing setting them aside.
+        People from shop websites first, then the web search's, oldest first."""
+        if limit <= 0:
+            return []
+        rows = await self.state._li_query(
+            "SELECT l.* FROM linkedin_leads l WHERE l.stage = 'found' "
+            "AND COALESCE(l.no_message_reason, '') = '' AND COALESCE(l.slug, '') != '' "
+            "AND NOT EXISTS (SELECT 1 FROM linkedin_messages m WHERE m.lead_id = l.id "
+            "AND m.kind = 'invite_note') "
+            "ORDER BY CASE l.source WHEN 'harvey_prospect' THEN 0 WHEN 'web_search' THEN 2 ELSE 1 END, "
+            "l.created_at LIMIT ?", (limit,))
+        return [dict(r) for r in rows]
+
+    async def find_people(self):
+        """New people by web search (harvey/linkedin/finder.py) when fewer than
+        two days of invites are waiting to be drafted. Needs TINYFISH_API_KEY."""
+        if not self._time_left() or await self.pacing.invites_paused_until():
+            return
+        wanted = 2 * self.cfg.max_daily_connections - len(
+            await self.found_to_invite(2 * self.cfg.max_daily_connections))
+        if wanted <= 0:
+            return
+        env = self.env or self._load_env()
+        key = getattr(env, "tinyfish_api_key", "") or ""
+        if not key:
+            return
+        from harvey.linkedin.finder import find_people
+        found = await find_people(self.state, self.config, key, wanted)
+        self.report["found_people"] = found["added"]
+        if found["searches"]:
+            logger.info(f"LinkedIn: {found['searches']} web searches found {found['found']} profiles, "
+                        f"{found['added']} new to invite, {found['skipped']} outside your targets.")
+
     async def invite_candidates(self, limit: int) -> list[dict]:
         titles = [t.strip().lower() for t in self.cfg.invite_titles if t.strip()]
         if not titles or limit <= 0:
@@ -933,10 +989,21 @@ class LinkedInAgent:
                                                    kinds=("invite_note",), direction="out"))
         room = min(self.cfg.max_daily_connections - used["invites_today"],
                    self.cfg.max_weekly_invites - used["invites_week"]) - waiting
-        if room <= 0 or not self._time_left():
+        if room <= 0 or not self._time_left() or await self.pacing.invites_paused_until():
             return
         notes = await self.notes_allowed()
         if notes and self._brain_paused():
+            return
+        for lead in await self.found_to_invite(room):
+            if await self.email_block(lead):
+                continue
+            note = ""
+            if notes:
+                note = fit_note(await self.draft(lead, "invite"), self.cfg.invite_note_max_chars)
+            if await self.add_draft(lead, "invite_note", note):
+                self.report["invite_drafts"] += 1
+                room -= 1
+        if room <= 0:
             return
         for row in await self.invite_candidates(room):
             name = " ".join(x for x in (row["first_name"], row["last_name"]) if x)
@@ -1215,7 +1282,13 @@ FACTS about them:
             if current is None or current["status"] != "approved":
                 continue
             if kind == "invite":
-                ok, detail = await self.send_invite(lead, item)
+                self._inviting = True
+                try:
+                    ok, detail = await self.send_invite(lead, item)
+                except InviteLimitReached:
+                    continue        # stays approved: it goes when LinkedIn allows again
+                finally:
+                    self._inviting = False
             else:
                 ok, detail = await self.send_message(lead, item)
             if ok:

@@ -137,10 +137,25 @@ async def _promised(state) -> list[dict]:
     return out
 
 
-async def items(state) -> list[dict]:
+async def _linkedin_target(state, config=None) -> list[dict]:
+    """Today's LinkedIn connects under target, from 21:00 in LinkedIn's hours
+    zone, and why (harvey/linkedin/daily.py)."""
+    if config is None:
+        from harvey.config import load_config
+        config = load_config()
+    from harvey.linkedin.daily import under_target_item
+    item = await under_target_item(state, config)
+    return [item] if item else []
+
+
+async def items(state, config=None) -> list[dict]:
     """Today's items for everything above. Never raises: a part that fails is
     logged and left out."""
     out: list[dict] = []
+    try:
+        out += await _linkedin_target(state, config)
+    except Exception as e:
+        logger.warning(f"Needs you: LinkedIn target check failed: {e}")
     for part in (_promised, _linkedin_held, _email_reviews, _whatsapp_held):
         try:
             out += await part(state)
@@ -149,10 +164,10 @@ async def items(state) -> list[dict]:
     return out
 
 
-async def announce(state) -> int:
+async def announce(state, config=None) -> int:
     """Log a ``needs_you`` action for each item not announced before, so the
     owner's WhatsApp update names it once. Returns how many were new."""
-    current = await items(state)
+    current = await items(state, config)
     try:
         seen = list(json.loads(await state.get_setting(SEEN_KEY) or "[]"))
     except ValueError:

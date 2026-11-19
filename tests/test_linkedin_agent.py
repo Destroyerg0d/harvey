@@ -379,14 +379,19 @@ def test_the_note_limit_sends_the_invite_without_a_note(tmp_path):
     assert note["status"] == "sent" and note["body"] == ""
 
 
-def test_the_weekly_invite_limit_pauses_linkedin(tmp_path):
+def test_the_weekly_invite_limit_pauses_invites_only(tmp_path):
+    # Owner, 2026-11-19: 30 connects a day, accepting LinkedIn's weekly limit;
+    # replies and messages must never stop for it.
+    from harvey.linkedin.pacing import INVITES_PAUSE_KEY
     w = World(tmp_path, [Person(slug="kim-ray", name="Kim Ray")], site_kwargs={"weekly_limit": True})
     run(w.state.set_setting(AUTOPILOT_KEY, "on"))
     _candidate(w)
     report = w.go()
-    assert report["outcome"].startswith("stopped") and w.driver.invites == []
-    pause = run(guards.active_pause(w.state, naive(IN_HOURS)))
-    assert pause["kind"] == "invite_limit" and pause["until"]
+    assert report["outcome"] == "done" and w.driver.invites == []
+    assert run(guards.active_pause(w.state, naive(IN_HOURS))) is None          # the channel goes on
+    assert run(w.state.get_setting(INVITES_PAUSE_KEY))
+    assert "weekly invite limit" in run(w.agent().pacing.blocked("invite"))
+    assert run(w.agent().pacing.blocked("message")) == ""
     lead = run(w.state.li_get_lead_by_slug("kim-ray"))
     assert w.msgs(lead["id"], kinds=("invite_note",))[0]["status"] == "approved"   # not lost
 

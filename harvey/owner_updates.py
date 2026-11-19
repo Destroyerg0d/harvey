@@ -95,6 +95,14 @@ def lines_for(rows: list[tuple[str, dict]]) -> list[str]:
             line = (f"Site review for {what} written, waiting for you."
                     if d.get("ok") else f"Couldn't write a site review for {what}"
                     + (f" ({str(d.get('why'))[:80]})." if d.get("why") else "."))
+        elif kind == "linkedin_daily":
+            line = (f"LinkedIn today: {int(d.get('sent') or 0)} connects (target "
+                    f"{int(d.get('target') or 0)}), {int(d.get('accepted') or 0)} accepted. Last 7 days: "
+                    f"{int(d.get('week_sent') or 0)} sent, {int(d.get('week_accepted') or 0)} accepted."
+                    + (f" Short because {str(d.get('why'))[:120]}." if d.get("why") else ""))
+        elif kind == "linkedin_invite_limit":
+            line = ("LinkedIn's weekly invite limit was reached: connects wait 2 days, "
+                    "messages and replies carry on.")
         elif kind == "needs_you":
             line = f"Needs you: {str(d.get('title') or '')[:160]}"
         elif kind == "whatsapp_run":

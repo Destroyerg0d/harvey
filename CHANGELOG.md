@@ -9,6 +9,14 @@ minor versions can still change behaviour.
 
 ### Added
 
+- **LinkedIn finds new people to connect with, and tracks every day**
+  (harvey/linkedin/finder.py, harvey/linkedin/daily.py). When fewer than two days of invites are
+  waiting, Harvey searches the web (TinyFish, `TINYFISH_API_KEY`) for `site:linkedin.com/in`
+  profiles of founders, CEOs and owners in your niches and target countries, and adds the ones
+  that pass `targeting` as leads (source `web_search`); found leads are invited like the ones
+  from shop websites, after their profile is checked. LinkedIn's own search is never used. Once
+  LinkedIn's hours end, your WhatsApp update says the day's connects against the target, who
+  accepted, and the last 7 days; from 21:00 a day under target is a Needs you item saying why.
 - **`targeting`: cold outreach only to the countries and decision makers you choose**
   (harvey/targeting.py). `targeting.countries` (two-letter codes) and
   `targeting.decision_makers_only` cover cold email (every step), LinkedIn connects, and
@@ -626,6 +634,9 @@ minor versions can still change behaviour.
 
 ### Changed
 
+- **LinkedIn's weekly invite limit pauses invites only.** It used to pause the whole channel for
+  48 hours, replies included. Now invites wait 48 hours (`linkedin:invites_paused_until`) and
+  messages, replies and inbox checks carry on; the invite that met the limit stays approved.
 - **The WhatsApp and LinkedIn windows stay open between runs** (harvey/kept_browser.py). Each run
   used to open the channel's Chrome profile and close it at the end, so the windows came and went
   all day and WhatsApp Web synced with the phone from scratch each time. The heartbeat now opens a

@@ -673,9 +673,15 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
             # (harvey/owner_updates.py); in quiet hours it waits for the morning.
             from harvey import needs_you, owner_updates
             try:
-                await needs_you.announce(state)
+                await needs_you.announce(state, config)
             except Exception as e:
                 logger.warning(f"Needs you announce failed: {e}")
+            # LinkedIn's day, once its hours end: connects and acceptances.
+            try:
+                from harvey.linkedin.daily import report_day
+                await report_day(state, config)
+            except Exception as e:
+                logger.warning(f"LinkedIn daily report failed: {e}")
             await owner_updates.send(state, config, quiet=in_quiet_hours(config))
 
             # 7. Sleep until next heartbeat

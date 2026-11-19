@@ -13,6 +13,9 @@ from datetime import datetime, time, timedelta, timezone
 import pytz
 
 COUNT_PREFIX = "linkedin:count:"
+# LinkedIn said its weekly invite limit is reached: invites wait until this time
+# (naive UTC ISO); messages, replies and inbox checks carry on (owner, 2026-11-19).
+INVITES_PAUSE_KEY = "linkedin:invites_paused_until"
 KINDS = ("invite", "message", "withdraw")
 # How often a long wait between actions looks up to see whether it should stop.
 STOP_CHECK_SECONDS = 10.0
@@ -115,6 +118,9 @@ class Pacing:
         if used["actions_hour"] >= caps["actions_hour"]:
             return f"{caps['actions_hour']} actions this hour already"
         if kind == "invite":
+            until = await self.invites_paused_until()
+            if until:
+                return f"LinkedIn's weekly invite limit: invites wait until {until:%Y-%m-%d %H:%M} UTC"
             if used["invites_today"] >= caps["invites_today"]:
                 return f"today's {caps['invites_today']} invites are used"
             if used["invites_week"] >= caps["invites_week"]:
@@ -124,6 +130,16 @@ class Pacing:
         elif kind == "withdraw" and used["withdrawals_today"] >= caps["withdrawals_today"]:
             return f"today's {caps['withdrawals_today']} withdrawals are used"
         return ""
+
+    async def invites_paused_until(self):
+        """When invites may go again after LinkedIn's weekly limit, or None."""
+        raw = await self.state.get_setting(INVITES_PAUSE_KEY)
+        try:
+            until = datetime.fromisoformat(raw) if raw else None
+        except ValueError:
+            return None
+        now = self._now().astimezone(timezone.utc).replace(tzinfo=None)
+        return until if until and until > now else None
 
     async def record(self, kind: str) -> None:
         if kind not in KINDS:
