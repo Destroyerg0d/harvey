@@ -1795,17 +1795,23 @@ FACTS about them:
         if note and await self.driver.click_button(r"^add a( free)? note$", within=INVITE_DIALOG):
             html = await self.driver.html()
             await self._guard(html)
-            if note_limit_reached(html):
+            limit = note_limit_reached(html)
+            if limit or not await self.driver.type_text(INVITE_NOTE_BOX, note):
+                # No note this month: LinkedIn's limit, or a note form Harvey can't
+                # find (live, 2026-11-20). The invite goes without one, and notes
+                # stay off until next month.
                 first = self.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
                 next_month = (first + timedelta(days=32)).replace(day=1)
                 await self.state.set_setting(NOTES_OFF_KEY, _iso(next_month))
-                await self.driver.click_button(r"^(dismiss|close|got it|not now)$")
+                if not limit:
+                    logger.info("LinkedIn: the invite note box wasn't found; invites go without a note "
+                                "until next month.")
+                await self.driver.click_button(r"^(dismiss|close|got it|not now|cancel)$")
                 ok, _ = await self._open_connect(await self.driver.html(), lead)
                 if not ok:
-                    return False, "LinkedIn's note limit is reached and the invite couldn't reopen"
+                    return False, ("LinkedIn's note limit is reached and the invite couldn't reopen" if limit
+                                   else "the note box wasn't there and the invite couldn't reopen")
             else:
-                if not await self.driver.type_text(INVITE_NOTE_BOX, note):
-                    return False, "couldn't find the invite note box"
                 if clean_text(await self.driver.value_of(INVITE_NOTE_BOX)) != clean_text(note):
                     await self.driver.clear(INVITE_NOTE_BOX)
                     await self.driver.click_button(r"^(dismiss|close|cancel)$", within=INVITE_DIALOG)

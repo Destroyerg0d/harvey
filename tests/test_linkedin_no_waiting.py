@@ -75,6 +75,17 @@ def test_a_card_connect_with_a_side_list_goes_to_them_only(tmp_path):
     assert w.go()["sent_invites"] == 1 and w.site.stray_invites == []
 
 
+def test_no_note_box_means_the_invite_goes_without_a_note(tmp_path):
+    from harvey.agents.linkedin_agent import NOTES_OFF_KEY
+    w = World(tmp_path, [Person(slug="ann-lee-1", name="Ann Lee", headline="Founder at Example Goods",
+                                location="London, England, United Kingdom")], site_kwargs={"no_note_box": True})
+    lead = w.lead("ann-lee-1", stage="found", name="Ann Lee")
+    run(w.state.li_add_message(lead, kind="invite_note", body="Fellow store owner here.", status="approved",
+                               approved_by="you"))
+    assert w.go()["sent_invites"] == 1
+    assert w.driver.invites == [("ann-lee-1", "")] and run(w.state.get_setting(NOTES_OFF_KEY))
+
+
 def test_a_side_lists_connect_isnt_theirs():
     from harvey.linkedin.pages import profile_connect_state
     html = ("<main><section class='artdeco-card'><div><p>Ann Lee</p></div><button>Follow</button>"

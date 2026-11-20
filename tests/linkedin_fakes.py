@@ -70,7 +70,8 @@ class Person:
 
 
 class FakeLinkedIn:
-    def __init__(self, people=(), *, note_limit=False, weekly_limit=False, breaker_on=""):
+    def __init__(self, people=(), *, note_limit=False, weekly_limit=False, breaker_on="", no_note_box=False):
+        self.no_note_box = no_note_box    # "Add a note" opens a form Harvey can't find a box in
         self.people = {p.slug: p for p in people}
         self.note_limit = note_limit
         self.weekly_limit = weekly_limit
@@ -266,6 +267,9 @@ class FakeDriver:
             if self.site.note_limit:
                 self.state["modal"] = ('<div role="dialog" class="artdeco-modal">You\'ve used all your '
                                        'free personalized invitations this month.<button>Dismiss</button></div>')
+            elif self.site.no_note_box:
+                self.state["modal"] = ('<dialog open><div contenteditable="true"></div><button>Send</button>'
+                                       '<button>Dismiss</button></dialog>')
             else:
                 self.state["modal"] = ('<div role="dialog" class="artdeco-modal"><textarea name="message">'
                                        '</textarea><button>Send</button></div>')
