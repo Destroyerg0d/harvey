@@ -146,17 +146,20 @@ class Driver:
         except Exception as e:
             logger.debug(f"LinkedIn: reading the connect controls failed: {e}")
             return False
+        # The page repeats their connect (the card, a sticky header copy);
+        # one copy can refuse the click (covered, off screen), so each is
+        # tried in turn (live, 2026-11-20).
         for item in found:
             m = re.match(r"^invite (.+) to connect$", item["label"], re.IGNORECASE)
             if not m or item["aside"] or not item["visible"] or not names_match(m.group(1), name):
                 continue
             target = controls.nth(item["i"])
             try:
-                await target.scroll_into_view_if_needed(timeout=5000)
-                await target.click(timeout=8000, delay=self.rng.randint(40, 140))
+                await target.scroll_into_view_if_needed(timeout=4000)
+                await target.click(timeout=5000, delay=self.rng.randint(40, 140))
             except Exception as e:
-                logger.debug(f"LinkedIn: clicking their connect failed: {e}")
-                return False
+                logger.debug(f"LinkedIn: clicking a copy of their connect failed: {e}")
+                continue
             await self.wait(self.rng.uniform(0.8, 2.0))
             return True
         return False
