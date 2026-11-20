@@ -131,6 +131,36 @@ class Driver:
             return True
         return False
 
+    async def click_connect_for(self, name: str) -> bool:
+        """Click "Invite <name> to connect" for this person only: on their
+        card, or in their More menu once it is open. Never one inside a side
+        list of other people ("More profiles for you"), and never one naming
+        someone else (2026-11-20: a page-wide click invited 20 strangers)."""
+        from harvey.linkedin.pages import names_match
+        controls = self.page.locator("button, a, [role=menuitem], [role=button]")
+        try:
+            found = await controls.evaluate_all(
+                "(els) => els.map((e, i) => ({i: i, label: (e.getAttribute('aria-label') || e.innerText || '')"
+                ".replace(/\\s+/g, ' ').trim(), aside: !!e.closest('aside'), "
+                "visible: !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length)}))")
+        except Exception as e:
+            logger.debug(f"LinkedIn: reading the connect controls failed: {e}")
+            return False
+        for item in found:
+            m = re.match(r"^invite (.+) to connect$", item["label"], re.IGNORECASE)
+            if not m or item["aside"] or not item["visible"] or not names_match(m.group(1), name):
+                continue
+            target = controls.nth(item["i"])
+            try:
+                await target.scroll_into_view_if_needed(timeout=5000)
+                await target.click(timeout=8000, delay=self.rng.randint(40, 140))
+            except Exception as e:
+                logger.debug(f"LinkedIn: clicking their connect failed: {e}")
+                return False
+            await self.wait(self.rng.uniform(0.8, 2.0))
+            return True
+        return False
+
     async def click_button_near(self, anchor_selector: str, name_pattern: str) -> bool:
         """Click the button named ``name_pattern`` in the list item that holds
         ``anchor_selector`` (a card's own Withdraw, say)."""

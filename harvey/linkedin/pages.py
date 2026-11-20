@@ -30,6 +30,9 @@ THREAD_HEADER = ".msg-entity-lockup__entity-title"
 CONVERSATION_LIST = ".msg-conversations-container__conversations-list"
 CONNECTIONS_LIST = "main"
 INVITE_NOTE_BOX = "textarea[name='message'], textarea#custom-message"
+# LinkedIn's invite dialog is a plain <dialog> now, with no role (live,
+# 2026-11-20); pages also carry hidden role=dialog divs (a video player's).
+INVITE_DIALOG = "dialog[open]:visible, [role='dialog']:visible"
 
 _SLUG_RE = re.compile(r"/in/([^/?#]+)", re.IGNORECASE)
 _CONNECTED_ON_RE = re.compile(r"Connected\s+on\s+([A-Z][a-z]+\.?\s+\d{1,2},\s+\d{4})")
@@ -458,18 +461,31 @@ def _label(el) -> str:
     return clean_text(el.get("aria-label") or el.get_text(" "))
 
 
-def profile_connect_state(html: str) -> str:
+def _invite_name(label: str) -> str:
+    m = re.match(r"^invite (.+) to connect$", (label or "").strip(), re.IGNORECASE)
+    return m.group(1) if m else ""
+
+
+def profile_connect_state(html: str, name: str = "") -> str:
     """'pending' (an invite is out), 'connected' (1st degree: a Message
     button and no Connect), 'connect' (a Connect button on the card),
-    'more' (Connect may be under More), or 'unknown'."""
+    'more' (Connect may be under More), or 'unknown'.
+
+    The side lists of other people ("More profiles for you", inside main
+    since 2026) never count: their "Invite X to connect" buttons are someone
+    else's (2026-11-20: 20 invites went to strangers from that list). With
+    ``name``, an "Invite X to connect" counts only when X is them."""
     s = soup_of(html)
+    for el in s.select("aside"):
+        el.decompose()
     card = _top_card(s)
     labels = [_label(b) for b in _buttons(card)]
     low = [x.lower() for x in labels]
     if any(x == "pending" or x.startswith("pending,") or "withdraw invitation" in x
            or x.startswith("pending ") for x in low):
         return "pending"
-    if any(x == "connect" or (x.startswith("invite ") and x.endswith(" to connect")) for x in low):
+    if any(x == "connect" or (_invite_name(x) and (not name or names_match(_invite_name(x), name)))
+           for x in low):
         return "connect"
     if card.find(string=re.compile(r"\b1st\b")) and any(x.startswith("message") for x in low):
         return "connected"
@@ -502,7 +518,7 @@ def invite_modal_open(html: str) -> bool:
     return False
 
 
-def invite_confirmed(html: str) -> bool:
+def invite_confirmed(html: str, name: str = "") -> bool:
     """The invite went: LinkedIn's toast says so, or the card shows Pending."""
     text = clean_text(soup_of(html).get_text(" ")).lower()
-    return any(p in text for p in _INVITE_SENT_PATTERNS) or profile_connect_state(html) == "pending"
+    return any(p in text for p in _INVITE_SENT_PATTERNS) or profile_connect_state(html, name) == "pending"

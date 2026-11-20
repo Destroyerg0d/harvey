@@ -52,6 +52,40 @@ def test_an_invite_goes_to_a_profile_with_no_h1(tmp_path):
     assert cached["location"].startswith("Paris")         # kept for their first message
 
 
+def test_connect_under_more_goes_to_them_and_never_to_the_side_list(tmp_path):
+    # Live, 2026-11-20: a page-wide "Invite ... to connect" click hit the
+    # "More profiles for you" list first and invited 20 strangers.
+    strangers = ("Riley Stranger", "Sam Other")
+    w = World(tmp_path, [Person(slug="ann-lee-1", name="Ann Lee", headline="Founder & CEO at Example Goods",
+                                location="Paris, Île-de-France, France", plain_card=True,
+                                connect_in_more=True, side_list=strangers)])
+    w.config.targeting = TargetingConfig(countries=WEST, decision_makers_only=True)
+    lead = w.lead("ann-lee-1", stage="found", name="Ann Lee")
+    run(w.state.li_add_message(lead, kind="invite_note", body="", status="approved", approved_by="you"))
+    report = w.go()
+    assert w.site.stray_invites == []
+    assert report["sent_invites"] == 1 and [s for s, _ in w.driver.invites] == ["ann-lee-1"]
+
+
+def test_a_card_connect_with_a_side_list_goes_to_them_only(tmp_path):
+    w = World(tmp_path, [Person(slug="ann-lee-1", name="Ann Lee", headline="Founder at Example Goods",
+                                location="London, England, United Kingdom", side_list=("Riley Stranger",))])
+    lead = w.lead("ann-lee-1", stage="found", name="Ann Lee")
+    run(w.state.li_add_message(lead, kind="invite_note", body="", status="approved", approved_by="you"))
+    assert w.go()["sent_invites"] == 1 and w.site.stray_invites == []
+
+
+def test_a_side_lists_connect_isnt_theirs():
+    from harvey.linkedin.pages import profile_connect_state
+    html = ("<main><section class='artdeco-card'><div><p>Ann Lee</p></div><button>Follow</button>"
+            "<button>More</button></section><aside><button aria-label='Invite Riley Stranger to connect'>"
+            "Connect</button></aside></main>")
+    assert profile_connect_state(html, "Ann Lee") == "more"
+    theirs = html.replace("<button>More</button>", "<button aria-label='Invite Ann Lee to connect'>Connect</button>")
+    assert profile_connect_state(theirs, "Ann Lee") == "connect"
+    assert profile_connect_state(theirs, "Bo Ma") == "more" or profile_connect_state(theirs, "Bo Ma") == "unknown"
+
+
 def test_the_web_searchs_location_counts_when_the_page_shows_none(tmp_path):
     w = World(tmp_path, [Person(slug="bo-ma-2", name="Bo Ma", headline="Founder at Example Goods",
                                 plain_card=True)])

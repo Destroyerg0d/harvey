@@ -61,6 +61,8 @@ class Person:
     headline: str = ""                # the top card's line under the name
     location: str = ""                # the top card's location line
     plain_card: bool = False          # LinkedIn's page today: no h1, degree, company and school lines
+    connect_in_more: bool = False     # Follow on the card, Connect under More (3rd degree)
+    side_list: tuple = ()             # names in "More profiles for you", each with its own Connect
 
     @property
     def thread_url(self) -> str:
@@ -73,6 +75,7 @@ class FakeLinkedIn:
         self.note_limit = note_limit
         self.weekly_limit = weekly_limit
         self.breaker_on = breaker_on      # a URL that shows "unusual activity"
+        self.stray_invites: list[str] = []  # invites that went to someone in a side list
         self.signed_in = True
         self.withdrawn: list[str] = []
 
@@ -130,7 +133,16 @@ class FakeLinkedIn:
 
     def profile_html(self, p: Person, state: dict) -> str:
         urn = p.urn or p.slug
-        if p.connected:
+        side = ""
+        if p.side_list:
+            side = "<aside><h2>More profiles for you</h2>" + "".join(
+                f'<button aria-label="Invite {e(other)} to connect">Connect</button>' for other in p.side_list) + "</aside>"
+        if p.connect_in_more and not p.connected and not p.pending:
+            menu = (f'<div class="artdeco-dropdown__content--is-open"><a aria-label="Invite {e(p.name)} to connect" '
+                    f'href="/preload/custom-invite/?vanityName={p.slug}">Connect</a></div>'
+                    if state.get("menu_open") else "")
+            buttons = f'<button aria-label="Follow {e(p.name)}">Follow</button><button>More</button>{menu}'
+        elif p.connected:
             buttons = (f'<a href="/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3A{urn}'
                        f'&recipient={urn}&screenContext=NON_SELF_PROFILE_VIEW" '
                        f'aria-label="Message {e(p.name)}">Message</a><span>1st</span>')
@@ -150,12 +162,12 @@ class FakeLinkedIn:
                     + (f'<p>{e(p.headline)}</p>' if p.headline else "")
                     + "<p>Example Goods Ltd</p><p>· Example State University</p>"
                     + (f'<p>{e(p.location)}</p>' if p.location else "")
-                    + f"{buttons}</section>{modal}{toast}</main></body></html>")
+                    + f"{buttons}</section>{side}{modal}{toast}</main></body></html>")
         return (f"<html><body>{NAV}{sidebar}<main><section class=\"artdeco-card pv-top-card\">"
                 f"<h1>{e(p.name)}</h1>"
                 + (f'<div class="text-body-medium">{e(p.headline)}</div>' if p.headline else "")
                 + (f'<span class="text-body-small">{e(p.location)}</span>' if p.location else "")
-                + f"{buttons}</section>{modal}"
+                + f"{buttons}</section>{side}{modal}"
                 f"{toast}</main></body></html>")
 
 
@@ -206,13 +218,43 @@ class FakeDriver:
             return True
         return selector == SEND_BUTTON
 
+    def _open_invite(self, p):
+        if self.site.weekly_limit:
+            self.state["modal"] = ('<div role="dialog" class="artdeco-modal">You\'ve reached the '
+                                   'weekly invitation limit</div>')
+        else:
+            self.state["modal"] = ('<dialog open><h2>Add a note to your invitation?</h2><button>Add a note</button>'
+                                   '<button>Send without a note</button><button>Dismiss</button></dialog>')
+
+    async def click_connect_for(self, name: str) -> bool:
+        from harvey.linkedin.pages import names_match
+        self.clicked.append(f"connect-for:{name}")
+        p = self._person()
+        if p is None or p.connected or p.pending or not names_match(p.name, name):
+            return False
+        if p.connect_in_more and not self.state.get("menu_open"):
+            return False                    # under More, and More isn't open
+        self._open_invite(p)
+        return True
+
     async def click_button(self, name_pattern: str, within: str = "") -> bool:
         self.clicked.append(name_pattern)
         rx = re.compile(name_pattern, re.IGNORECASE)
         p = self._person()
         if p is None:
             return False
-        if rx.search(f"Invite {p.name} to connect") and not p.connected and not p.pending:
+        for other in p.side_list:
+            # A page-wide connect click hits the side list first, and that
+            # invite goes at once, to a stranger (live, 2026-11-20).
+            if rx.search(f"Invite {other} to connect"):
+                self.site.stray_invites.append(other)
+                return True
+        if rx.search("More") and p.connect_in_more:
+            self.state["menu_open"] = True
+            return True
+        if p.connect_in_more:
+            pass                            # their connect is in the menu, not a button
+        elif rx.search(f"Invite {p.name} to connect") and not p.connected and not p.pending:
             if self.site.weekly_limit:
                 self.state["modal"] = ('<div role="dialog" class="artdeco-modal">You\'ve reached the '
                                        'weekly invitation limit</div>')

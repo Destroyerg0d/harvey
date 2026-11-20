@@ -46,7 +46,7 @@ from harvey.linkedin import guards
 from harvey.linkedin.guards import BreakerTripped, active_pause, detect_breaker
 from harvey.linkedin.pacing import INVITES_PAUSE_KEY, Pacing, wait_unless
 from harvey.linkedin.pages import (
-    COMPOSER, CONNECTIONS_URL, CONVERSATION_LIST, FEED_URL, INVITE_NOTE_BOX, MESSAGING_URL,
+    COMPOSER, CONNECTIONS_URL, CONVERSATION_LIST, FEED_URL, INVITE_DIALOG, INVITE_NOTE_BOX, MESSAGING_URL,
     SEND_BUTTON, SENT_INVITES_URL, clean_text, compose_link_from_profile, invite_confirmed,
     names_match, note_limit_reached, parse_connections, parse_conversation_list,
     parse_sent_invitations, parse_thread, profile_connect_state, profile_headline, profile_location, profile_summary,
@@ -1724,16 +1724,20 @@ FACTS about them:
         return False, (MAYBE_SENT + "Send was pressed but the thread didn't show the message. "
                        "Check the conversation on LinkedIn before sending anything else.")
 
-    async def _open_connect(self, html: str) -> tuple[bool, str]:
-        state = profile_connect_state(html)
-        if state == "connect":
-            ok = await self.driver.click_button(r"^(invite .+ to connect|connect)$", within="main")
-        elif state == "more":
-            ok = await self.driver.click_button(r"^more( actions)?$", within="main") and \
-                await self.driver.click_button(r"^(invite .+ to connect|connect)$")
-        else:
+    async def _open_connect(self, html: str, lead: dict) -> tuple[bool, str]:
+        """Open the invite for THIS person: their own "Invite <name> to
+        connect", on the card or in their More menu. A page-wide match once
+        clicked a side list's other people (2026-11-20)."""
+        name = lead.get("name") or lead.get("first_name") or ""
+        state = profile_connect_state(html, name)
+        if state in ("pending", "connected") or not name:
             return False, state
-        return ok, state
+        if await self.driver.click_connect_for(name):
+            return True, state
+        if await self.driver.click_button(r"^more( actions)?$", within="main") and \
+                await self.driver.click_connect_for(name):
+            return True, state
+        return False, state
 
     async def _invite_profile(self, lead: dict, item: dict) -> str | None:
         """Their profile page, read before an invite: None when the invite is
@@ -1741,7 +1745,7 @@ FACTS about them:
         owner's targeting), the page's HTML otherwise. What it shows is kept
         (PROFILE_KEY), so their first message needs no second visit."""
         html = await self._visit(lead.get("profile_url") or profile_url(lead["slug"]))
-        state = profile_connect_state(html)
+        state = profile_connect_state(html, lead.get("name") or "")
         if state == "pending":
             await self.state.li_update_message(item["id"], status="skipped",
                                                error="an invite to them was already pending")
@@ -1781,14 +1785,14 @@ FACTS about them:
             html = await self._invite_profile(lead, item)
             if html is None:
                 return False, ""
-        ok, _ = await self._open_connect(html)
+        ok, _ = await self._open_connect(html, lead)
         if not ok:
-            return False, "couldn't find a Connect button on their profile"
+            return False, "couldn't find their own Connect, on the card or under More"
         html = await self.driver.html()
         await self._guard(html)
         note = item["body"] if await self.notes_allowed() else ""
         sent_note = ""
-        if note and await self.driver.click_button(r"^add a note$"):
+        if note and await self.driver.click_button(r"^add a( free)? note$", within=INVITE_DIALOG):
             html = await self.driver.html()
             await self._guard(html)
             if note_limit_reached(html):
@@ -1796,7 +1800,7 @@ FACTS about them:
                 next_month = (first + timedelta(days=32)).replace(day=1)
                 await self.state.set_setting(NOTES_OFF_KEY, _iso(next_month))
                 await self.driver.click_button(r"^(dismiss|close|got it|not now)$")
-                ok, _ = await self._open_connect(await self.driver.html())
+                ok, _ = await self._open_connect(await self.driver.html(), lead)
                 if not ok:
                     return False, "LinkedIn's note limit is reached and the invite couldn't reopen"
             else:
@@ -1804,28 +1808,32 @@ FACTS about them:
                     return False, "couldn't find the invite note box"
                 if clean_text(await self.driver.value_of(INVITE_NOTE_BOX)) != clean_text(note):
                     await self.driver.clear(INVITE_NOTE_BOX)
-                    await self.driver.click_button(r"^(dismiss|close|cancel)$")
+                    await self.driver.click_button(r"^(dismiss|close|cancel)$", within=INVITE_DIALOG)
                     return False, "the note box didn't hold exactly the note, so nothing was sent"
                 if await self._held():      # stopped while typing: it stays approved
                     await self.driver.clear(INVITE_NOTE_BOX)
-                    await self.driver.click_button(r"^(dismiss|close|cancel)$")
+                    await self.driver.click_button(r"^(dismiss|close|cancel)$", within=INVITE_DIALOG)
                     return False, ""
                 if not await self.driver.click_button(r"^send( invitation| now)?$",
-                                                      within="[role='dialog']"):
+                                                      within=INVITE_DIALOG):
                     return False, "couldn't press Send on the invite"
                 sent_note = note
         if not sent_note:
             if await self._held():
-                await self.driver.click_button(r"^(dismiss|close|cancel)$")
+                await self.driver.click_button(r"^(dismiss|close|cancel)$", within=INVITE_DIALOG)
                 return False, ""
-            if not (await self.driver.click_button(r"^send without a note$")
+            if not (await self.driver.click_button(r"^send without a note$", within=INVITE_DIALOG)
                     or await self.driver.click_button(r"^send( now| invitation)?$",
-                                                      within="[role='dialog']")):
+                                                      within=INVITE_DIALOG)):
+                await self.driver.click_button(r"^(dismiss|close|cancel)$", within=INVITE_DIALOG)
                 return False, "couldn't press Send on the invite"
         await self.driver.wait(2)
         html = await self.driver.html()
         await self._guard(html)
-        if not invite_confirmed(html):
+        if not invite_confirmed(html, lead.get("name") or ""):
+            await self.driver.wait(3)
+            html = await self.driver.html()
+        if not invite_confirmed(html, lead.get("name") or ""):
             return False, (MAYBE_SENT + "Send was pressed but LinkedIn didn't confirm the invite. "
                            "Check their profile before inviting again.")
         if sent_note != item["body"]:
