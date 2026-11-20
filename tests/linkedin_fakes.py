@@ -185,6 +185,7 @@ class FakeDriver:
         self.clicked: list[str] = []
         self.sent: list[tuple[str, str]] = []
         self.invites: list[tuple[str, str]] = []
+        self.not_loading: list[str] = []     # URL parts whose page never loads
 
     def _person(self):
         m = re.search(r"/in/([^/?#]+)", self.url)
@@ -194,7 +195,11 @@ class FakeDriver:
         return self.site.person_by_urn(m.group(1)) if m else None
 
     async def goto(self, url: str):
-        self.url = url if url.startswith("http") else BASE + url
+        target = url if url.startswith("http") else BASE + url
+        if any(bit in target for bit in self.not_loading):
+            from harvey.linkedin.session import PageNotLoading
+            raise PageNotLoading(f"LinkedIn didn't load {target.split('?')[0]}")
+        self.url = target
         self.visited.append(self.url)
         self.state = {k: v for k, v in self.state.items() if k == "pill_override"}
 

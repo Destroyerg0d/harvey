@@ -23,6 +23,12 @@ minor versions can still change behaviour.
 
 ### Changed
 
+- **A LinkedIn page that won't load no longer stops the run** (11 runs stopped on
+  "Page.goto: Timeout 45000ms exceeded" in 10 days). Harvey's LinkedIn window accepts "Leave
+  site?" (Playwright's default dismiss cancelled the navigation, so it hung until the timeout). A
+  slow page that has its content is used; one that never came is tried once more; one that still
+  won't load skips just that send or step, which waits for the next run. Only 3 such pages in a
+  run stop it, and your WhatsApp update says so only after 3 runs in a row.
 - **LinkedIn connects go out again.** LinkedIn's profile page no longer has an `h1`, so the
   location and headline read as empty and 124 invites were skipped as "their country couldn't be
   read". Both are now read from the top of the page's text when the old lines aren't there

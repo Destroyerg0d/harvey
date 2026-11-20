@@ -53,6 +53,7 @@ from harvey.linkedin.pages import (
     profile_url,
     recipient_confirmed, signed_in_from, summary_headline, summary_location,
 )
+from harvey.linkedin.session import PageNotLoading
 from harvey.linkedin.store import HELD_FOR_REVIEW, MAYBE_SENT, _iso
 from harvey.untrusted import UNTRUSTED_RULE, fence
 
@@ -84,6 +85,12 @@ RETRY_UNREAD_KEY = "linkedin:retry_unread:2026-11-20"
 UNREAD_REASONS = ("not invited: their country couldn't be read", "not invited: their role couldn't be read")
 # Why an approved item didn't go this run, written on it (never silent).
 WAITING = "waiting: "
+# Pages that wouldn't load (session.PageNotLoading) before a run stops; and how
+# many runs in a row stopped so before your phone hears of it.
+MAX_PAGES_NOT_LOADING = 3
+NOT_LOADING_KEY = "linkedin:runs_not_loading"
+NOT_LOADING_RUNS_TO_TELL = 3
+NOT_LOADING = "stopped: LinkedIn pages weren't loading"
 
 
 def li_catch_up_due(rows: list[dict], cfg, now) -> bool:
@@ -302,6 +309,7 @@ class LinkedInAgent:
         self.replies_only = replies_only
         self._failed_leads = set()
         self._waiting = {}
+        self._not_loading = 0
         started = self.now()
         self.deadline = started + timedelta(
             minutes=INBOX_CHECK_MINUTES if replies_only else self.cfg.max_run_minutes)
@@ -328,12 +336,27 @@ class LinkedInAgent:
         except SwitchedOff:
             self.report["outcome"] = "stopped: switched off"
             logger.info("LinkedIn: switched off, so the run stopped.")
+        except PageNotLoading as e:
+            pages = max(1, getattr(self, "_not_loading", 0))
+            self.report["outcome"] = f"{NOT_LOADING} ({pages} timed out); the next run tries again"
+            logger.warning(f"LinkedIn: {e}; the run stopped and the next one tries again.")
         except Exception as e:
             self.report["outcome"] = f"error: {e}"
             logger.error(f"LinkedIn run failed: {e}", exc_info=True)
         finally:
             self.driver = None
             self.report["finished"] = _iso(self.now())
+            # Pages that didn't load once in a while are LinkedIn being slow:
+            # your phone hears only when it lasts several runs (owner, 2026-11-20).
+            try:
+                if str(self.report.get("outcome", "")).startswith(NOT_LOADING):
+                    runs = int(await self.state.get_setting(NOT_LOADING_KEY) or 0) + 1
+                    await self.state.set_setting(NOT_LOADING_KEY, str(runs))
+                    self.report["runs_not_loading"] = runs
+                elif str(self.report.get("outcome", "")) == "done":
+                    await self.state.set_setting(NOT_LOADING_KEY, "0")
+            except Exception:
+                pass
             if self._waiting:
                 self.report["waiting"] = dict(self._waiting)
                 logger.info("LinkedIn: approved but not sent this run: " + "; ".join(
@@ -366,7 +389,10 @@ class LinkedInAgent:
                   self.draft_messages, self.find_people, self.pick_invites, self.send_approved))
         for step in steps:
             await self._still_on()
-            await step()
+            try:
+                await step()
+            except PageNotLoading as e:
+                self._page_not_loading(e, f"the rest of {step.__name__.strip('_').replace('_', ' ')}")
         await self._still_on()      # stopped during the last step: say so, not "done"
 
     async def _inbox_break(self):
@@ -412,6 +438,15 @@ class LinkedInAgent:
 
     def _time_left(self) -> bool:
         return self.deadline is None or self.now() < self.deadline
+
+    def _page_not_loading(self, error: Exception, skipped: str):
+        """A page that wouldn't load: that bit waits for the next run, and the
+        run carries on, unless pages keep failing (then it stops)."""
+        self._not_loading = getattr(self, "_not_loading", 0) + 1
+        self.report["pages_not_loading"] = self._not_loading
+        logger.info(f"LinkedIn: {error}; {skipped} waits for the next run.")
+        if self._not_loading >= MAX_PAGES_NOT_LOADING:
+            raise PageNotLoading(str(error))
 
     async def _note_waiting(self, item: dict, why: str):
         """Why an approved item didn't go this time, on the item (the tab shows
@@ -1554,7 +1589,10 @@ FACTS about them:
                     await self._note_waiting(rest, "the run's time ran out first; it goes on the next run")
                 break
             if not only:
-                await self._inbox_break()      # a reply that came in meanwhile goes first
+                try:
+                    await self._inbox_break()      # a reply that came in meanwhile goes first
+                except PageNotLoading as e:
+                    self._page_not_loading(e, "the inbox check")
             reply = item["kind"] == "reply"
             if getattr(self, "replies_only", False) and not reply:
                 continue        # an inbox check sends replies only
@@ -1623,6 +1661,10 @@ FACTS about them:
                 except InviteLimitReached:
                     await self._note_waiting(item, "LinkedIn's weekly invite limit; it goes when LinkedIn allows")
                     continue
+                except PageNotLoading as e:
+                    await self._note_waiting(item, "LinkedIn didn't load their profile; it's tried next run")
+                    self._page_not_loading(e, "this invite")
+                    continue
                 finally:
                     self._inviting = False
                 if html is None:
@@ -1634,17 +1676,25 @@ FACTS about them:
             current = await self.state.li_get_message(item["id"])
             if current is None or current["status"] != "approved":
                 continue
-            if kind == "invite":
-                self._inviting = True
-                try:
-                    ok, detail = await self.send_invite(lead, item, html=html)
-                except InviteLimitReached:
-                    await self._note_waiting(item, "LinkedIn's weekly invite limit; it goes when LinkedIn allows")
-                    continue        # stays approved: it goes when LinkedIn allows again
-                finally:
-                    self._inviting = False
-            else:
-                ok, detail = await self.send_message(lead, item)
+            try:
+                if kind == "invite":
+                    self._inviting = True
+                    try:
+                        ok, detail = await self.send_invite(lead, item, html=html)
+                    except InviteLimitReached:
+                        await self._note_waiting(item, "LinkedIn's weekly invite limit; it goes when LinkedIn allows")
+                        continue        # stays approved: it goes when LinkedIn allows again
+                    finally:
+                        self._inviting = False
+                else:
+                    ok, detail = await self.send_message(lead, item)
+            except PageNotLoading as e:
+                # Nothing was typed yet on a page that never loaded: it waits.
+                fresh = await self.state.li_get_message(item["id"])
+                if fresh and fresh["status"] == "approved":
+                    await self._note_waiting(fresh, "LinkedIn didn't load the page; it's tried next run")
+                self._page_not_loading(e, "this send")
+                continue
             if ok:
                 await self.pacing.record(kind)
                 self.report["sent_invites" if kind == "invite" else "sent_messages"] += 1

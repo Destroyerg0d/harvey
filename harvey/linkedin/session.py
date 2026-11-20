@@ -32,6 +32,29 @@ class ChromeNotFound(RuntimeError):
     pass
 
 
+class PageNotLoading(RuntimeError):
+    """A LinkedIn page didn't load, after a second try. The run skips that
+    item or step and carries on (LinkedInAgent), instead of stopping."""
+
+
+GOTO_TIMEOUT_MS = 45000
+
+
+def _is_timeout(error: Exception) -> bool:
+    try:
+        from playwright.async_api import TimeoutError as PlaywrightTimeout
+        if isinstance(error, PlaywrightTimeout):
+            return True
+    except Exception:
+        pass
+    return "timeout" in type(error).__name__.lower() or "Timeout" in str(error)[:80]
+
+
+def _short(url: str) -> str:
+    """A page as the owner would name it: its path, no query (profile ids)."""
+    return (url or "").split("://", 1)[-1].split("?", 1)[0][:80]
+
+
 def chrome_candidates() -> list[str]:
     """Where Google Chrome is normally installed on this platform."""
     if sys.platform.startswith("win"):
@@ -68,6 +91,22 @@ class Driver:
     def __init__(self, page, rng: random.Random | None = None):
         self.page = page
         self.rng = rng or random.Random()
+        # "Leave site?" (a typed message, an open invite form): accepted, or
+        # Playwright's default dismiss cancels the navigation and goto hangs
+        # until its timeout (2026-11-11 to 11-20: 11 runs stopped that way).
+        try:
+            page.on("dialog", self._on_dialog)
+        except Exception:
+            pass
+
+    async def _on_dialog(self, dialog) -> None:
+        try:
+            if dialog.type == "beforeunload":
+                await dialog.accept()
+            else:
+                await dialog.dismiss()
+        except Exception as e:
+            logger.debug(f"LinkedIn: a page dialog couldn't be closed: {e}")
 
     @property
     def url(self) -> str:
@@ -77,8 +116,41 @@ class Driver:
     def closed(self) -> bool:
         return self.page.is_closed()
 
+    async def _arrived(self, before: str) -> bool:
+        """The page moved on from ``before`` and has its content (a slow
+        LinkedIn page keeps loading long after it is usable)."""
+        try:
+            state = await self.page.evaluate("document.readyState")
+        except Exception:
+            return False
+        if self.page.url == before or state not in ("interactive", "complete"):
+            return False
+        try:
+            await self.page.evaluate("window.stop()")
+        except Exception:
+            pass
+        return True
+
     async def goto(self, url: str) -> None:
-        await self.page.goto(url, wait_until="domcontentloaded", timeout=45000)
+        """Open a page. One that doesn't load in time is checked (often it
+        has its content and is only still loading), then tried once more;
+        PageNotLoading when it still won't."""
+        before = self.page.url
+        try:
+            await self.page.goto(url, wait_until="domcontentloaded", timeout=GOTO_TIMEOUT_MS)
+        except Exception as e:
+            if not _is_timeout(e):
+                raise
+            if not await self._arrived(before):
+                logger.info(f"LinkedIn: {_short(url)} didn't load in time; trying once more.")
+                try:
+                    await self.page.goto(url, wait_until="commit", timeout=30000)
+                    await self.page.wait_for_load_state("domcontentloaded", timeout=20000)
+                except Exception as again:
+                    if not _is_timeout(again):
+                        raise
+                    if not await self._arrived(before):
+                        raise PageNotLoading(f"LinkedIn didn't load {_short(url)}") from None
         try:
             await self.page.wait_for_load_state("networkidle", timeout=8000)
         except Exception:

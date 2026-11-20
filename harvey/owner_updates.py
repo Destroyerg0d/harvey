@@ -45,8 +45,15 @@ def _plural(n: int, one: str, many: str) -> str:
 def _channel_line(channel: str, d: dict, fields) -> str:
     """"LinkedIn: 2 invites, 1 reply in." from a run's report; a run that
     stopped says why; a run that did nothing says nothing."""
-    if str(d.get("outcome", "")).startswith(("stopped", "error")):
-        return f"{channel} {str(d['outcome'])[:120]}."
+    outcome = str(d.get("outcome", ""))
+    if outcome.startswith("stopped: LinkedIn pages weren't loading"):
+        # LinkedIn being slow now and then: said only once it lasts (owner,
+        # 2026-11-20: "make sure this error doesn't come again").
+        runs = int(d.get("runs_not_loading") or 0)
+        return (f"{channel} hasn't been loading for {runs} runs in a row: check the internet and "
+                "LinkedIn's window on this computer." if runs >= 3 else "")
+    if outcome.startswith(("stopped", "error")):
+        return f"{channel} {outcome[:120]}."
     bits = [_plural(int(d.get(key) or 0), one, many) for key, one, many in fields
             if int(d.get(key) or 0)]
     return f"{channel}: " + ", ".join(bits) + "." if bits else ""
