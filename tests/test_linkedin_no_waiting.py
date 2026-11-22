@@ -284,6 +284,33 @@ def test_a_yes_to_the_offered_time_books_the_meeting_once(tmp_path):
     assert run(booked())[0] == 1
 
 
+def test_a_yes_to_the_time_isnt_a_yes_to_an_older_review_offer(tmp_path):
+    # Live, 2026-11-20: "yes, that works" to the time was read as a yes to the
+    # write-up offered days before; the review couldn't be written, so the
+    # confirmation was held for the owner and went a day late.
+    review_offer = "Want me to write up the three fixes I'd make to your product pages?"
+    offer = f"Would Thursday 5 November, 4:30 to 6:30 AM London time suit you? The link: {MEET}"
+    w = World(tmp_path, [jane(thread=[(OWNER, review_offer), ("Jane Doe", "Maybe later, a call first?"),
+                                      (OWNER, offer), ("Jane Doe", "Yes, that works")])],
+              brain=FakeBrain(intent="interested", text=f"Great, see you then: {MEET}"))
+    _meeting_config(w)
+    run(w.state.set_setting(AUTOPILOT_KEY, "on"))
+    lead = w.lead("jane-doe-1", stage="warm", name="Jane Doe")
+    run(w.state.li_add_message(lead, kind="message", body=review_offer, status="sent",
+                               sent_at=naive(IN_HOURS) - timedelta(days=3)))
+    run(w.state.li_add_message(lead, direction="in", body="Maybe later, a call first?", status="sent",
+                               sent_at=naive(IN_HOURS) - timedelta(days=2)))
+    run(w.state.li_add_message(lead, kind="reply", body=offer, status="sent",
+                               sent_at=naive(IN_HOURS) - timedelta(hours=2)))
+    run(w.state.set_setting("meeting:offered:linkedin:" + lead, json.dumps(
+        {"text": "Thursday 5 November, 4:30 to 6:30 AM London time",
+         "start": (IN_HOURS + timedelta(days=1)).isoformat()})))
+    w.go()
+    assert run(w.state.li_get_lead(lead))["stage"] == "meeting"
+    replies = w.msgs(lead, kinds=("reply",), direction="out")
+    assert replies[-1]["status"] == "sent" and not run(w.state.li_messages(statuses=("draft",), direction="out"))
+
+
 def test_what_counts_as_a_yes_to_the_time():
     assert confirms_slot("Yes, that works, no problem")
     assert confirms_slot("Thursday works", "Thursday 5 November, 4:30 to 6:30 AM")

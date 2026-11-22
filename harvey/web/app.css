@@ -1149,6 +1149,32 @@ a.btn, a.btn:hover { text-decoration: none; }
 .ch-going-head .li-why { margin: 4px 0 0; }
 .ch-going-list { margin-top: var(--sp-3); }
 .ch-going-list .convo-card { margin-bottom: var(--sp-2); }
+/* Meetings: when (theirs and yours), who, where, the brief, the conversation. */
+.mt-card { margin-bottom: var(--sp-4); }
+.mt-top { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 22rem); gap: var(--sp-4); align-items: start; margin-bottom: var(--sp-3); }
+.mt-who h3 { font-size: var(--fs-h3); margin: 0; overflow-wrap: anywhere; }
+.mt-who .sub { color: var(--text-2); font-size: var(--fs-ui); margin-top: 2px; overflow-wrap: anywhere; }
+.mt-meta { display: flex; flex-wrap: wrap; gap: 6px var(--sp-3); align-items: center; margin-top: var(--sp-2); font-size: var(--fs-caption); }
+.mt-when { background: var(--surface-2); border-radius: var(--r-md); padding: var(--sp-3); display: grid; gap: 4px; justify-items: start; }
+.mt-when .mt-theirs { font-weight: 600; font-size: var(--fs-ui); overflow-wrap: anywhere; }
+.mt-when .mt-ours { font-size: var(--fs-caption); color: var(--text-2); overflow-wrap: anywhere; }
+.mt-when.unset .mt-theirs { color: var(--wait); }
+.mt-where { margin-bottom: var(--sp-3); }
+.mt-brief, .mt-brief-empty { margin-bottom: var(--sp-3); }
+.mt-brief-empty { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; font-size: var(--fs-caption); }
+.mt-brief { border: 1px solid var(--line); border-radius: var(--r-md); padding: var(--sp-3) var(--sp-4); }
+.mt-brief-head { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; margin-bottom: var(--sp-2); font-size: var(--fs-caption); }
+.mt-brief-head .btn { margin-left: auto; }
+.mt-brief-body { white-space: pre-wrap; font-size: var(--fs-ui); line-height: 1.6; max-width: 72ch; overflow-wrap: anywhere; }
+.mt-convo { margin-bottom: var(--sp-2); }
+.mt-thread { margin-top: var(--sp-2); max-height: 32rem; overflow-y: auto; padding-right: 4px; }
+.mt-time-form { display: flex; flex-wrap: wrap; gap: var(--sp-3); align-items: flex-end; width: 100%; }
+.mt-time-form .form-label { display: grid; gap: 4px; font-size: var(--fs-caption); }
+.mt-time-form .form-input { min-width: 8rem; }
+.mt-time-go { display: flex; gap: var(--sp-2); }
+@media (max-width: 760px) {
+  .mt-top { grid-template-columns: minmax(0, 1fr); }
+}
 .wa-checks { padding-top: var(--sp-2); padding-bottom: var(--sp-2); }
 .wa-check { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); flex-wrap: wrap; padding: var(--sp-2) 0; }
 .wa-check + .wa-check { border-top: 1px solid var(--line); }

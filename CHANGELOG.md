@@ -9,6 +9,20 @@ minor versions can still change behaviour.
 
 ### Added
 
+- **A Meetings tab** (harvey/meetings.py, harvey/meetings_web.py). Every meeting booked on LinkedIn,
+  WhatsApp or email in one place:
+  - **When:** the time in their zone and yours, and how soon.
+  - **Booked:** when, and by whom (Harvey, when they said yes to the time, or you).
+  - **Who:** their role, company, location and website.
+  - **Where:** buttons to the conversation on its tab, their LinkedIn chat and profile, and Join
+    the call.
+  - **The conversation:** the whole thread, a click away.
+  - **Prepare me:** a short brief by the brain (who they are, what they want, what we've said,
+    questions to ask, what to watch for, an agenda), kept until the conversation changes.
+  - **The time:** you can set or change it in your zone.
+  - **Getting close:** meetings being arranged (Harvey's meeting alerts, last 21 days), with
+    Mark as booked.
+
 - **The call is booked directly** (harvey/meeting_slot.py). On LinkedIn and WhatsApp, once someone
   reads as interested (or asks about the price, the next step or how to start), the reply offers
   the owner's fixed time (`product.offer.meeting_window` on the next working day) in their own
@@ -23,6 +37,11 @@ minor versions can still change behaviour.
 
 ### Changed
 
+- **A yes to the meeting time is never read as a yes to an old improvement-list offer.** On LinkedIn
+  a "yes" counted as a yes to any write-up Harvey had ever offered; when the review couldn't be
+  written, the meeting confirmation was held for you and went a day late (2026-11-20). Now the
+  offer must be in Harvey's last two messages, the last one mustn't be the meeting time, and a
+  confirmed time skips the review altogether.
 - **A LinkedIn page that won't load no longer stops the run** (11 runs stopped on
   "Page.goto: Timeout 45000ms exceeded" in 10 days). Harvey's LinkedIn window accepts "Leave
   site?" (Playwright's default dismiss cancelled the navigation, so it hung until the timeout). A

@@ -424,7 +424,8 @@ function showTab(id, btn) {
 
 function loadCurrentTab() {
   switch (currentTab) {
-    case 'today': loadLiveStatus(); loadToday(); loadChannels(); loadTrend(); loadFunnel(); loadSetupStatus(); loadRuns(); loadTodayActivity(); break;
+    case 'today': loadLiveStatus(); loadToday(); loadChannels(); loadTrend(); loadFunnel(); loadSetupStatus(); loadRuns(); loadTodayActivity(); loadMeetings(); break;
+    case 'meetings': loadMeetings(); break;
     case 'signals': loadSignals(); break;
     case 'discover': loadDiscoverProviders(); break;
     case 'companies': if (!companyDrill) loadCompanies(); break;
@@ -3747,6 +3748,213 @@ function chWarningsHtml(list) {
   return '<div class="figures">' + list.map(w => '<div class="figure conn-warning"><span class="k">' +
     escHtml(w.reason || w.kind) + '</span><span class="v"><small class="muted">' + formatDate(w.at) +
     (w.until ? ', paused until ' + formatDate(w.until) : '') + '</small></span></div>').join('') + '</div>';
+}
+
+// ── Meetings: every meeting, its time in their zone and yours, the conversation, a prep brief ──
+// (harvey/meetings.py; owner, 2026-11-22)
+
+let _mt = null;
+const _mtOpen = new Set(), _mtTime = new Set(), _mtBusy = new Set();
+const MT_LABEL = {linkedin: 'LinkedIn', whatsapp: 'WhatsApp', email: 'Email'};
+
+async function loadMeetings() {
+  const data = await api('/api/meetings');
+  if (data && !data.error) navCount('nav-meetings', (data.upcoming || []).length);
+  if (currentTab !== 'meetings') return;
+  // A time being typed is never re-rendered away.
+  if (_mtTime.size) { if (data && !data.error) _mt = data; return; }
+  renderMeetings(data);
+}
+
+function mtId(key) { return String(key).replace(/[^a-z0-9]/gi, '_'); }
+
+function mtFind(key) {
+  if (!_mt) return null;
+  return [..._mt.upcoming, ..._mt.close, ..._mt.earlier].find(m => m.key === key) || null;
+}
+
+function renderMeetings(data) {
+  if (!data) { liEl('mt-upcoming', offlineState()); return; }
+  if (data.error) {
+    liEl('mt-upcoming', emptyState(icon('alert'), 'Couldn’t read the meetings', escHtml(data.error)));
+    return;
+  }
+  _mt = data;
+  liEl('mt-upcoming', data.upcoming.length ? data.upcoming.map(m => mtCardHtml(m, false)).join('')
+    : '<div class="card muted">No meetings booked yet. When someone says yes to a time on LinkedIn or WhatsApp, ' +
+      'or you press Meeting booked on a conversation, it shows here.</div>');
+  liEl('mt-close', data.close.length ? data.close.map(m => mtCardHtml(m, true)).join('')
+    : '<div class="card muted">Nothing being arranged right now.</div>');
+  liEl('mt-earlier', data.earlier.length ? data.earlier.map(m => mtCardHtml(m, false)).join('')
+    : '<div class="card muted">No earlier meetings.</div>');
+  liEl('mt-earlier-count', data.earlier.length ? '(' + mbxNum(data.earlier.length) + ')' : '');
+}
+
+function mtRel(w) {
+  const start = new Date(w.start).getTime(), end = new Date(w.end).getTime(), now = Date.now();
+  if (end < now) return ['done', 'idle'];
+  if (start <= now) return ['on now', 'good'];
+  const mins = (start - now) / 60000;
+  if (mins < 60) return ['in ' + Math.max(1, Math.round(mins)) + ' min', 'waiting'];
+  const hours = mins / 60;
+  if (hours < 24) return ['in ' + Math.round(hours) + ' h', 'waiting'];
+  const days = Math.round(hours / 24);
+  return [days === 1 ? 'in 1 day' : 'in ' + days + ' days', 'note'];
+}
+
+function mtWhenHtml(m) {
+  const w = m.when;
+  if (!w) {
+    return '<div class="mt-when unset"><div class="mt-theirs">Time not set</div>' +
+      '<div class="mt-ours">Set it below once you’ve agreed one.</div></div>';
+  }
+  const rel = mtRel(w);
+  return '<div class="mt-when"><div class="mt-theirs">' + escHtml(w.theirs || w.ours) +
+      (w.theirs ? ' <span class="muted">(theirs)</span>' : '') + '</div>' +
+    (w.theirs ? '<div class="mt-ours">' + escHtml(w.ours) + ' <span class="muted">(yours)</span></div>'
+      : '<div class="mt-ours muted">' + (m.their_zone ? 'the same zone as yours' : 'their time zone isn’t known') + '</div>') +
+    '<span class="badge t-' + rel[1] + '">' + rel[0] + '</span></div>';
+}
+
+function mtHref(url) {
+  const u = String(url || '').trim();
+  if (!u) return '';
+  return safeHref(/^https?:\/\//i.test(u) ? u : 'https://' + u);
+}
+
+function mtWhereHtml(m) {
+  const w = m.where || {}, out = [];
+  out.push('<button class="btn btn-secondary btn-sm" onclick="mtOpenTab(' + jsq(m.channel) + ',' + jsq(m.id) + ',' +
+    jsq(m.stage) + ')">Open on the ' + (m.channel === 'email' ? 'Conversations' : MT_LABEL[m.channel]) + ' tab</button>');
+  const link = (href, label) => href ? '<a class="btn btn-ghost btn-sm" href="' + href +
+    '" target="_blank" rel="noopener noreferrer">' + label + '</a>' : '';
+  out.push(link(mtHref(w.thread_url), 'Their chat on LinkedIn'));
+  out.push(link(mtHref(w.profile_url), 'Their profile'));
+  out.push(link(mtHref(m.website), 'Their website'));
+  if (_mt && _mt.meet_link && m.when) {
+    out.push('<a class="btn btn-primary btn-sm" href="' + mtHref(_mt.meet_link) +
+      '" target="_blank" rel="noopener noreferrer">Join the call</a>');
+  }
+  return '<div class="convo-actions mt-where">' + out.join('') + '</div>';
+}
+
+function mtBriefHtml(m) {
+  const busy = _mtBusy.has('brief:' + m.key);
+  const args = jsq(m.channel) + ',' + jsq(m.id) + ',' + jsq(m.key);
+  if (!m.brief) {
+    return '<div class="mt-brief-empty"><button class="btn btn-primary btn-sm" onclick="mtBrief(' + args + ',false)"' +
+      (busy ? ' disabled' : '') + '>' + icon('sparkle') + (busy ? 'Writing the brief…' : 'Prepare me') + '</button>' +
+      '<span class="muted">Harvey reads the conversation and writes a short brief for the call.</span></div>';
+  }
+  return '<div class="mt-brief"><div class="mt-brief-head"><b>Prep brief</b><span class="muted">' + relTime(m.brief.at) +
+      (m.brief.stale ? ' · the conversation has changed since' : '') + '</span>' +
+    '<button class="btn btn-ghost btn-sm" onclick="mtBrief(' + args + ',true)"' + (busy ? ' disabled' : '') + '>' +
+      (busy ? 'Writing…' : 'Write it again') + '</button></div>' +
+    '<div class="mt-brief-body">' + escHtml(m.brief.text) + '</div></div>';
+}
+
+function mtTimeHtml(m) {
+  const id = mtId(m.key);
+  if (!_mtTime.has(m.key)) {
+    return '<button class="btn btn-ghost btn-sm" onclick="mtTimeToggle(' + jsq(m.key) + ')">' +
+      (m.when ? 'Change the time' : 'Set the time') + '</button>';
+  }
+  let date = '', clock = '';
+  if (m.when && _mt && _mt.owner_tz) {
+    const local = new Date(m.when.start).toLocaleString('sv-SE', {timeZone: _mt.owner_tz});
+    date = local.slice(0, 10); clock = local.slice(11, 16);
+  }
+  return '<div class="mt-time-form">' +
+    '<label class="form-label">Date<input class="form-input" type="date" id="mt-date-' + id + '" value="' + escHtml(date) + '"></label>' +
+    '<label class="form-label">Time (' + escHtml((_mt && _mt.owner_zone) || 'yours') + ')<input class="form-input" type="time" id="mt-clock-' + id +
+      '" value="' + escHtml(clock) + '"></label>' +
+    '<label class="form-label">Minutes<input class="form-input" type="number" min="10" max="480" step="5" value="30" id="mt-min-' + id + '"></label>' +
+    '<div class="mt-time-go"><button class="btn btn-primary btn-sm" onclick="mtSaveTime(' + jsq(m.channel) + ',' + jsq(m.id) + ',' + jsq(m.key) + ')">Save</button>' +
+    '<button class="btn btn-ghost btn-sm" onclick="mtTimeToggle(' + jsq(m.key) + ')">Cancel</button></div></div>';
+}
+
+function mtCardHtml(m, close) {
+  const open = _mtOpen.has(m.key);
+  const first = (m.name || '').split(' ')[0] || 'Them';
+  const sub = [m.role, m.company, m.location].filter(Boolean).map(escHtml).join(' · ');
+  const booked = close ? '' : (m.booked_by === 'harvey'
+    ? 'Booked by Harvey' + (m.booked_at ? ' ' + relTime(m.booked_at) : '') + ': they said yes to the time'
+    : 'Marked as a meeting' + (m.booked_at ? ' ' + relTime(m.booked_at) : '') + ' (by you)');
+  const alert = close && m.alert ? '<p class="li-why">Harvey read a meeting being arranged ' + relTime(m.alert.at) +
+    (m.alert.when ? ': ' + escHtml(m.alert.when) : '') + (m.alert.service ? ' · ' + escHtml(m.alert.service) : '') + '</p>' : '';
+  const thread = (m.thread || []);
+  const convo = '<button class="btn btn-ghost btn-sm" onclick="mtToggle(' + jsq(m.key) + ')">' +
+      (open ? 'Hide the conversation' : 'Show the conversation (' + mbxNum(thread.length) + ')') + '</button>' +
+    (open ? '<div class="thread mt-thread">' + (thread.length ? thread.map(x => chMsgHtml(x, first)).join('')
+      : '<p class="muted">No messages recorded yet.</p>') + '</div>' : '');
+  const book = close ? '<button class="btn btn-secondary btn-sm" onclick="mtBooked(' + jsq(m.channel) + ',' + jsq(m.id) +
+    ',this)">Mark as booked</button>' : '';
+  return '<div class="convo-card mt-card" id="mt-' + mtId(m.key) + '">' +
+    '<div class="mt-top"><div class="mt-who"><h3>' + escHtml(m.name || 'Them') + '</h3>' +
+      (sub ? '<div class="sub">' + sub + '</div>' : '') +
+      '<div class="mt-meta"><span class="tag">' + escHtml(MT_LABEL[m.channel] || m.channel) + '</span>' +
+        (m.their_zone_name ? '<span class="muted">their time: ' + escHtml(m.their_zone_name) + '</span>' : '') +
+        (booked ? '<span class="muted">' + booked + '</span>' : '') + '</div></div>' +
+      mtWhenHtml(m) + '</div>' +
+    alert + mtWhereHtml(m) + mtBriefHtml(m) +
+    '<div class="mt-convo">' + convo + '</div>' +
+    '<div class="convo-actions">' + mtTimeHtml(m) + book + '</div></div>';
+}
+
+function mtToggle(key) {
+  if (_mtOpen.has(key)) _mtOpen.delete(key); else _mtOpen.add(key);
+  renderMeetings(_mt);
+}
+
+function mtTimeToggle(key) {
+  if (_mtTime.has(key)) _mtTime.delete(key); else _mtTime.add(key);
+  renderMeetings(_mt);
+}
+
+async function mtBrief(channel, id, key, again) {
+  _mtBusy.add('brief:' + key);
+  renderMeetings(_mt);
+  const res = await liPost('/api/meetings/' + encodeURIComponent(channel) + '/' + encodeURIComponent(id) + '/brief', {again});
+  _mtBusy.delete('brief:' + key);
+  const m = mtFind(key);
+  if (res && res.success && m) {
+    m.brief = res.brief;
+  } else {
+    showToast(failMsg(res, 'Couldn’t write the brief.'), 'error');
+  }
+  renderMeetings(_mt);
+}
+
+async function mtSaveTime(channel, id, key) {
+  const k = mtId(key), val = name => { const el = document.getElementById('mt-' + name + '-' + k); return el ? el.value : ''; };
+  const res = await liPost('/api/meetings/' + encodeURIComponent(channel) + '/' + encodeURIComponent(id) + '/time',
+    {date: val('date'), time: val('clock'), minutes: Number(val('min') || 30)});
+  if (res && res.success) {
+    _mtTime.delete(key);
+    showToast('Saved. Their time is worked out from their time zone.', 'success');
+    loadMeetings();
+  } else {
+    showToast(failMsg(res, 'Couldn’t save the time.'), 'error');
+  }
+}
+
+async function mtBooked(channel, id, btn) {
+  if (btn) btn.disabled = true;
+  const res = await liPost('/api/meetings/' + encodeURIComponent(channel) + '/' + encodeURIComponent(id) + '/booked');
+  if (res && res.success) showToast('Marked as booked. Set the time on its card.', 'success');
+  else showToast(failMsg(res, 'Couldn’t mark it.'), 'error');
+  loadMeetings();
+}
+
+// Open the conversation where it lives: the channel's tab, filtered so it shows near the top.
+function mtOpenTab(channel, id, stage) {
+  const tab = channel === 'email' ? 'conversations' : channel;
+  if (channel !== 'email') {
+    _chExpanded.add(id);
+    _chTag[channel] = stage === 'meeting' ? 'meeting' : 'all';
+  }
+  const btn = document.querySelector('nav button[onclick*="\'' + tab + '\'"]');
+  showTab(tab, btn);
 }
 
 // ── LinkedIn: invites, messages, follow-ups and replies ──

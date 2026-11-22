@@ -14,6 +14,7 @@
 <!-- One icon set: 24px grid, 1.75 stroke, currentColor. -->
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
   <defs>
+    <symbol id="i-calendar" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="15.5" rx="2"/><path d="M3.5 9.5h17M8 3v4M16 3v4M8 13.5h.01M12 13.5h.01M16 13.5h.01M8 17h.01M12 17h.01"/></symbol>
     <symbol id="i-today" viewBox="0 0 24 24"><path d="M3 10.5 12 3l9 7.5"/><path d="M5.5 9v11h13V9"/><path d="M10 20v-5h4v5"/></symbol>
     <symbol id="i-signals" viewBox="0 0 24 24"><circle cx="12" cy="12" r="2"/><path d="M16.2 7.8a6 6 0 0 1 0 8.4M7.8 16.2a6 6 0 0 1 0-8.4M19.1 4.9a10 10 0 0 1 0 14.2M4.9 19.1a10 10 0 0 1 0-14.2"/></symbol>
     <symbol id="i-discover" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></symbol>
@@ -73,6 +74,7 @@
     <div class="nav-group">
       <div class="nav-label">Work</div>
       <button class="active" onclick="showTab('today', this)"><svg class="icon" aria-hidden="true"><use href="#i-today"/></svg><span class="label">Today</span><span class="nav-count" id="nav-today"></span></button>
+      <button onclick="showTab('meetings', this)"><svg class="icon" aria-hidden="true"><use href="#i-calendar"/></svg><span class="label">Meetings</span><span class="nav-count" id="nav-meetings"></span></button>
       <button onclick="showTab('outbox', this)"><svg class="icon" aria-hidden="true"><use href="#i-outbox"/></svg><span class="label">Outbox</span><span class="nav-count" id="nav-outbox"></span></button>
       <button onclick="showTab('conversations', this)"><svg class="icon" aria-hidden="true"><use href="#i-conversations"/></svg><span class="label">Conversations</span><span class="nav-count" id="nav-conversations"></span></button>
       <button onclick="showTab('inbound', this)"><svg class="icon" aria-hidden="true"><use href="#i-flag"/></svg><span class="label">Website leads</span><span class="nav-count" id="nav-inbound"></span></button>
@@ -276,6 +278,26 @@
 </div>
 
 <!-- Conversations -->
+<!-- Meetings: every meeting, its time in their zone and yours, the conversation and a prep brief (harvey/meetings.py) -->
+<div id="meetings" class="section">
+  <div class="section-head">
+    <div>
+      <h2>Meetings</h2>
+      <p>Every meeting booked on LinkedIn, WhatsApp or email: when it is, in their time and yours,
+         when it was booked, where the conversation is, and the whole conversation. Prepare me asks
+         Harvey for a short brief before the call.</p>
+    </div>
+    <div class="page-actions"><button class="btn btn-secondary btn-sm" onclick="loadMeetings()">Refresh</button></div>
+  </div>
+  <div id="mt-upcoming"></div>
+  <div class="subhead">Getting close <span class="hint">a meeting is being arranged but isn't booked yet (last 21 days)</span></div>
+  <div id="mt-close"></div>
+  <details class="ch-details" id="mt-earlier-box">
+    <summary>Earlier meetings <span class="hint" id="mt-earlier-count"></span></summary>
+    <div id="mt-earlier"></div>
+  </details>
+</div>
+
 <div id="conversations" class="section">
   <div class="section-head"><div><h2>Conversations</h2><p>Every reply, and how Harvey handled it.</p></div></div>
   <div id="conversations-list"></div>

@@ -70,6 +70,9 @@ app.include_router(linkedin_router)
 from harvey.whatsapp.web import router as whatsapp_router  # noqa: E402
 app.include_router(whatsapp_router)
 
+from harvey.meetings_web import router as meetings_router  # noqa: E402
+app.include_router(meetings_router)
+
 # Harvey process tracking
 _harvey_process: subprocess.Popen | None = None
 _harvey_started_at: datetime | None = None

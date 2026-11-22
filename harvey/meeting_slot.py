@@ -223,7 +223,8 @@ OFFERED_KEY = "meeting:offered:"     # + channel:id -> {"text", "start"}
 async def remember_offer(state, key: str, slot: Slot) -> None:
     import json
     await state.set_setting(OFFERED_KEY + key, json.dumps(
-        {"text": slot.text(), "start": slot.start.astimezone(timezone.utc).isoformat()}))
+        {"text": slot.text(), "start": slot.start.astimezone(timezone.utc).isoformat(),
+         "end": slot.end.astimezone(timezone.utc).isoformat(), "their_zone": slot.their_zone or ""}))
 
 
 async def offered(state, key: str) -> dict:

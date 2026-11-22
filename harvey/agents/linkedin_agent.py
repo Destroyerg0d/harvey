@@ -706,7 +706,9 @@ class LinkedInAgent:
             if await self.state.li_pending_for(lead_id, kinds=("reply",)):
                 continue
             hold = []
-            if await self.wants_site_review(message["intent"], lead, history):
+            # A yes to the time we offered: the meeting is booked (stage, your phone).
+            booked = await self.booking_confirmed(lead, message["body"], history)
+            if booked is None and await self.wants_site_review(message["intent"], lead, history):
                 # A yes to the write-up we offered: the reply is the review.
                 review = await self.site_review(lead, message["body"])
                 if review.body:
@@ -721,8 +723,6 @@ class LinkedInAgent:
                         "name": lead.get("name") or lead.get("first_name") or ""})
                 except Exception:
                     pass
-            # A yes to the time we offered: the meeting is booked (stage, your phone).
-            booked = await self.booking_confirmed(lead, message["body"], history)
             if booked is not None and not self.dry_run:
                 await self.book_meeting(lead, booked)
             body = await self.draft(lead, "reply", intent=message["intent"], history=history,
@@ -826,7 +826,11 @@ class LinkedInAgent:
                 or not getattr(getattr(self.config, "site_review", None), "enabled", False)):
             return False
         ours = [m["body"] for m in history or [] if m["direction"] == "out" and m["status"] == "sent"]
-        if not offered_review(ours):
+        # A yes answers what we said last (2026-11-20: "yes, that works" to the
+        # meeting time was read as a yes to a review offered days before, and
+        # the confirmation waited a day for you). The offer must be in our last
+        # two messages, and the last one mustn't be the meeting time.
+        if offered_link_in(ours[-1:], self.config) or not offered_review(ours[-2:]):
             return False
         return not await self.state.get_setting(REVIEWED_KEY + lead["id"])
 
