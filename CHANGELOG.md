@@ -9,6 +9,24 @@ minor versions can still change behaviour.
 
 ### Added
 
+- **The Meetings tab is a month calendar, like Google Calendar.**
+  - **The month:** "‹ Today ›" with the month's name; Sun–Sat weeks; today circled.
+  - **On each day:** its meetings at your time ("10:30am Hana R."), coloured by channel
+    (LinkedIn, WhatsApp, email). Past ones are faded, and "+2 more" shows when a day is full.
+  - **Clicks:** a meeting opens its details; a day lists that day's meetings.
+  - **On a phone:** coloured dots instead of the names.
+  - **The rest of the tab:**
+    - a summary strip (next meeting, next 7 days, time not set, getting close);
+    - a "No time yet" column only when there is one;
+    - compact rows for what's coming up, getting close and earlier;
+    - a Month / List switch.
+  - **The details are one dialog:**
+    - their time and yours;
+    - one row of buttons (Join the call, Open on the channel's tab, LinkedIn chat, Profile, Website);
+    - Prep brief | Conversation tabs;
+    - the time form;
+    - full screen on a phone.
+
 - **A Meetings tab** (harvey/meetings.py, harvey/meetings_web.py). Every meeting booked on LinkedIn,
   WhatsApp or email in one place:
   - **When:** the time in their zone and yours, and how soon.

@@ -187,4 +187,7 @@ def test_the_tab_needs_the_token(web):
 
 def test_the_tab_is_on_the_page(web):
     html = web.get("/").text
-    assert "showTab('meetings'" in html and 'id="mt-upcoming"' in html and 'id="mt-close"' in html
+    assert "showTab('meetings'" in html
+    for element in ('id="mt-calendar"', 'id="mt-agenda"', 'id="mt-close"', 'id="mt-unset"',
+                    '<dialog class="mt-dialog" id="mt-dialog"', 'data-view="month"', 'data-view="list"'):
+        assert element in html

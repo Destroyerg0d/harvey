@@ -283,19 +283,41 @@
   <div class="section-head">
     <div>
       <h2>Meetings</h2>
-      <p>Every meeting booked on LinkedIn, WhatsApp or email: when it is, in their time and yours,
-         when it was booked, where the conversation is, and the whole conversation. Prepare me asks
-         Harvey for a short brief before the call.</p>
+      <p>Every meeting booked on LinkedIn, WhatsApp or email, on a calendar in your time. Open one to
+         see their time, the conversation and a prep brief.</p>
     </div>
-    <div class="page-actions"><button class="btn btn-secondary btn-sm" onclick="loadMeetings()">Refresh</button></div>
+    <div class="page-actions">
+      <div class="segmented" id="mt-view" role="group" aria-label="Show meetings as">
+        <button type="button" data-view="month" onclick="mtSetView('month')">Month</button>
+        <button type="button" data-view="list" onclick="mtSetView('list')">List</button>
+      </div>
+      <button class="btn btn-secondary btn-sm" onclick="mtReload()">Refresh</button>
+    </div>
   </div>
-  <div id="mt-upcoming"></div>
-  <div class="subhead">Getting close <span class="hint">a meeting is being arranged but isn't booked yet (last 21 days)</span></div>
-  <div id="mt-close"></div>
+  <div id="mt-summary"></div>
+
+  <div class="mt-layout" id="mt-calendar-wrap">
+    <div class="card flush mt-cal" id="mt-calendar"></div>
+    <aside class="mt-side">
+      <div class="subhead">No time yet <span class="hint">booked, waiting for a time</span></div>
+      <div id="mt-unset"></div>
+    </aside>
+  </div>
+
+  <div class="subhead" id="mt-agenda-title">Coming up</div>
+  <div class="card flush mt-list" id="mt-agenda"></div>
+
+  <div class="subhead">Getting close <span class="hint">being arranged, not booked yet (last 21 days)</span></div>
+  <div class="card flush mt-list" id="mt-close"></div>
+
   <details class="ch-details" id="mt-earlier-box">
     <summary>Earlier meetings <span class="hint" id="mt-earlier-count"></span></summary>
-    <div id="mt-earlier"></div>
+    <div class="card flush mt-list" id="mt-earlier"></div>
   </details>
+
+  <dialog class="mt-dialog" id="mt-dialog" aria-labelledby="mt-d-title" onclose="mtClosed()">
+    <div id="mt-dialog-body"></div>
+  </dialog>
 </div>
 
 <div id="conversations" class="section">

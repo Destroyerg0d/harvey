@@ -3750,45 +3750,66 @@ function chWarningsHtml(list) {
     (w.until ? ', paused until ' + formatDate(w.until) : '') + '</small></span></div>').join('') + '</div>';
 }
 
-// ── Meetings: every meeting, its time in their zone and yours, the conversation, a prep brief ──
-// (harvey/meetings.py; owner, 2026-11-22)
+// ── Meetings: a month calendar, an agenda, and each meeting's details ──
+// (harvey/meetings.py; owner, 2026-11-22: "like Google full month calendar")
 
-let _mt = null;
-const _mtOpen = new Set(), _mtTime = new Set(), _mtBusy = new Set();
+let _mt = null, _mtDetail = null, _mtPane = 'brief', _mtDay = '', _mtMonth = null;
+const _mtTime = new Set(), _mtBusy = new Set();
 const MT_LABEL = {linkedin: 'LinkedIn', whatsapp: 'WhatsApp', email: 'Email'};
+const MT_DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const MT_DAY_MS = 86400000;
+
+function mtView() {
+  try { return localStorage.getItem('harvey.meetings.view') === 'list' ? 'list' : 'month'; } catch (e) { return 'month'; }
+}
+
+function mtSetView(view) {
+  try { localStorage.setItem('harvey.meetings.view', view); } catch (e) { /* private window */ }
+  renderMeetings(_mt);
+}
 
 async function loadMeetings() {
   const data = await api('/api/meetings');
   if (data && !data.error) navCount('nav-meetings', (data.upcoming || []).length);
   if (currentTab !== 'meetings') return;
-  // A time being typed is never re-rendered away.
-  if (_mtTime.size) { if (data && !data.error) _mt = data; return; }
+  // An open meeting or a time being typed is never redrawn away by a refresh.
+  if (_mtDetail || _mtTime.size) { if (data && !data.error) _mt = data; return; }
   renderMeetings(data);
 }
 
-function mtId(key) { return String(key).replace(/[^a-z0-9]/gi, '_'); }
+async function mtReload() {
+  const data = await api('/api/meetings');
+  if (data && !data.error) navCount('nav-meetings', (data.upcoming || []).length);
+  renderMeetings(data);
+}
 
+function mtTz() { return (_mt && _mt.owner_tz) || 'Asia/Kolkata'; }
+function mtZone() { return (_mt && _mt.owner_zone) || 'IST'; }
+function mtDayKey(iso) { return new Date(iso).toLocaleDateString('en-CA', {timeZone: mtTz()}); }
+function mtTodayKey() { return new Date().toLocaleDateString('en-CA', {timeZone: mtTz()}); }
+function mtClock(iso) {
+  return new Date(iso).toLocaleTimeString('en-US', {timeZone: mtTz(), hour: 'numeric', minute: '2-digit'});
+}
+// Google's short form on the calendar: "10:30am", "4pm".
+function mtChipClock(iso) {
+  const parts = new Date(iso).toLocaleTimeString('en-US', {timeZone: mtTz(), hour: 'numeric', minute: '2-digit'}).split(' ');
+  return parts[0].replace(/:00$/, '') + (parts[1] || '').toLowerCase();
+}
+function mtDayLabel(iso, opts) {
+  return new Date(iso).toLocaleDateString('en-GB', Object.assign({timeZone: mtTz()}, opts));
+}
+function mtBooked() { return _mt ? [..._mt.upcoming, ..._mt.earlier] : []; }
+function mtTimed() { return mtBooked().filter(m => m.when); }
 function mtFind(key) {
   if (!_mt) return null;
   return [..._mt.upcoming, ..._mt.close, ..._mt.earlier].find(m => m.key === key) || null;
 }
-
-function renderMeetings(data) {
-  if (!data) { liEl('mt-upcoming', offlineState()); return; }
-  if (data.error) {
-    liEl('mt-upcoming', emptyState(icon('alert'), 'Couldn’t read the meetings', escHtml(data.error)));
-    return;
-  }
-  _mt = data;
-  liEl('mt-upcoming', data.upcoming.length ? data.upcoming.map(m => mtCardHtml(m, false)).join('')
-    : '<div class="card muted">No meetings booked yet. When someone says yes to a time on LinkedIn or WhatsApp, ' +
-      'or you press Meeting booked on a conversation, it shows here.</div>');
-  liEl('mt-close', data.close.length ? data.close.map(m => mtCardHtml(m, true)).join('')
-    : '<div class="card muted">Nothing being arranged right now.</div>');
-  liEl('mt-earlier', data.earlier.length ? data.earlier.map(m => mtCardHtml(m, false)).join('')
-    : '<div class="card muted">No earlier meetings.</div>');
-  liEl('mt-earlier-count', data.earlier.length ? '(' + mbxNum(data.earlier.length) + ')' : '');
+function mtIsClose(m) { return !!m && !mtBooked().some(x => x.key === m.key); }
+function mtShort(name) {
+  const parts = String(name || 'Them').trim().split(/\s+/);
+  return parts.length > 1 ? parts[0] + ' ' + parts[parts.length - 1][0] + '.' : parts[0];
 }
+function mtId(key) { return String(key).replace(/[^a-z0-9]/gi, '_'); }
 
 function mtRel(w) {
   const start = new Date(w.start).getTime(), end = new Date(w.end).getTime(), now = Date.now();
@@ -3802,18 +3823,189 @@ function mtRel(w) {
   return [days === 1 ? 'in 1 day' : 'in ' + days + ' days', 'note'];
 }
 
-function mtWhenHtml(m) {
-  const w = m.when;
-  if (!w) {
-    return '<div class="mt-when unset"><div class="mt-theirs">Time not set</div>' +
-      '<div class="mt-ours">Set it below once you’ve agreed one.</div></div>';
+// Their time without the day when it is the same day as ours ("4:30 to 6:30 AM London time").
+function mtTheirsShort(w) {
+  if (!w || !w.theirs) return '';
+  const day = (w.ours || '').split(',')[0];
+  return w.theirs.startsWith(day + ',') ? w.theirs.slice(day.length + 2) : w.theirs;
+}
+
+function renderMeetings(data) {
+  if (!data) { liEl('mt-summary', offlineState()); return; }
+  if (data.error) {
+    liEl('mt-summary', emptyState(icon('alert'), 'Couldn’t read the meetings', escHtml(data.error)));
+    return;
   }
-  const rel = mtRel(w);
-  return '<div class="mt-when"><div class="mt-theirs">' + escHtml(w.theirs || w.ours) +
-      (w.theirs ? ' <span class="muted">(theirs)</span>' : '') + '</div>' +
-    (w.theirs ? '<div class="mt-ours">' + escHtml(w.ours) + ' <span class="muted">(yours)</span></div>'
-      : '<div class="mt-ours muted">' + (m.their_zone ? 'the same zone as yours' : 'their time zone isn’t known') + '</div>') +
-    '<span class="badge t-' + rel[1] + '">' + rel[0] + '</span></div>';
+  _mt = data;
+  if (!_mtMonth) {
+    const t = mtTodayKey();
+    _mtMonth = {y: Number(t.slice(0, 4)), m: Number(t.slice(5, 7)) - 1};
+  }
+  const view = mtView();
+  document.querySelectorAll('#mt-view button').forEach(b => {
+    const on = b.dataset.view === view;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-pressed', String(on));
+  });
+  liEl('mt-summary', mtSummaryHtml(data));
+  const wrap = document.getElementById('mt-calendar-wrap');
+  const unset = data.upcoming.filter(m => !m.when);
+  if (wrap) {
+    wrap.hidden = view !== 'month';
+    wrap.classList.toggle('no-side', !unset.length);      // the month takes the whole width
+  }
+  if (view === 'month') {
+    liEl('mt-calendar', mtCalendarHtml());
+    liEl('mt-unset', unset.length ? '<div class="card flush mt-list">' + unset.map(m => mtRowHtml(m)).join('') + '</div>' : '');
+  }
+  mtDrawAgenda(view);
+  liEl('mt-close', data.close.length ? data.close.map(m => mtRowHtml(m, true)).join('')
+    : '<div class="mt-none muted">Nothing being arranged right now.</div>');
+  liEl('mt-earlier', data.earlier.length ? data.earlier.map(m => mtRowHtml(m)).join('')
+    : '<div class="mt-none muted">No earlier meetings.</div>');
+  liEl('mt-earlier-count', data.earlier.length ? '(' + mbxNum(data.earlier.length) + ')' : '');
+  if (_mtDetail) mtDrawDetail();
+}
+
+function mtSummaryHtml(d) {
+  const timed = d.upcoming.filter(m => m.when);
+  const next = timed[0];
+  const week = timed.filter(m => new Date(m.when.start).getTime() <= Date.now() + 7 * MT_DAY_MS).length;
+  const unset = d.upcoming.length - timed.length;
+  const nextValue = next ? '<button type="button" class="mt-kpi-link" onclick="mtOpen(' + jsq(next.key) + ')">' +
+    escHtml(mtShort(next.name)) + '</button>' : '&ndash;';
+  return '<div class="kpis mbx-kpis mt-kpis">' +
+    chKpi('Next meeting', nextValue, next ? escHtml(mtDayLabel(next.when.start, {weekday: 'short', day: 'numeric', month: 'short'}) +
+      ', ' + mtClock(next.when.start)) + ' · ' + mtRel(next.when)[0] : 'nothing booked with a time') +
+    chKpi('Next 7 days', mbxNum(week), week === 1 ? 'meeting' : 'meetings') +
+    chKpi('Time not set', mbxNum(unset), unset ? 'set it on the meeting' : 'all have a time') +
+    chKpi('Getting close', mbxNum(d.close.length), 'being arranged') + '</div>';
+}
+
+// ── The month, like Google Calendar ──
+
+function mtCalendarHtml() {
+  const {y, m} = _mtMonth;
+  const title = new Date(Date.UTC(y, m, 1)).toLocaleDateString('en-US', {month: 'long', year: 'numeric', timeZone: 'UTC'});
+  const first = new Date(Date.UTC(y, m, 1)).getUTCDay();
+  const days = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+  const weeks = Math.ceil((first + days) / 7);
+  const start = Date.UTC(y, m, 1 - first);
+  const today = mtTodayKey();
+  const byDay = {};
+  mtTimed().forEach(x => { const k = mtDayKey(x.when.start); (byDay[k] = byDay[k] || []).push(x); });
+  Object.values(byDay).forEach(list => list.sort((a, b) => a.when.start.localeCompare(b.when.start)));
+  let cells = '';
+  for (let i = 0; i < weeks * 7; i++) {
+    const dt = new Date(start + i * MT_DAY_MS);
+    const key = dt.toISOString().slice(0, 10);
+    const list = byDay[key] || [];
+    const label = dt.toLocaleDateString('en-GB', {weekday: 'long', day: 'numeric', month: 'long', timeZone: 'UTC'}) +
+      (list.length ? ', ' + list.length + (list.length === 1 ? ' meeting' : ' meetings') : '');
+    const chips = list.slice(0, 3).map(x => '<button type="button" class="mt-chip c-' + x.channel +
+        (new Date(x.when.end).getTime() < Date.now() ? ' past' : '') + '" title="' +
+        escHtml(x.name + ': ' + (x.when.theirs ? x.when.theirs + ' (' + x.when.ours + ')' : x.when.ours)) +
+        '" onclick="event.stopPropagation();mtOpen(' + jsq(x.key) + ')"><span class="mt-chip-time">' +
+        escHtml(mtChipClock(x.when.start)) + '</span> ' + escHtml(mtShort(x.name)) + '</button>').join('');
+    const more = list.length > 3 ? '<span class="mt-more">+' + (list.length - 3) + ' more</span>' : '';
+    const dots = list.length ? '<span class="mt-dots" aria-hidden="true">' +
+      list.slice(0, 4).map(x => '<i class="c-' + x.channel + '"></i>').join('') + '</span>' : '';
+    cells += '<div class="mt-day' + (dt.getUTCMonth() === m ? '' : ' out') + (key === today ? ' today' : '') +
+      (key === _mtDay ? ' selected' : '') + (list.length ? ' busy' : '') + '" tabindex="0" aria-label="' + escHtml(label) +
+      '" onclick="mtPickDay(' + jsq(key) + ')" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();mtPickDay(' +
+      jsq(key) + ')}"><span class="mt-date">' + dt.getUTCDate() + '</span>' + chips + more + dots + '</div>';
+  }
+  const legend = Object.entries(MT_LABEL).map(([k, v]) => '<span><i class="c-' + k + '"></i>' + v + '</span>').join('');
+  return '<div class="mt-cal-head">' +
+      '<div class="mt-cal-nav"><button class="btn btn-secondary btn-sm" onclick="mtToday()">Today</button>' +
+        '<button class="btn btn-ghost btn-sm btn-icon" aria-label="Previous month" onclick="mtShift(-1)">&lsaquo;</button>' +
+        '<button class="btn btn-ghost btn-sm btn-icon" aria-label="Next month" onclick="mtShift(1)">&rsaquo;</button></div>' +
+      '<h3 class="mt-cal-title">' + escHtml(title) + '</h3>' +
+      '<div class="mt-legend" aria-label="Colours by channel">' + legend + '</div></div>' +
+    '<div class="mt-week">' + MT_DAYS.map(d => '<span>' + d + '</span>').join('') + '</div>' +
+    '<div class="mt-cells">' + cells + '</div>' +
+    '<p class="mt-cal-foot muted">Times are yours (' + escHtml(mtZone()) + '). Click a day to list it, a meeting to open it.</p>';
+}
+
+function mtShift(n) {
+  const d = new Date(Date.UTC(_mtMonth.y, _mtMonth.m + n, 1));
+  _mtMonth = {y: d.getUTCFullYear(), m: d.getUTCMonth()};
+  renderMeetings(_mt);
+}
+
+function mtToday() {
+  const t = mtTodayKey();
+  _mtMonth = {y: Number(t.slice(0, 4)), m: Number(t.slice(5, 7)) - 1};
+  _mtDay = t;
+  renderMeetings(_mt);
+}
+
+function mtPickDay(key) {
+  _mtDay = _mtDay === key ? '' : key;
+  renderMeetings(_mt);
+  if (_mtDay && window.matchMedia('(max-width: 760px)').matches) {
+    const el = document.getElementById('mt-agenda-title');
+    if (el) el.scrollIntoView({block: 'start', behavior: 'smooth'});
+  }
+}
+
+// ── The agenda and its rows ──
+
+function mtDrawAgenda(view) {
+  let list, title;
+  if (view === 'month' && _mtDay) {
+    list = mtTimed().filter(m => mtDayKey(m.when.start) === _mtDay)
+      .sort((a, b) => a.when.start.localeCompare(b.when.start));
+    title = new Date(_mtDay + 'T12:00:00Z').toLocaleDateString('en-GB', {weekday: 'long', day: 'numeric', month: 'long', timeZone: 'UTC'}) +
+      ' <button class="btn btn-ghost btn-sm" onclick="mtPickDay(' + jsq(_mtDay) + ')">Show the next 14 days</button>';
+  } else if (view === 'month') {
+    list = _mt.upcoming.filter(m => m.when && new Date(m.when.start).getTime() <= Date.now() + 14 * MT_DAY_MS);
+    title = 'Coming up <span class="hint">the next 14 days</span>';
+  } else {
+    list = _mt.upcoming;
+    title = 'Upcoming <span class="hint">soonest first; no time yet at the end</span>';
+  }
+  liEl('mt-agenda-title', title);
+  liEl('mt-agenda', list.length ? list.map(m => mtRowHtml(m)).join('')
+    : '<div class="mt-none muted">' + (_mtDay ? 'No meetings that day.' : 'No meetings coming up.') + '</div>');
+}
+
+function mtChannelTag(m) {
+  return '<span class="mt-tag c-' + m.channel + '"><i></i>' + escHtml(MT_LABEL[m.channel] || m.channel) + '</span>';
+}
+
+function mtRowHtml(m, close) {
+  const w = m.when;
+  const date = w
+    ? '<div class="mt-date-block"><span class="dow">' + escHtml(mtDayLabel(w.start, {weekday: 'short'})) +
+      '</span><span class="dom">' + escHtml(mtDayLabel(w.start, {day: 'numeric'})) + '</span><span class="mon">' +
+      escHtml(mtDayLabel(w.start, {month: 'short'})) + '</span></div>'
+    : '<div class="mt-date-block unset"><span class="dom">&ndash;</span><span class="mon">no time</span></div>';
+  const time = w
+    ? '<div class="mt-row-time"><b>' + escHtml(mtClock(w.start)) + ' &ndash; ' + escHtml(mtClock(w.end)) + ' ' + escHtml(mtZone()) +
+      '</b>' + (mtTheirsShort(w) ? '<span>' + escHtml(mtTheirsShort(w)) + '</span>' : '') + '</div>'
+    : '<div class="mt-row-time"><b>' + (close ? 'Being arranged' : 'Time not set') + '</b>' +
+      (close && m.alert ? '<span>' + escHtml([m.alert.when, m.alert.service].filter(Boolean).join(' · ') || 'Harvey read a meeting coming') +
+        '</span>' : '') + '</div>';
+  const sub = [m.role, m.company].filter(Boolean).join(' · ');
+  const args = jsq(m.key);
+  let actions = '<button class="btn btn-secondary btn-sm" onclick="event.stopPropagation();mtOpen(' + args + ')">Open</button>';
+  if (close) {
+    actions += '<button class="btn btn-secondary btn-sm" onclick="event.stopPropagation();mtBookedClick(' + jsq(m.channel) + ',' +
+      jsq(m.id) + ',this)">Mark as booked</button>';
+  } else if (!w) {
+    actions += '<button class="btn btn-primary btn-sm" onclick="event.stopPropagation();mtOpen(' + args + ',true)">Set the time</button>';
+  } else if (_mt && _mt.meet_link && mtRel(w)[0] !== 'done') {
+    actions += '<a class="btn btn-primary btn-sm" href="' + mtHref(_mt.meet_link) +
+      '" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">Join</a>';
+  }
+  const rel = w ? '<span class="badge t-' + mtRel(w)[1] + '">' + mtRel(w)[0] + '</span>' : '';
+  return '<div class="mt-row' + (w && mtRel(w)[0] === 'done' ? ' past' : '') + '" role="button" tabindex="0" ' +
+      'onclick="mtOpen(' + args + ')" onkeydown="if(event.key===\'Enter\')mtOpen(' + args + ')">' +
+    date + time +
+    '<div class="mt-row-who"><b>' + escHtml(m.name || 'Them') + '</b>' + (sub ? '<span>' + escHtml(sub) + '</span>' : '') + '</div>' +
+    '<div class="mt-row-tags">' + mtChannelTag(m) + rel + '</div>' +
+    '<div class="mt-row-actions">' + actions + '</div></div>';
 }
 
 function mtHref(url) {
@@ -3822,107 +4014,155 @@ function mtHref(url) {
   return safeHref(/^https?:\/\//i.test(u) ? u : 'https://' + u);
 }
 
-function mtWhereHtml(m) {
-  const w = m.where || {}, out = [];
-  out.push('<button class="btn btn-secondary btn-sm" onclick="mtOpenTab(' + jsq(m.channel) + ',' + jsq(m.id) + ',' +
-    jsq(m.stage) + ')">Open on the ' + (m.channel === 'email' ? 'Conversations' : MT_LABEL[m.channel]) + ' tab</button>');
-  const link = (href, label) => href ? '<a class="btn btn-ghost btn-sm" href="' + href +
-    '" target="_blank" rel="noopener noreferrer">' + label + '</a>' : '';
-  out.push(link(mtHref(w.thread_url), 'Their chat on LinkedIn'));
-  out.push(link(mtHref(w.profile_url), 'Their profile'));
-  out.push(link(mtHref(m.website), 'Their website'));
-  if (_mt && _mt.meet_link && m.when) {
-    out.push('<a class="btn btn-primary btn-sm" href="' + mtHref(_mt.meet_link) +
-      '" target="_blank" rel="noopener noreferrer">Join the call</a>');
+// ── One meeting's details (a dialog) ──
+
+function mtOpen(key, setTime) {
+  const m = mtFind(key);
+  if (!m) return;
+  _mtDetail = key;
+  _mtPane = m.brief ? 'brief' : (m.thread && m.thread.length ? 'convo' : 'brief');
+  if (setTime) _mtTime.add(key);
+  mtDrawDetail();
+  const dlg = document.getElementById('mt-dialog');
+  if (dlg && !dlg.open) {
+    if (dlg.showModal) dlg.showModal(); else dlg.setAttribute('open', '');
   }
-  return '<div class="convo-actions mt-where">' + out.join('') + '</div>';
 }
+
+function mtClose() {
+  const dlg = document.getElementById('mt-dialog');
+  if (dlg && dlg.open) { if (dlg.close) dlg.close(); else dlg.removeAttribute('open'); }
+  mtClosed();
+}
+
+function mtClosed() {
+  if (_mtDetail) _mtTime.delete(_mtDetail);
+  _mtDetail = null;
+}
+
+function mtDrawDetail() {
+  const m = mtFind(_mtDetail);
+  const body = document.getElementById('mt-dialog-body');
+  if (!m || !body) { mtClose(); return; }
+  const keep = {};
+  body.querySelectorAll('input').forEach(i => { if (i.id) keep[i.id] = i.value; });
+  const scroller = body.querySelector('.mt-pane');
+  const scroll = scroller ? scroller.scrollTop : 0;
+  body.innerHTML = mtDetailHtml(m);
+  Object.entries(keep).forEach(([id, v]) => { const i = document.getElementById(id); if (i) i.value = v; });
+  const pane = body.querySelector('.mt-pane');
+  if (pane) pane.scrollTop = scroll;
+}
+
+function mtDetailHtml(m) {
+  const close = mtIsClose(m);
+  const sub = [m.role, m.company, m.location].filter(Boolean).map(escHtml).join(' · ');
+  const w = m.when;
+  const booked = close ? 'Being arranged' + (m.alert ? ': Harvey read it ' + relTime(m.alert.at) : '')
+    : m.booked_by === 'harvey' ? 'Booked by Harvey' + (m.booked_at ? ' ' + relTime(m.booked_at) : '') + ' (they said yes to the time)'
+    : 'Marked as a meeting' + (m.booked_at ? ' ' + relTime(m.booked_at) : '') + ' by you';
+  const rel = w ? mtRel(w) : null;
+  const when = w
+    ? '<div class="mt-d-when"><div class="mt-d-theirs">' + escHtml(w.theirs || w.ours) + '</div>' +
+      (w.theirs ? '<div class="mt-d-ours">' + escHtml(w.ours) + ' <span class="muted">yours</span></div>'
+        : '<div class="mt-d-ours muted">' + (m.their_zone ? 'Same time zone as yours' : 'Their time zone isn’t known; this is your time') + '</div>') +
+      '<div class="mt-d-when-foot"><span class="badge t-' + rel[1] + '">' + rel[0] + '</span>' +
+        '<button class="btn btn-ghost btn-sm" onclick="mtTimeToggle(' + jsq(m.key) + ')">Change the time</button></div></div>'
+    : '<div class="mt-d-when unset"><div class="mt-d-theirs">' + (close ? 'Not booked yet' : 'Time not set') + '</div>' +
+      '<div class="mt-d-ours muted">' + (close && m.alert && (m.alert.when || m.alert.service)
+        ? escHtml([m.alert.when, m.alert.service].filter(Boolean).join(' · '))
+        : 'Set it once you’ve agreed one; their time is worked out for you.') + '</div>' +
+      (_mtTime.has(m.key) ? '' : '<div class="mt-d-when-foot"><button class="btn btn-primary btn-sm" onclick="mtTimeToggle(' +
+        jsq(m.key) + ')">Set the time</button></div>') + '</div>';
+
+  const links = [];
+  const w2 = m.where || {};
+  if (w && _mt && _mt.meet_link) {
+    links.push('<a class="btn btn-primary btn-sm" href="' + mtHref(_mt.meet_link) + '" target="_blank" rel="noopener noreferrer">Join the call</a>');
+  }
+  if (close) {
+    links.push('<button class="btn btn-primary btn-sm" onclick="mtBookedClick(' + jsq(m.channel) + ',' + jsq(m.id) + ',this)">Mark as booked</button>');
+  }
+  links.push('<button class="btn btn-secondary btn-sm" onclick="mtOpenTab(' + jsq(m.channel) + ',' + jsq(m.id) + ',' + jsq(m.stage) + ')">' +
+    icon('conversations') + 'Open on the ' + (m.channel === 'email' ? 'Conversations' : MT_LABEL[m.channel]) + ' tab</button>');
+  const ext = (href, label) => href ? '<a class="btn btn-secondary btn-sm" href="' + href +
+    '" target="_blank" rel="noopener noreferrer">' + label + ' <span aria-hidden="true">&#8599;</span></a>' : '';
+  links.push(ext(mtHref(w2.thread_url), 'LinkedIn chat'));
+  links.push(ext(mtHref(w2.profile_url), 'Profile'));
+  links.push(ext(mtHref(m.website), 'Website'));
+
+  const n = (m.thread || []).length;
+  const tab = (id, label) => '<button type="button" role="tab" aria-selected="' + (_mtPane === id) + '" class="' +
+    (_mtPane === id ? 'on' : '') + '" onclick="mtPane(' + jsq(id) + ')">' + label + '</button>';
+  const first = (m.name || '').split(' ')[0] || 'Them';
+  const pane = _mtPane === 'convo'
+    ? '<div class="mt-pane thread">' + (n ? m.thread.map(x => chMsgHtml(x, first)).join('') : '<p class="muted">No messages recorded yet.</p>') + '</div>'
+    : '<div class="mt-pane">' + mtBriefHtml(m) + '</div>';
+
+  return '<header class="mt-d-head"><div class="mt-d-who"><h2 id="mt-d-title">' + escHtml(m.name || 'Them') + '</h2>' +
+      (sub ? '<div class="sub">' + sub + '</div>' : '') +
+      '<div class="mt-d-meta">' + mtChannelTag(m) + (m.their_zone_name ? '<span>Their time: ' + escHtml(m.their_zone_name) + '</span>' : '') +
+        '<span>' + booked + '</span></div></div>' +
+      '<button class="btn btn-ghost btn-sm btn-icon mt-d-close" aria-label="Close" onclick="mtClose()">&times;</button></header>' +
+    '<div class="mt-d-body">' + when + (_mtTime.has(m.key) ? mtTimeFormHtml(m) : '') +
+      '<div class="mt-d-actions">' + links.filter(Boolean).join('') + '</div>' +
+      '<div class="segmented mt-d-tabs" role="tablist" aria-label="Brief or conversation">' +
+        tab('brief', icon('sparkle') + 'Prep brief') + tab('convo', 'Conversation <span class="n">' + mbxNum(n) + '</span>') + '</div>' +
+      pane + '</div>';
+}
+
+function mtPane(id) { _mtPane = id; mtDrawDetail(); }
 
 function mtBriefHtml(m) {
   const busy = _mtBusy.has('brief:' + m.key);
   const args = jsq(m.channel) + ',' + jsq(m.id) + ',' + jsq(m.key);
   if (!m.brief) {
-    return '<div class="mt-brief-empty"><button class="btn btn-primary btn-sm" onclick="mtBrief(' + args + ',false)"' +
-      (busy ? ' disabled' : '') + '>' + icon('sparkle') + (busy ? 'Writing the brief…' : 'Prepare me') + '</button>' +
-      '<span class="muted">Harvey reads the conversation and writes a short brief for the call.</span></div>';
+    return '<div class="mt-brief-empty"><p>Harvey reads the whole conversation and writes a short brief for the call: who they ' +
+      'are, what they want, what’s been said, questions to ask, what to watch for, and an agenda.</p>' +
+      '<button class="btn btn-primary btn-sm" onclick="mtBrief(' + args + ',false)"' + (busy ? ' disabled' : '') + '>' +
+      icon('sparkle') + (busy ? 'Writing the brief…' : 'Prepare me') + '</button></div>';
   }
-  return '<div class="mt-brief"><div class="mt-brief-head"><b>Prep brief</b><span class="muted">' + relTime(m.brief.at) +
+  return '<div class="mt-brief"><div class="mt-brief-head"><span class="muted">Written ' + relTime(m.brief.at) +
       (m.brief.stale ? ' · the conversation has changed since' : '') + '</span>' +
-    '<button class="btn btn-ghost btn-sm" onclick="mtBrief(' + args + ',true)"' + (busy ? ' disabled' : '') + '>' +
+    '<button class="btn btn-secondary btn-sm" onclick="mtBrief(' + args + ',true)"' + (busy ? ' disabled' : '') + '>' +
       (busy ? 'Writing…' : 'Write it again') + '</button></div>' +
     '<div class="mt-brief-body">' + escHtml(m.brief.text) + '</div></div>';
 }
 
-function mtTimeHtml(m) {
+function mtTimeFormHtml(m) {
   const id = mtId(m.key);
-  if (!_mtTime.has(m.key)) {
-    return '<button class="btn btn-ghost btn-sm" onclick="mtTimeToggle(' + jsq(m.key) + ')">' +
-      (m.when ? 'Change the time' : 'Set the time') + '</button>';
-  }
   let date = '', clock = '';
-  if (m.when && _mt && _mt.owner_tz) {
-    const local = new Date(m.when.start).toLocaleString('sv-SE', {timeZone: _mt.owner_tz});
+  if (m.when) {
+    const local = new Date(m.when.start).toLocaleString('sv-SE', {timeZone: mtTz()});
     date = local.slice(0, 10); clock = local.slice(11, 16);
   }
+  const minutes = m.when ? Math.max(10, Math.round((new Date(m.when.end) - new Date(m.when.start)) / 60000)) : 30;
   return '<div class="mt-time-form">' +
     '<label class="form-label">Date<input class="form-input" type="date" id="mt-date-' + id + '" value="' + escHtml(date) + '"></label>' +
-    '<label class="form-label">Time (' + escHtml((_mt && _mt.owner_zone) || 'yours') + ')<input class="form-input" type="time" id="mt-clock-' + id +
+    '<label class="form-label">Time (' + escHtml(mtZone()) + ')<input class="form-input" type="time" id="mt-clock-' + id +
       '" value="' + escHtml(clock) + '"></label>' +
-    '<label class="form-label">Minutes<input class="form-input" type="number" min="10" max="480" step="5" value="30" id="mt-min-' + id + '"></label>' +
-    '<div class="mt-time-go"><button class="btn btn-primary btn-sm" onclick="mtSaveTime(' + jsq(m.channel) + ',' + jsq(m.id) + ',' + jsq(m.key) + ')">Save</button>' +
-    '<button class="btn btn-ghost btn-sm" onclick="mtTimeToggle(' + jsq(m.key) + ')">Cancel</button></div></div>';
-}
-
-function mtCardHtml(m, close) {
-  const open = _mtOpen.has(m.key);
-  const first = (m.name || '').split(' ')[0] || 'Them';
-  const sub = [m.role, m.company, m.location].filter(Boolean).map(escHtml).join(' · ');
-  const booked = close ? '' : (m.booked_by === 'harvey'
-    ? 'Booked by Harvey' + (m.booked_at ? ' ' + relTime(m.booked_at) : '') + ': they said yes to the time'
-    : 'Marked as a meeting' + (m.booked_at ? ' ' + relTime(m.booked_at) : '') + ' (by you)');
-  const alert = close && m.alert ? '<p class="li-why">Harvey read a meeting being arranged ' + relTime(m.alert.at) +
-    (m.alert.when ? ': ' + escHtml(m.alert.when) : '') + (m.alert.service ? ' · ' + escHtml(m.alert.service) : '') + '</p>' : '';
-  const thread = (m.thread || []);
-  const convo = '<button class="btn btn-ghost btn-sm" onclick="mtToggle(' + jsq(m.key) + ')">' +
-      (open ? 'Hide the conversation' : 'Show the conversation (' + mbxNum(thread.length) + ')') + '</button>' +
-    (open ? '<div class="thread mt-thread">' + (thread.length ? thread.map(x => chMsgHtml(x, first)).join('')
-      : '<p class="muted">No messages recorded yet.</p>') + '</div>' : '');
-  const book = close ? '<button class="btn btn-secondary btn-sm" onclick="mtBooked(' + jsq(m.channel) + ',' + jsq(m.id) +
-    ',this)">Mark as booked</button>' : '';
-  return '<div class="convo-card mt-card" id="mt-' + mtId(m.key) + '">' +
-    '<div class="mt-top"><div class="mt-who"><h3>' + escHtml(m.name || 'Them') + '</h3>' +
-      (sub ? '<div class="sub">' + sub + '</div>' : '') +
-      '<div class="mt-meta"><span class="tag">' + escHtml(MT_LABEL[m.channel] || m.channel) + '</span>' +
-        (m.their_zone_name ? '<span class="muted">their time: ' + escHtml(m.their_zone_name) + '</span>' : '') +
-        (booked ? '<span class="muted">' + booked + '</span>' : '') + '</div></div>' +
-      mtWhenHtml(m) + '</div>' +
-    alert + mtWhereHtml(m) + mtBriefHtml(m) +
-    '<div class="mt-convo">' + convo + '</div>' +
-    '<div class="convo-actions">' + mtTimeHtml(m) + book + '</div></div>';
-}
-
-function mtToggle(key) {
-  if (_mtOpen.has(key)) _mtOpen.delete(key); else _mtOpen.add(key);
-  renderMeetings(_mt);
+    '<label class="form-label">Minutes<input class="form-input" type="number" min="10" max="480" step="5" value="' + minutes +
+      '" id="mt-min-' + id + '"></label>' +
+    '<div class="mt-time-go"><button class="btn btn-primary btn-sm" onclick="mtSaveTime(' + jsq(m.channel) + ',' + jsq(m.id) + ',' +
+      jsq(m.key) + ')">Save the time</button><button class="btn btn-ghost btn-sm" onclick="mtTimeToggle(' + jsq(m.key) +
+      ')">Cancel</button></div></div>';
 }
 
 function mtTimeToggle(key) {
   if (_mtTime.has(key)) _mtTime.delete(key); else _mtTime.add(key);
-  renderMeetings(_mt);
+  mtDrawDetail();
 }
 
 async function mtBrief(channel, id, key, again) {
   _mtBusy.add('brief:' + key);
-  renderMeetings(_mt);
+  _mtPane = 'brief';
+  mtDrawDetail();
   const res = await liPost('/api/meetings/' + encodeURIComponent(channel) + '/' + encodeURIComponent(id) + '/brief', {again});
   _mtBusy.delete('brief:' + key);
   const m = mtFind(key);
-  if (res && res.success && m) {
-    m.brief = res.brief;
-  } else {
-    showToast(failMsg(res, 'Couldn’t write the brief.'), 'error');
-  }
-  renderMeetings(_mt);
+  if (res && res.success && m) m.brief = res.brief;
+  else showToast(failMsg(res, 'Couldn’t write the brief.'), 'error');
+  if (_mtDetail === key) mtDrawDetail();
 }
 
 async function mtSaveTime(channel, id, key) {
@@ -3932,22 +4172,29 @@ async function mtSaveTime(channel, id, key) {
   if (res && res.success) {
     _mtTime.delete(key);
     showToast('Saved. Their time is worked out from their time zone.', 'success');
-    loadMeetings();
+    const start = res.item && res.item.when && res.item.when.start;
+    if (start) {
+      const t = mtDayKey(start);
+      _mtMonth = {y: Number(t.slice(0, 4)), m: Number(t.slice(5, 7)) - 1};
+      _mtDay = t;
+    }
+    await mtReload();
   } else {
     showToast(failMsg(res, 'Couldn’t save the time.'), 'error');
   }
 }
 
-async function mtBooked(channel, id, btn) {
+async function mtBookedClick(channel, id, btn) {
   if (btn) btn.disabled = true;
   const res = await liPost('/api/meetings/' + encodeURIComponent(channel) + '/' + encodeURIComponent(id) + '/booked');
-  if (res && res.success) showToast('Marked as booked. Set the time on its card.', 'success');
+  if (res && res.success) showToast('Marked as booked. Set the time on it.', 'success');
   else showToast(failMsg(res, 'Couldn’t mark it.'), 'error');
-  loadMeetings();
+  await mtReload();
 }
 
-// Open the conversation where it lives: the channel's tab, filtered so it shows near the top.
+// Open the conversation where it lives: the channel's tab, with it open and near the top.
 function mtOpenTab(channel, id, stage) {
+  mtClose();
   const tab = channel === 'email' ? 'conversations' : channel;
   if (channel !== 'email') {
     _chExpanded.add(id);
