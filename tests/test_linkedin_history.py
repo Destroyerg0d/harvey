@@ -62,6 +62,8 @@ def test_a_thread_names_its_person_by_their_profile_link():
     assert history.thread_profile_slug(html, "Ann Lee") == "ann-lee-1"
     assert parse_thread(html).header == "Ann Lee"
     assert history.member_id("ACoAAB1234567890abcdefghijklmnopqrstu") and not history.member_id("ann-lee-1")
+    assert history.member_id("acoaab12-34567890abcd_efghijklmnopq")        # ids hold - and _ too
+    assert not history.member_id("acosta-maria-example-1234567890abc")    # a name that starts alike
 
 
 def test_the_live_list_is_read_by_clicking_and_unread_ones_are_left_alone(tmp_path):
@@ -133,3 +135,21 @@ def test_a_long_read_keeps_linkedin_marked_busy(tmp_path):
     w.state.set_setting = spy
     run(history.backfill(w.state, w.config, driver_factory=DriverFactory(w.driver), agent_options=_quiet()))
     assert len([s for s in stamps if s]) >= 2 and stamps[-1] == ""        # refreshed, then let go
+
+
+def test_a_known_lead_linked_by_a_member_id_with_a_dash_isnt_added_again(tmp_path):
+    # Live, 2026-11-23: the thread links people by member id, which can hold
+    # "-"; read as a profile name, six known leads were added a second time.
+    jane = Person(slug="jane-doe-1", name="Jane Doe", connected=True,
+                  thread=[("Jane Doe", "Can we have a call on Monday?"), (OWNER, "Monday works")])
+    w = World(tmp_path, [jane], site_kwargs={"live_list": True})
+    lead = w.lead("jane-doe-1", stage="warm", name="Jane Doe")
+    real = history.thread_profile_slug
+    history.thread_profile_slug = lambda html, name="": "acoaab12-34567890abcd_efghijklmnopq"
+    try:
+        report = run(history.backfill(w.state, w.config, driver_factory=DriverFactory(w.driver),
+                                      agent_options=_quiet()))
+    finally:
+        history.thread_profile_slug = real
+    assert report["threads"] == 1 and report["new_people"] == 0
+    assert [m["direction"] for m in w.msgs(lead)] == ["in", "out"]

@@ -92,8 +92,9 @@ def card_key(card) -> str:
 
 def member_id(slug: str) -> bool:
     """A LinkedIn member id ("ACoAA..."), as thread pages link people, rather
-    than a profile name ("jane-doe-1")."""
-    return (slug or "").lower().startswith("aco") and len(slug) >= 30 and "-" not in slug
+    than a profile name ("jane-doe-1"). An id can hold "-" and "_" (live,
+    2026-11-23: six known leads were added again when it was read as a name)."""
+    return (slug or "").lower().startswith("acoaa") and len(slug) >= 30
 
 
 def thread_profile_slug(html: str, name: str = "") -> str:
