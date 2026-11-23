@@ -393,18 +393,24 @@ async def collect(state, config, now: datetime | None = None) -> dict:
         close.append(card)
     close.sort(key=lambda i: (i["when"] or {}).get("start") or "9999")
 
+    # "held": agreed or booked, and its time has passed (whether it took
+    # place is yours to say); "lapsed": a proposed time that passed unanswered.
     stats = {"upcoming": len(upcoming), "proposed": sum(1 for i in close if i["status"] == "proposed"),
              "held": sum(1 for i in earlier if i["status"] in ("held", "agreed", "booked")),
              "cancelled": sum(1 for i in earlier if i["status"] == "cancelled"),
+             "lapsed": sum(1 for i in earlier if i["status"] == "proposed"),
              "by_channel": {}}
     for it in upcoming + earlier + close:
-        per = stats["by_channel"].setdefault(it["channel"], {"upcoming": 0, "held": 0, "proposed": 0, "cancelled": 0})
+        per = stats["by_channel"].setdefault(
+            it["channel"], {"upcoming": 0, "held": 0, "proposed": 0, "cancelled": 0, "lapsed": 0})
         if it in upcoming:
             per["upcoming"] += 1
         elif it in close:
             per["proposed"] += it["status"] == "proposed"
         elif it["status"] == "cancelled":
             per["cancelled"] += 1
+        elif it["status"] == "proposed":
+            per["lapsed"] += 1
         else:
             per["held"] += 1
     try:

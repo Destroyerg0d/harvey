@@ -21,7 +21,8 @@ minor versions can still change behaviour.
   - **On the tab:**
     - proposed times are dashed chips and cancelled ones are struck through;
     - each meeting shows its quote and "found in the conversation";
-    - the summary counts held, upcoming, proposed and cancelled meetings.
+    - the summary counts upcoming meetings, agreed ones whose time has passed (did it take
+      place?), proposed ones still ahead, offers that passed unanswered, and cancelled ones.
   - Stages aren't changed by it.
 - **LinkedIn's whole inbox, read once** (harvey/linkedin/history.py, `harvey meetings scan
   --linkedin-inbox`). It reads chats from before Harvey ran LinkedIn, and yours.

@@ -149,3 +149,18 @@ def test_the_calendar_places_what_was_found(state):
     assert data["stats"]["upcoming"] == 1 and data["stats"]["held"] == 1 and data["stats"]["cancelled"] == 1
     assert data["upcoming"][0]["found"]["quote"] == "Tuesday at 3pm EST works"
     assert json.dumps(data)
+
+
+def test_an_offer_that_passed_unanswered_isnt_counted_as_held(state):
+    # Live, 2026-11-23: "Held: 1 · 20 LinkedIn" counted lapsed offers in the split.
+    config = _config()
+    _linkedin(state, "di-ex-4", "Di Example", [("us", "Would Monday 10 AM IST suit?"), ("them", "Busy week")])
+    _linkedin(state, "gus-7", "Gus Example", [("us", "Call on the 10th?"), ("them", "Yes that works, see you then")])
+    brain = Brain({
+        "Di Example": [{"status": "proposed", "start": "2026-11-02T10:00+05:30", "quote": "Would Monday 10 AM IST suit?"}],
+        "Gus Example": [{"status": "agreed", "start": "2026-11-03T10:00+05:30", "quote": "see you then"}],
+    })
+    run(meeting_finder.scan(state, brain, config, now=NOW))
+    st = run(meetings.collect(state, config, now=NOW))["stats"]
+    assert st["held"] == 1 and st["lapsed"] == 1 and st["proposed"] == 0
+    assert st["by_channel"]["linkedin"]["held"] == 1 and st["by_channel"]["linkedin"]["lapsed"] == 1

@@ -3891,8 +3891,9 @@ function mtSummaryHtml(d) {
     chKpi('Next meeting', nextValue, next ? escHtml(mtDayLabel(next.when.start, {weekday: 'short', day: 'numeric', month: 'short'}) +
       ', ' + mtClock(next.when.start)) + ' · ' + mtRel(next.when)[0] : 'nothing booked with a time') +
     chKpi('Coming up', mbxNum(st.upcoming || 0), split('upcoming') + (unset ? ' · ' + mbxNum(unset) + ' without a time' : '')) +
-    chKpi('Held', mbxNum(st.held || 0), split('held')) +
-    chKpi('Proposed', mbxNum(st.proposed || 0), 'not confirmed yet') +
+    chKpi('Agreed, now past', mbxNum(st.held || 0), (st.held ? split('held') + ' · did it take place?' : 'none yet')) +
+    chKpi('Proposed', mbxNum(st.proposed || 0), 'not confirmed yet' +
+      (st.lapsed ? ' · ' + mbxNum(st.lapsed) + ' passed unanswered' : '')) +
     chKpi('Cancelled', mbxNum(st.cancelled || 0), 'called off or refused') + '</div>';
 }
 
