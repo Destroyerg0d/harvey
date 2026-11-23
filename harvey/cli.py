@@ -1386,6 +1386,10 @@ def main():
     from harvey.owner_inbox import add_cli_parser as add_owner_parser
     add_owner_parser(subparsers)
 
+    # harvey meetings scan|list (harvey/meeting_finder.py)
+    from harvey.meeting_finder import add_cli_parser as add_meetings_parser
+    add_meetings_parser(subparsers)
+
     # harvey usage
     sub = subparsers.add_parser("usage", help="Show brain usage and quota (Claude or Codex)")
     sub.add_argument("--days", type=int, default=30, help="Breakdown window (default: 30)")

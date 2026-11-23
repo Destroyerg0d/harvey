@@ -101,6 +101,7 @@ const STATUS = {
   ooo:            ['Out of office', 'idle'],
   auto:           ['Automatic reply', 'idle'],
   auto_ack:       ['Auto-acknowledgement', 'idle'],
+  ack:            ['Said thanks', 'idle'],
   left_company:   ['Left the company', 'bad'],
   wrong_person:   ['Wrong person', 'waiting'],
   job_seeker:     ['Job seeker: sent to HR', 'idle'],
@@ -3799,12 +3800,20 @@ function mtDayLabel(iso, opts) {
   return new Date(iso).toLocaleDateString('en-GB', Object.assign({timeZone: mtTz()}, opts));
 }
 function mtBooked() { return _mt ? [..._mt.upcoming, ..._mt.earlier] : []; }
-function mtTimed() { return mtBooked().filter(m => m.when); }
+function mtTimed() { return _mt ? [..._mt.upcoming, ..._mt.earlier, ..._mt.close].filter(m => m.when) : []; }
+const MT_STATUS = {booked: ['Booked', 'good'], agreed: ['Agreed', 'good'], proposed: ['Proposed, not confirmed', 'waiting'],
+  held: ['Held', 'note'], cancelled: ['Cancelled', 'bad'], arranging: ['Being arranged', 'waiting']};
+function mtStatusBadge(m) {
+  const s = MT_STATUS[m.status] || ['Meeting', 'note'];
+  let label = s[0];
+  if ((m.status === 'agreed' || m.status === 'booked') && m.when && new Date(m.when.end).getTime() < Date.now()) label = 'Held (time passed)';
+  return '<span class="badge t-' + s[1] + '">' + label + '</span>';
+}
 function mtFind(key) {
   if (!_mt) return null;
   return [..._mt.upcoming, ..._mt.close, ..._mt.earlier].find(m => m.key === key) || null;
 }
-function mtIsClose(m) { return !!m && !mtBooked().some(x => x.key === m.key); }
+function mtIsClose(m) { return !!m && !!_mt && _mt.close.some(x => x.key === m.key); }
 function mtShort(name) {
   const parts = String(name || 'Them').trim().split(/\s+/);
   return parts.length > 1 ? parts[0] + ' ' + parts[parts.length - 1][0] + '.' : parts[0];
@@ -3848,6 +3857,8 @@ function renderMeetings(data) {
     b.setAttribute('aria-pressed', String(on));
   });
   liEl('mt-summary', mtSummaryHtml(data));
+  liEl('mt-scan', mtScanHtml(data.scan || {}));
+  mtWatchScan(data.scan || {});
   const wrap = document.getElementById('mt-calendar-wrap');
   const unset = data.upcoming.filter(m => !m.when);
   if (wrap) {
@@ -3868,18 +3879,63 @@ function renderMeetings(data) {
 }
 
 function mtSummaryHtml(d) {
+  const st = d.stats || {}, per = st.by_channel || {};
   const timed = d.upcoming.filter(m => m.when);
   const next = timed[0];
-  const week = timed.filter(m => new Date(m.when.start).getTime() <= Date.now() + 7 * MT_DAY_MS).length;
   const unset = d.upcoming.length - timed.length;
+  const split = key => Object.entries(per).filter(([, v]) => v[key]).map(([ch, v]) => mbxNum(v[key]) + ' ' +
+    (MT_LABEL[ch] || ch)).join(' · ') || 'none';
   const nextValue = next ? '<button type="button" class="mt-kpi-link" onclick="mtOpen(' + jsq(next.key) + ')">' +
     escHtml(mtShort(next.name)) + '</button>' : '&ndash;';
   return '<div class="kpis mbx-kpis mt-kpis">' +
     chKpi('Next meeting', nextValue, next ? escHtml(mtDayLabel(next.when.start, {weekday: 'short', day: 'numeric', month: 'short'}) +
       ', ' + mtClock(next.when.start)) + ' · ' + mtRel(next.when)[0] : 'nothing booked with a time') +
-    chKpi('Next 7 days', mbxNum(week), week === 1 ? 'meeting' : 'meetings') +
-    chKpi('Time not set', mbxNum(unset), unset ? 'set it on the meeting' : 'all have a time') +
-    chKpi('Getting close', mbxNum(d.close.length), 'being arranged') + '</div>';
+    chKpi('Coming up', mbxNum(st.upcoming || 0), split('upcoming') + (unset ? ' · ' + mbxNum(unset) + ' without a time' : '')) +
+    chKpi('Held', mbxNum(st.held || 0), split('held')) +
+    chKpi('Proposed', mbxNum(st.proposed || 0), 'not confirmed yet') +
+    chKpi('Cancelled', mbxNum(st.cancelled || 0), 'called off or refused') + '</div>';
+}
+
+// ── Finding meetings in every conversation (harvey/meeting_finder.py) ──
+
+let _mtScanTimer = null;
+
+function mtScanHtml(scan) {
+  const r = scan.report || {}, inbox = scan.inbox || {};
+  let line;
+  if (scan.running) {
+    line = '<b>Reading…</b> ' + escHtml(scan.step || '') +
+      (inbox.threads ? ' · LinkedIn: ' + mbxNum(inbox.threads) + ' threads read' + (inbox.listed ? ' of ' + mbxNum(inbox.listed) : '') : '') +
+      (r.read ? ' · ' + mbxNum(r.read) + ' conversations read' : '');
+  } else if (scan.finished) {
+    line = 'Read ' + relTime(scan.finished) + ': ' + mbxNum(r.conversations || 0) + ' conversations, ' +
+      mbxNum(r.with_signs || 0) + ' mention a meeting' + (scan.step && scan.step !== 'done' ? ' · ' + escHtml(scan.step) : '');
+  } else {
+    line = 'Harvey hasn’t read the conversations for meetings yet.';
+  }
+  return '<div class="card mt-scan"><div class="mt-scan-line">' + icon('sparkle') + '<span>' + line + '</span></div>' +
+    '<div class="mt-scan-go">' +
+      '<label class="mt-scan-opt"><input type="checkbox" id="mt-scan-inbox"' + (scan.running ? ' disabled' : '') +
+        '> First read LinkedIn’s whole inbox <span class="muted">(30–60 min)</span></label>' +
+      '<button class="btn btn-primary btn-sm" onclick="mtScan(this)"' + (scan.running ? ' disabled' : '') + '>' +
+        (scan.running ? 'Reading…' : 'Find meetings in all conversations') + '</button></div></div>';
+}
+
+async function mtScan(btn) {
+  const inbox = document.getElementById('mt-scan-inbox');
+  if (btn) btn.disabled = true;
+  const res = await liPost('/api/meetings/scan', {linkedin_inbox: !!(inbox && inbox.checked)});
+  if (res && res.success) showToast('Harvey is reading the conversations. Meetings appear here as they are found.', 'success');
+  else showToast(failMsg(res, 'Couldn’t start it.'), 'error');
+  mtReload();
+}
+
+// While a scan runs, the tab refreshes itself every 20 seconds.
+function mtWatchScan(scan) {
+  if (_mtScanTimer) { clearTimeout(_mtScanTimer); _mtScanTimer = null; }
+  if (scan.running && currentTab === 'meetings') {
+    _mtScanTimer = setTimeout(() => { if (currentTab === 'meetings' && !_mtDetail && !_mtTime.size) mtReload(); }, 20000);
+  }
 }
 
 // ── The month, like Google Calendar ──
@@ -3903,8 +3959,10 @@ function mtCalendarHtml() {
     const label = dt.toLocaleDateString('en-GB', {weekday: 'long', day: 'numeric', month: 'long', timeZone: 'UTC'}) +
       (list.length ? ', ' + list.length + (list.length === 1 ? ' meeting' : ' meetings') : '');
     const chips = list.slice(0, 3).map(x => '<button type="button" class="mt-chip c-' + x.channel +
-        (new Date(x.when.end).getTime() < Date.now() ? ' past' : '') + '" title="' +
-        escHtml(x.name + ': ' + (x.when.theirs ? x.when.theirs + ' (' + x.when.ours + ')' : x.when.ours)) +
+        (new Date(x.when.end).getTime() < Date.now() ? ' past' : '') +
+        (x.status === 'proposed' ? ' tentative' : '') + (x.status === 'cancelled' ? ' cancelled' : '') + '" title="' +
+        escHtml(x.name + ' (' + (MT_STATUS[x.status] || ['Meeting'])[0] + '): ' +
+          (x.when.theirs ? x.when.theirs + ' (' + x.when.ours + ')' : x.when.ours)) +
         '" onclick="event.stopPropagation();mtOpen(' + jsq(x.key) + ')"><span class="mt-chip-time">' +
         escHtml(mtChipClock(x.when.start)) + '</span> ' + escHtml(mtShort(x.name)) + '</button>').join('');
     const more = list.length > 3 ? '<span class="mt-more">+' + (list.length - 3) + ' more</span>' : '';
@@ -3999,7 +4057,8 @@ function mtRowHtml(m, close) {
     actions += '<a class="btn btn-primary btn-sm" href="' + mtHref(_mt.meet_link) +
       '" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">Join</a>';
   }
-  const rel = w ? '<span class="badge t-' + mtRel(w)[1] + '">' + mtRel(w)[0] + '</span>' : '';
+  const rel = w && mtRel(w)[0] !== 'done' && m.status !== 'cancelled'
+    ? '<span class="badge t-' + mtRel(w)[1] + '">' + mtRel(w)[0] + '</span>' : mtStatusBadge(m);
   return '<div class="mt-row' + (w && mtRel(w)[0] === 'done' ? ' past' : '') + '" role="button" tabindex="0" ' +
       'onclick="mtOpen(' + args + ')" onkeydown="if(event.key===\'Enter\')mtOpen(' + args + ')">' +
     date + time +
@@ -4059,6 +4118,7 @@ function mtDetailHtml(m) {
   const sub = [m.role, m.company, m.location].filter(Boolean).map(escHtml).join(' · ');
   const w = m.when;
   const booked = close ? 'Being arranged' + (m.alert ? ': Harvey read it ' + relTime(m.alert.at) : '')
+    : m.booked_by === 'conversation' ? 'Found in the conversation'
     : m.booked_by === 'harvey' ? 'Booked by Harvey' + (m.booked_at ? ' ' + relTime(m.booked_at) : '') + ' (they said yes to the time)'
     : 'Marked as a meeting' + (m.booked_at ? ' ' + relTime(m.booked_at) : '') + ' by you';
   const rel = w ? mtRel(w) : null;
@@ -4105,6 +4165,10 @@ function mtDetailHtml(m) {
         '<span>' + booked + '</span></div></div>' +
       '<button class="btn btn-ghost btn-sm btn-icon mt-d-close" aria-label="Close" onclick="mtClose()">&times;</button></header>' +
     '<div class="mt-d-body">' + when + (_mtTime.has(m.key) ? mtTimeFormHtml(m) : '') +
+      (m.found ? '<div class="mt-evidence"><div class="mt-evidence-head">' + mtStatusBadge(m) +
+        '<span class="muted">' + (m.found.proposed_by === 'them' ? 'They proposed it' : 'We proposed it') + '</span></div>' +
+        '<blockquote>“' + escHtml(m.found.quote) + '”</blockquote>' +
+        (m.found.note ? '<p class="muted">' + escHtml(m.found.note) + '</p>' : '') + '</div>' : '') +
       '<div class="mt-d-actions">' + links.filter(Boolean).join('') + '</div>' +
       '<div class="segmented mt-d-tabs" role="tablist" aria-label="Brief or conversation">' +
         tab('brief', icon('sparkle') + 'Prep brief') + tab('convo', 'Conversation <span class="n">' + mbxNum(n) + '</span>') + '</div>' +

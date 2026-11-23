@@ -102,3 +102,57 @@ async def meetings_booked(channel: str, item_id: str):
         return _refuse("That person isn't here any more.", 404)
     await state.log_action("meeting_marked", "dashboard", {"channel": channel, "id": item_id})
     return {"success": True}
+
+
+# ── Find meetings in every conversation (harvey/meeting_finder.py) ──
+
+_scan_process = None
+
+
+def _scan_running(status: dict) -> bool:
+    global _scan_process
+    if _scan_process is not None and _scan_process.poll() is None:
+        return True
+    return False
+
+
+@router.post("/api/meetings/scan")
+async def meetings_scan(request: Request):
+    """Start `harvey meetings scan` in the background; its progress shows on
+    the tab (meeting_finder.SCAN_KEY)."""
+    global _scan_process
+    import json as _json
+    import os
+    import subprocess
+    import sys
+    from harvey import meeting_finder
+    from harvey.paths import PROJECT_ROOT
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    state = _state()
+    await state.init_db()
+    try:
+        status = _json.loads(await state.get_setting(meeting_finder.SCAN_KEY) or "{}")
+    except ValueError:
+        status = {}
+    if _scan_running(status):
+        return _refuse("A scan is already running.", 409)
+    args = [sys.executable, "-m", "harvey", "meetings", "scan"]
+    if (body or {}).get("linkedin_inbox"):
+        args.append("--linkedin-inbox")
+    if (body or {}).get("force"):
+        args.append("--force")
+    log_file = PROJECT_ROOT / "data" / "logs" / "meetings-scan.log"
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    flags = 0
+    if sys.platform == "win32":
+        flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+    with open(log_file, "w", encoding="utf-8") as log:
+        _scan_process = subprocess.Popen(args, cwd=str(PROJECT_ROOT), stdin=subprocess.DEVNULL, stdout=log,
+                                         stderr=log, start_new_session=True, creationflags=flags,
+                                         env={**os.environ, "PYTHONUTF8": "1"})
+    await state.set_setting(meeting_finder.SCAN_KEY, _json.dumps(
+        {"started": meeting_finder._utcnow().isoformat(), "running": True, "step": "starting", "report": {}}))
+    return {"success": True}

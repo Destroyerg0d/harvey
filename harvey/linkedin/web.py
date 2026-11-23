@@ -172,7 +172,8 @@ def _history(rows: list[dict]) -> list[dict]:
         out.append({"direction": m["direction"], "kind": m["kind"], "body": m["body"],
                     "at": m["sent_at"] or m["created_at"], "by": m["approved_by"],
                     "status": "maybe_sent" if maybe else "not_sent" if stopped else "sent",
-                    "note": (m["error"] or "") if maybe or stopped else ""})
+                    "note": (m["error"] or "") if maybe or stopped else "",
+                    "intent": m.get("intent") or ""})
     return out
 
 
@@ -282,7 +283,11 @@ async def linkedin_overview(tz: int = 0):
             draft = next((m for m in reversed(rows) if m["direction"] == "out"
                           and m["kind"] == "reply" and m["status"] in ("draft", "approved")), None)
             spoken_rows = [m for m in thread if m["kind"] != "invite_note" and m["status"] == "sent"]
-            needs_reply = bool(spoken_rows) and spoken_rows[-1]["direction"] == "in" and lead["stage"] != "declined"
+            # A "thanks" needs no answer, and a message read in from the old inbox
+            # (harvey/linkedin/history.py) isn't a new one.
+            needs_reply = (bool(spoken_rows) and spoken_rows[-1]["direction"] == "in"
+                           and lead["stage"] != "declined"
+                           and (spoken_rows[-1].get("intent") or "") not in ("ack", "history"))
             conversations.append({
                 "needs_reply": needs_reply,
                 "rank": 0 if needs_reply else 1 if lead["stage"] in ("warm", "meeting") else 2,

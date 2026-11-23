@@ -177,7 +177,8 @@ def _history(rows: list[dict]) -> list[dict]:
         out.append({"direction": m["direction"], "kind": m["kind"], "body": m["body"],
                     "at": m["sent_at"] or m["created_at"], "by": m["approved_by"],
                     "status": "not_sent" if stopped else m["status"],
-                    "note": (m["error"] or "") if stopped or m["status"] == "maybe_sent" else ""})
+                    "note": (m["error"] or "") if stopped or m["status"] == "maybe_sent" else "",
+                    "intent": m.get("intent") or ""})
     return out
 
 
@@ -293,7 +294,8 @@ async def whatsapp_overview():
             draft = next((m for m in reversed(rows) if m["direction"] == "out" and m["kind"] == "reply"
                           and m["status"] in ("draft", "approved")), None)
             spoken = [m for m in thread if m["status"] == "sent"]
-            needs_reply = bool(spoken) and spoken[-1]["direction"] == "in" and contact["stage"] != "declined"
+            needs_reply = (bool(spoken) and spoken[-1]["direction"] == "in" and contact["stage"] != "declined"
+                           and (spoken[-1].get("intent") or "") != "ack")        # a "thanks" needs no answer
             conversations.append({
                 "needs_reply": needs_reply,
                 "rank": 0 if needs_reply else 1 if contact["stage"] in ("warm", "meeting") else 2,

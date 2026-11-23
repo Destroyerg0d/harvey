@@ -1201,6 +1201,21 @@ a.btn, a.btn:hover { text-decoration: none; }
 .mt-chip:hover { filter: brightness(0.97); }
 .mt-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .mt-chip.past { opacity: .55; }
+.mt-chip.tentative { background: transparent; border: 1px dashed var(--line-strong); border-left-width: 3px; font-style: italic; }
+.mt-chip.tentative.c-linkedin { border-left-color: var(--mt-li); }
+.mt-chip.tentative.c-whatsapp { border-left-color: var(--mt-wa); }
+.mt-chip.tentative.c-email { border-left-color: var(--mt-em); }
+.mt-chip.cancelled { text-decoration: line-through; opacity: .5; }
+.mt-scan { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); flex-wrap: wrap;
+           padding: var(--sp-3) var(--sp-4); margin-bottom: var(--sp-5); }
+.mt-scan-line { display: flex; align-items: center; gap: 8px; font-size: var(--fs-ui); color: var(--text-2); min-width: 0; }
+.mt-scan-line .icon { width: 16px; height: 16px; color: var(--accent); flex: none; }
+.mt-scan-go { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; }
+.mt-scan-opt { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-caption); color: var(--text-2); cursor: pointer; }
+.mt-evidence { border-left: 3px solid var(--line-strong); padding: 4px 0 4px var(--sp-3); display: grid; gap: 6px; }
+.mt-evidence-head { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; font-size: var(--fs-caption); }
+.mt-evidence blockquote { margin: 0; font-size: var(--fs-ui); line-height: 1.55; overflow-wrap: anywhere; }
+.mt-evidence p { margin: 0; font-size: var(--fs-caption); }
 .mt-chip-time { color: var(--text-2); font-variant-numeric: tabular-nums; }
 .mt-more { font-size: 11px; color: var(--text-2); padding-left: 6px; font-weight: 500; }
 .mt-dots { display: none; justify-content: center; gap: 3px; }

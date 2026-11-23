@@ -43,8 +43,8 @@ from harvey.chat_style import parts as chat_parts, squash, strip_repeat_name
 ALERT_KIND = "alert"     # a meeting alert to your own phone (harvey/meeting_alert.py)
 ALERT_PROOF_CHARS = 120  # the opening of an alert that must show in the chat
 from harvey.agents.linkedin_agent import (
-    DECLINE_INTENTS, REPLY_INTENTS, SwitchedOff, _clean_draft, answers_automation_honestly,
-    asks_if_automated,
+    ACK, DECLINE_INTENTS, REPLY_INTENTS, SwitchedOff, _clean_draft, acknowledged,
+    answers_automation_honestly, asks_if_automated,
 )
 from harvey.gate import find_links
 from harvey.linkedin.pacing import wait_unless
@@ -586,7 +586,8 @@ class WhatsAppAgent:
             return "unsubscribe"
         if any(p in flat for p in ESCALATION_PATTERNS) or _HOW_DID_YOU_GET_RE.search(text or ""):
             return "escalate"
-        return await Handler._classify_intent(self, text, self._as_prospect(contact))
+        intent = await Handler._classify_intent(self, text, self._as_prospect(contact))
+        return acknowledged(text, intent, contact.get("stage") or "")
 
     async def handle_inbound(self):
         unread = [m for m in await self.state.wa_messages(direction="in", limit=100000) if not m["intent"]]
@@ -604,6 +605,11 @@ class WhatsAppAgent:
                     continue
                 logger.warning(f"WhatsApp: couldn't classify a reply ({e}); it waits for you.")
                 intent = "escalate"
+            if intent == ACK and contact["stage"] != "meeting":
+                # An "okay, thanks" to the time we offered books it.
+                history = await self.state.wa_messages(contact_id=contact["id"])
+                if await self.booking_confirmed(contact, message["body"], history) is not None:
+                    intent = "interested"
             await self.state.wa_update_message(message["id"], intent=intent)
             if intent in DECLINE_INTENTS:
                 await self.decline(contact, message["body"], intent)

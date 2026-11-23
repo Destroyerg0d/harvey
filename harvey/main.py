@@ -682,6 +682,13 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
                 await report_day(state, config)
             except Exception as e:
                 logger.warning(f"LinkedIn daily report failed: {e}")
+            # Once a day, the conversations that changed are read for meetings
+            # (harvey/meeting_finder.py), in the background: the Meetings tab.
+            try:
+                from harvey.meeting_finder import maybe_daily_scan
+                await maybe_daily_scan(state, brain, config)
+            except Exception as e:
+                logger.warning(f"Meeting scan failed to start: {e}")
             await owner_updates.send(state, config, quiet=in_quiet_hours(config))
 
             # 7. Sleep until next heartbeat

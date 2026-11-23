@@ -266,6 +266,7 @@ async def _email_item(state, config, prospect, conversation=None) -> dict:
 
 async def item(state, config, channel: str, item_id: str) -> dict | None:
     """One person's card, whatever their stage."""
+    item_id = item_id.split("#")[0]
     if channel == "linkedin":
         lead = await state.li_get_lead(item_id)
         return await _linkedin_item(state, config, lead) if lead else None
@@ -292,7 +293,10 @@ async def _alert_target(state, key: str):
 
 
 async def collect(state, config, now: datetime | None = None) -> dict:
-    """{"upcoming", "earlier", "close", "owner_zone", "meet_link"} for the tab."""
+    """{"upcoming", "earlier", "close", "stats", "scan", "owner_zone", "meet_link"}
+    for the tab: the meetings a stage or Harvey's booking says, and every meeting
+    the finder read in the conversations (harvey/meeting_finder.py)."""
+    from harvey import meeting_finder
     now = _aware(now) or _utcnow()
     items: list[dict] = []
     for lead in await state.li_leads(stages=("meeting",)):
@@ -304,15 +308,65 @@ async def collect(state, config, now: datetime | None = None) -> dict:
         if prospect is not None:
             items.append(await _email_item(state, config, prospect))
     for it in items:
+        it["status"] = "booked"
+    by_key = {i["key"]: i for i in items}
+
+    # What the conversations say (the finder), merged with the above.
+    cards: dict[str, dict | None] = {}
+    found_items: list[dict] = []
+    for found in await meeting_finder.stored(state):
+        key = f"{found['channel']}:{found['id']}"
+        if key not in cards:
+            cards[key] = await item(state, config, found["channel"], found["id"])
+        base = cards[key]
+        if base is None:
+            continue
+        evidence = {k: found.get(k) or "" for k in ("status", "quote", "note", "proposed_by", "read_at")}
+        start = _aware(found.get("start"))
+        found_when = when(start, start + timedelta(minutes=int(found.get("minutes") or DEFAULT_MINUTES)),
+                          config, base.get("their_zone") or "") if start else None
+        booked = by_key.get(key)
+        if booked is not None and found["status"] == "agreed" and not booked.get("found"):
+            # The same meeting: the booked card takes the conversation's time if it has none.
+            booked["found"] = evidence
+            if booked["when"] is None and found_when:
+                booked["when"], booked["time_from"] = found_when, "conversation"
+            continue
+        time_from = "conversation" if found_when else ""
+        if found["status"] == "agreed":
+            mine = await _json_setting(state, TIME_KEY + key)       # a time you set wins
+            mine_start = _aware(mine.get("start"))
+            if mine_start:
+                found_when = when(mine_start, mine_start + timedelta(minutes=int(mine.get("minutes") or DEFAULT_MINUTES)),
+                                  config, base.get("their_zone") or "")
+                time_from = "you"
+        card = dict(base)
+        card.update({"key": f"{key}#{found['index']}", "status": found["status"], "found": evidence,
+                     "when": found_when, "time_from": time_from,
+                     "booked_by": "conversation", "booked_at": found.get("read_at") or ""})
+        found_items.append(card)
+
+    upcoming, earlier, close = [], [], []
+    for it in items + found_items:
+        status, w = it["status"], it["when"]
+        ended = bool(w) and _aware(w["end"]) < now
+        if status == "cancelled" or status == "held":
+            earlier.append(it)
+        elif status == "proposed":
+            (earlier if ended else close).append(it)
+        elif w:
+            (earlier if ended else upcoming).append(it)
+        else:
+            upcoming.append(it)                       # booked or agreed, no time yet
+    for it in upcoming + earlier + close:
         it["brief"] = await _cached_brief(state, it)
     far = datetime.max.replace(tzinfo=timezone.utc)
-    upcoming = [i for i in items if not i["when"] or _aware(i["when"]["end"]) >= now]
     upcoming.sort(key=lambda i: _aware(i["when"]["start"]) if i["when"] else far)
-    earlier = [i for i in items if i["when"] and _aware(i["when"]["end"]) < now]
-    earlier.sort(key=lambda i: i["when"]["start"], reverse=True)
+    earlier.sort(key=lambda i: (i["when"] or {}).get("start") or "", reverse=True)
 
-    booked = {i["key"] for i in items}
-    close, seen = [], set()
+    # Meeting alerts (being arranged) not already on the list.
+    known = {i["key"].split("#")[0] for i in items + found_items}
+    seen = set()
     since = (now - timedelta(days=CLOSE_DAYS)).astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     rows = await state._li_query(
         "SELECT created_at, details_json FROM actions WHERE action_type = 'meeting_alert' AND created_at >= ? "
@@ -326,18 +380,40 @@ async def collect(state, config, now: datetime | None = None) -> dict:
         if target is None:
             continue
         key = f"{target[0]}:{target[1]}"
-        if key in booked or key in seen:
+        if key in known or key in seen:
             continue
         seen.add(key)
         card = await item(state, config, *target)
         if card is None or card["stage"] in ("declined", "opted_out", "lost", "closed", "closed_lost"):
             continue
+        card["status"] = "arranging"
         card["alert"] = {"at": row["created_at"], "when": alert.get("when") or "",
                          "service": alert.get("service") or "", "channel": alert.get("channel") or ""}
         card["brief"] = await _cached_brief(state, card)
         close.append(card)
+    close.sort(key=lambda i: (i["when"] or {}).get("start") or "9999")
+
+    stats = {"upcoming": len(upcoming), "proposed": sum(1 for i in close if i["status"] == "proposed"),
+             "held": sum(1 for i in earlier if i["status"] in ("held", "agreed", "booked")),
+             "cancelled": sum(1 for i in earlier if i["status"] == "cancelled"),
+             "by_channel": {}}
+    for it in upcoming + earlier + close:
+        per = stats["by_channel"].setdefault(it["channel"], {"upcoming": 0, "held": 0, "proposed": 0, "cancelled": 0})
+        if it in upcoming:
+            per["upcoming"] += 1
+        elif it in close:
+            per["proposed"] += it["status"] == "proposed"
+        elif it["status"] == "cancelled":
+            per["cancelled"] += 1
+        else:
+            per["held"] += 1
+    try:
+        scan = json.loads(await state.get_setting(meeting_finder.SCAN_KEY) or "{}")
+    except ValueError:
+        scan = {}
     offer = getattr(getattr(config, "product", None), "offer", None)
-    return {"upcoming": upcoming, "earlier": earlier, "close": close,
+    return {"upcoming": upcoming, "earlier": earlier, "close": close, "stats": stats,
+            "scan": scan if isinstance(scan, dict) else {},
             "owner_zone": zone_name(owner_zone(config)), "owner_tz": owner_zone(config),
             "meet_link": (getattr(offer, "meeting_link", "") or "").strip(),
             "now": now.isoformat()}
@@ -362,7 +438,7 @@ async def mark_booked(state, channel: str, item_id: str) -> bool:
 # ── The prep brief ──
 
 async def _cached_brief(state, card: dict) -> dict | None:
-    data = await _json_setting(state, BRIEF_KEY + card["key"])
+    data = await _json_setting(state, BRIEF_KEY + card["key"].split("#")[0])
     if not data.get("text"):
         return None
     return {"text": data["text"], "at": data.get("at") or "",

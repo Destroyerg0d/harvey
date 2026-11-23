@@ -185,6 +185,31 @@ class Driver:
         await self.wait(self.rng.uniform(0.8, 2.0))
         return True
 
+    async def open_conversation(self, index: int) -> bool:
+        """Open the ``index``-th conversation in the messaging list by
+        clicking it, as a person does: LinkedIn's list carries no thread
+        links now (live, 2026-11-23). The thread opens beside the list and
+        the address becomes its /messaging/thread/ URL."""
+        from harvey.linkedin.pages import CONVERSATION_ITEM, CONVERSATION_ITEM_LINK
+        item = self.page.locator(CONVERSATION_ITEM).nth(index)
+        try:
+            if await item.count() == 0:
+                return False
+            target = item.locator(CONVERSATION_ITEM_LINK).first
+            if await target.count() == 0:
+                target = item
+            await target.scroll_into_view_if_needed(timeout=5000)
+            await target.click(timeout=8000, delay=self.rng.randint(40, 140))
+        except Exception as e:
+            logger.debug(f"LinkedIn: opening conversation {index} failed: {e}")
+            return False
+        await self.wait(self.rng.uniform(1.8, 3.0))
+        return True
+
+    async def load_more_conversations(self) -> bool:
+        """Press the list's "Load more conversations" button, if it shows."""
+        return await self.click_button(r"^\s*load more conversations\s*$")
+
     async def click_button(self, name_pattern: str, within: str = "") -> bool:
         """Click the first button (or menu item) whose accessible name
         matches ``name_pattern`` (a regex, case-insensitive)."""

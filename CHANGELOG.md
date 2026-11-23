@@ -9,6 +9,34 @@ minor versions can still change behaviour.
 
 ### Added
 
+- **Every meeting, found in every conversation** (harvey/meeting_finder.py). The Meetings tab
+  showed only meetings a stage said were booked; agreed ones elsewhere never reached it.
+  - **What is read:** each LinkedIn, WhatsApp and email conversation with a sign of a meeting (a
+    reply from them, plus an offered time, a meeting word or a call link).
+  - **How:** one brain call per conversation reads the dated thread and lists each meeting in
+    it: agreed, proposed, held or cancelled, with its time, who proposed it and a quote.
+  - **Checks in code:** the quote must be in the thread and the time must parse, or the meeting
+    is dropped or kept as "time unclear". It is read again only when the conversation changes.
+  - **When:** `harvey meetings scan` (or Scan on the Meetings tab), then a daily pass.
+  - **On the tab:**
+    - proposed times are dashed chips and cancelled ones are struck through;
+    - each meeting shows its quote and "found in the conversation";
+    - the summary counts held, upcoming, proposed and cancelled meetings.
+  - Stages aren't changed by it.
+- **LinkedIn's whole inbox, read once** (harvey/linkedin/history.py, `harvey meetings scan
+  --linkedin-inbox`). It reads chats from before Harvey ran LinkedIn, and yours.
+  - **How:**
+    - It runs in Harvey's window between runs.
+    - It scrolls the list and presses "Load more conversations".
+    - It clicks each conversation, as the list has no thread links now.
+    - It leaves unread ones unread.
+  - **What it stores:** missing messages, as `history`, so nothing old is answered.
+  - **New people:** someone who isn't a lead is added only when their thread speaks of a meeting,
+    set aside so Harvey never writes to them.
+  - It picks up where it stopped.
+- **LinkedIn messages keep their real dates.** `pages.parse_thread` reads the thread's day headings
+  ("Oct 22", "Friday", "Today") and each group's time.
+
 - **The Meetings tab is a month calendar, like Google Calendar.**
   - **The month:** "‹ Today ›" with the month's name; Sun–Sat weeks; today circled.
   - **On each day:** its meetings at your time ("10:30am Hana R."), coloured by channel
@@ -52,6 +80,14 @@ minor versions can still change behaviour.
 - **Nothing approved waits without a reason.** An approved LinkedIn item that doesn't go says why
   on itself ("waiting: outside LinkedIn hours", the day's cap, the hour's cap, the run's time),
   shown on the tab and logged once a run.
+
+### Fixed
+
+- **A short "okay, thanks" is never a no.** Live, 2026-11-23: one sent after a confirmed meeting
+  was read as not interested, and the lead was declined.
+  - On LinkedIn and WhatsApp, a message of only thanks and okays is now `ack`: no reply, no
+    decline, and it doesn't wait as "needs a reply".
+  - An okay to the offered time still books it.
 
 ### Changed
 

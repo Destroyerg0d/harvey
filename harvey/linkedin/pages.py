@@ -137,11 +137,16 @@ class ConversationCard:
     time: str = ""
     thread_url: str = ""
     unread: bool = False
+    index: int = -1          # its place among the list's items (to click it: no links now)
+
+
+CONVERSATION_ITEM = "li.msg-conversation-listitem"
+CONVERSATION_ITEM_LINK = ".msg-conversation-listitem__link"
 
 
 def parse_conversation_list(html: str) -> list[ConversationCard]:
     cards = []
-    for li in soup_of(html).select("li.msg-conversation-listitem"):
+    for index, li in enumerate(soup_of(html).select(CONVERSATION_ITEM)):
         name_el = li.select_one("h3")
         snippet_el = li.select_one(".msg-conversation-card__message-snippet")
         name = clean_text(name_el.get_text(" ")) if name_el else ""
@@ -158,7 +163,7 @@ def parse_conversation_list(html: str) -> list[ConversationCard]:
             name=name, snippet=snippet, we_sent_last=we_last,
             time=clean_text(time_el.get_text(" ")) if time_el else "",
             thread_url=_abs(link.get("href")).split("?")[0] if link else "",
-            unread="unread" in classes))
+            unread="unread" in classes, index=index))
     return cards
 
 
@@ -166,6 +171,63 @@ def parse_conversation_list(html: str) -> list[ConversationCard]:
 class ThreadMessage:
     sender: str
     body: str
+    at: datetime | None = None      # naive UTC, from the thread's date heading and time
+
+
+THREAD_DAY_HEADING = "msg-s-message-list__time-heading"   # "Oct 22", "Friday", "Today"
+THREAD_TIME = "msg-s-message-group__timestamp"            # "11:07 AM", once per group
+_WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+
+
+def thread_day(text: str, today: date) -> date | None:
+    """The day a thread's date heading names, read as LinkedIn writes it:
+    "Today", "Yesterday", a weekday (the last one before today), "Nov 1"
+    (this year, or last year when that is still ahead) or "Nov 1, 2025"."""
+    from datetime import timedelta
+    t = " ".join((text or "").replace(",", " , ").split()).lower()
+    if not t:
+        return None
+    if t == "today":
+        return today
+    if t == "yesterday":
+        return today - timedelta(days=1)
+    if t in _WEEKDAYS:
+        back = (today.weekday() - _WEEKDAYS.index(t)) % 7 or 7
+        return today - timedelta(days=back)
+    t = t.replace(" , ", " ").replace(" ,", " ")
+    for fmt in ("%b %d %Y", "%d %b %Y", "%B %d %Y", "%d %B %Y"):
+        try:
+            return datetime.strptime(t, fmt).date()
+        except ValueError:
+            pass
+    for fmt in ("%b %d", "%d %b", "%B %d", "%d %B"):
+        try:
+            day = datetime.strptime(f"{t} {today.year}", fmt + " %Y").date()
+        except ValueError:
+            continue
+        return day.replace(year=today.year - 1) if day > today else day
+    return None
+
+
+def thread_time(text: str):
+    """A message group's time, "11:07 AM" or "14:07", or None."""
+    t = " ".join((text or "").upper().replace(".", "").split())
+    for fmt in ("%I:%M %p", "%H:%M"):
+        try:
+            return datetime.strptime(t, fmt).time()
+        except ValueError:
+            pass
+    return None
+
+
+def _thread_moment(day: date | None, clock, tz) -> datetime | None:
+    """The day and time, in the zone the page was drawn in, as naive UTC."""
+    from datetime import timezone
+    if day is None or clock is None:
+        return None
+    local = datetime.combine(day, clock)
+    aware = local.replace(tzinfo=tz) if tz is not None else local.astimezone()
+    return aware.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 @dataclass
@@ -177,15 +239,28 @@ class Thread:
         return self.messages[-1] if self.messages else None
 
 
-def parse_thread(html: str) -> Thread:
+def parse_thread(html: str, today: date | None = None, tz=None) -> Thread:
     """A conversation's messages in order. LinkedIn names the sender once
-    per group of consecutive messages, so a body takes the last name seen."""
+    per group of consecutive messages, so a body takes the last name seen.
+    Each message's ``at`` comes from the day heading above it and its
+    group's time, read in ``tz`` (default: this computer's zone, the one
+    the page was drawn in); None when the page didn't show both. Messages
+    in one group keep their order a second apart."""
+    from datetime import timedelta
     s = soup_of(html)
     header_el = s.select_one(THREAD_HEADER)
     thread = Thread(header=clean_text(header_el.get_text(" ")) if header_el else "")
-    sender = ""
-    for el in s.select(".msg-s-message-group__name, .msg-s-event-listitem__body"):
+    today = today or date.today()
+    sender, day, clock, in_group = "", None, None, 0
+    for el in s.select(f".msg-s-message-group__name, .msg-s-event-listitem__body, "
+                       f".{THREAD_DAY_HEADING}, .{THREAD_TIME}"):
         classes = el.get("class") or []
+        if THREAD_DAY_HEADING in classes:
+            day, clock = thread_day(el.get_text(" "), today), None
+            continue
+        if THREAD_TIME in classes:
+            clock, in_group = thread_time(el.get_text(" ")), 0
+            continue
         if "msg-s-message-group__name" in classes:
             sender = clean_text(el.get_text(" "))
             continue
@@ -193,7 +268,10 @@ def parse_thread(html: str) -> Thread:
         body = "\n".join(clean_text(line) for line in body.split("\n")).strip()
         body = re.sub(r"\n{3,}", "\n\n", body)
         if body:
-            thread.messages.append(ThreadMessage(sender=sender, body=body))
+            at = _thread_moment(day, clock, tz)
+            thread.messages.append(ThreadMessage(
+                sender=sender, body=body, at=at + timedelta(seconds=in_group) if at else None))
+            in_group += 1
     return thread
 
 

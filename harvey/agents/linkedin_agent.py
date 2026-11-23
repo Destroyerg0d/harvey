@@ -111,6 +111,41 @@ def li_catch_up_due(rows: list[dict], cfg, now) -> bool:
 
 DECLINE_INTENTS = {"not_interested", "unsubscribe"}
 REPLY_INTENTS = {"interested", "question", "objection", "wrong_person"}
+
+# A short "okay, thanks": nothing to answer, and never a no. Live, 2026-11-23:
+# "Okay, thanks" to a confirmed meeting was read as not interested and the
+# lead was declined. Recorded as ACK: no reply, no decline, the stage stays.
+ACK = "ack"
+_ACK_WORDS = frozenset("""
+    ok okay okey k kk alright allright thanks thank thankyou thx ty tq you so very much many a lot
+    again great perfect noted cool got it sounds good will do see then talk soon looking forward to
+    appreciate appreciated cheers awesome nice wonderful excellent brilliant lovely fine received
+    understood sir madam for the info information update confirmation confirming done super
+""".split())
+ACK_MAX_WORDS = 8
+
+
+def is_acknowledgement(text: str) -> bool:
+    """Only thanks and okays, at most ACK_MAX_WORDS words, no question: "Okay,
+    thanks", "Noted, thank you", "Sounds good". Anything with another word
+    ("no", "not", "but", a day, a time) isn't one."""
+    t = (text or "").replace("’", "'").lower().strip()
+    if not t or "?" in t:
+        return False
+    words = re.findall(r"[a-z]+", t)
+    if not words:
+        # Only emoji or punctuation ("👍"), never letters in another script.
+        return all(not ch.isalnum() for ch in t)
+    return len(words) <= ACK_MAX_WORDS and all(w in _ACK_WORDS for w in words)
+
+
+def acknowledged(text: str, intent: str, stage: str) -> str:
+    """ACK in place of the classifier's intent when the message only says
+    thanks and the classifier read it as a no, or the meeting is booked
+    already (nothing left to answer). Otherwise the intent as it was."""
+    if is_acknowledgement(text) and (intent in DECLINE_INTENTS or stage == "meeting"):
+        return ACK
+    return intent
 # A contact whose email side has answered or stopped: no LinkedIn pitch.
 EMAIL_STOPPED = {"replied", "opted_out", "lost", "meeting", "closed", "closed_won", "closed_lost"}
 # Email statuses that a LinkedIn conversation stops (they're talking here now).
@@ -647,7 +682,8 @@ class LinkedInAgent:
             return "unsubscribe"
         if any(p in _flat(text) for p in ESCALATION_PATTERNS):
             return "escalate"
-        return await Handler._classify_intent(self, text, self._as_prospect(lead))
+        intent = await Handler._classify_intent(self, text, self._as_prospect(lead))
+        return acknowledged(text, intent, lead.get("stage") or "")
 
     async def handle_inbound(self):
         if self._brain_paused():
@@ -665,6 +701,11 @@ class LinkedInAgent:
                     return
                 logger.warning(f"LinkedIn: couldn't classify a reply ({e}); it waits for you.")
                 intent = "escalate"
+            if intent == ACK and lead["stage"] != "meeting":
+                # An "okay, thanks" to the time we offered books it.
+                history = await self.state.li_messages(lead_id=lead["id"])
+                if await self.booking_confirmed(lead, message["body"], history) is not None:
+                    intent = "interested"
             # A "wrong person" that names someone: the referral (before the
             # message counts as read, so an outage leaves it for next time).
             referred = {"note": "", "for_you": False, "keep": set()}

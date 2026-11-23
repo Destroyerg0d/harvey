@@ -29,7 +29,7 @@ def e(text: str) -> str:
     return htmlmod.escape(text or "")
 
 
-def thread_html(header: str, messages, composer: str = "", recipient_pill: str = "") -> str:
+def thread_html(header: str, messages, composer: str = "", recipient_pill: str = "", slug: str = "") -> str:
     """A conversation as LinkedIn draws it: grouped senders, then bodies."""
     groups, last = [], None
     for sender, body in messages:
@@ -43,7 +43,8 @@ def thread_html(header: str, messages, composer: str = "", recipient_pill: str =
             if recipient_pill else "")
     return page(
         f'{pill}<h2 class="msg-entity-lockup__entity-title">{e(header)}</h2>'
-        f'<ul class="msg-s-message-list">{"".join(groups)}</ul>'
+        + (f'<a href="https://www.linkedin.com/in/{slug}/" aria-label="{e(header)}">View profile</a>' if slug else '')
+        + f'<ul class="msg-s-message-list">{"".join(groups)}</ul>'
         f'<form class="msg-form"><div class="msg-form__contenteditable" contenteditable="true">'
         f'<p>{e(composer)}</p></div><button class="msg-form__send-button">Send</button></form>')
 
@@ -70,8 +71,13 @@ class Person:
 
 
 class FakeLinkedIn:
-    def __init__(self, people=(), *, note_limit=False, weekly_limit=False, breaker_on="", no_note_box=False):
+    def __init__(self, people=(), *, note_limit=False, weekly_limit=False, breaker_on="", no_note_box=False,
+                 live_list=False, unread=(), list_page=0):
         self.no_note_box = no_note_box    # "Add a note" opens a form Harvey can't find a box in
+        self.live_list = live_list        # the list as LinkedIn draws it now: no thread links, click to open
+        self.unread = set(unread)         # slugs whose conversation is unread
+        self.list_page = list_page        # conversations shown before "Load more conversations" (0: all)
+        self.loaded_pages = 1
         self.people = {p.slug: p for p in people}
         self.note_limit = note_limit
         self.weekly_limit = weekly_limit
@@ -79,6 +85,11 @@ class FakeLinkedIn:
         self.stray_invites: list[str] = []  # invites that went to someone in a side list
         self.signed_in = True
         self.withdrawn: list[str] = []
+
+    def listed(self) -> list:
+        """The conversations the list shows, in order (Load more adds a page)."""
+        people = [p for p in self.people.values() if p.thread]
+        return people[:self.list_page * self.loaded_pages] if self.list_page else people
 
     def person_by_urn(self, urn: str):
         return next((p for p in self.people.values() if (p.urn or p.slug) == urn), None)
@@ -94,19 +105,24 @@ class FakeLinkedIn:
                         'road, nothing to do with the account.</div>')
         if url.startswith(MESSAGING_URL) and "/thread/" not in url and "/compose/" not in url:
             items = []
-            for p in self.people.values():
-                if not p.thread:
-                    continue
+            listed = self.listed()
+            for p in listed:
                 sender, body = p.thread[-1]
                 snippet = ("You: " if sender == OWNER else "") + body
-                items.append(f'<li class="msg-conversation-listitem"><a href="{p.thread_url}">'
+                unread = " msg-conversation-card--unread" if p.slug in self.unread else ""
+                opener = (f'<div class="msg-conversation-listitem__link{unread}">' if self.live_list
+                          else f'<a class="{unread.strip()}" href="{p.thread_url}">')
+                closer = "</div>" if self.live_list else "</a>"
+                items.append(f'<li class="msg-conversation-listitem">{opener}'
                              f'<h3>{e(p.name)}</h3><p class="msg-conversation-card__message-snippet">'
-                             f'{e(snippet)}</p><time>2:14 PM</time></a></li>')
-            return page(f'<ul class="msg-conversations-container__conversations-list">{"".join(items)}</ul>')
+                             f'{e(snippet)}</p><time>2:14 PM</time>{closer}</li>')
+            more = ("<button>Load more conversations</button>"
+                    if len(listed) < len([p for p in self.people.values() if p.thread]) else "")
+            return page(f'<ul class="msg-conversations-container__conversations-list">{"".join(items)}</ul>{more}')
         if "/messaging/thread/" in url:
             slug = url.rstrip("/").rsplit("/t-", 1)[-1]
             p = self.people[slug]
-            return thread_html(p.name, p.thread, state.get("composer", ""))
+            return thread_html(p.name, p.thread, state.get("composer", ""), slug=p.slug)
         if "/messaging/compose/" in url:
             m = re.search(r"recipient=([^&]+)", url)
             p = self.person_by_urn(m.group(1)) if m else None
@@ -186,6 +202,7 @@ class FakeDriver:
         self.sent: list[tuple[str, str]] = []
         self.invites: list[tuple[str, str]] = []
         self.not_loading: list[str] = []     # URL parts whose page never loads
+        self.opened: list[str] = []          # conversations opened by a click in the list
 
     def _person(self):
         m = re.search(r"/in/([^/?#]+)", self.url)
@@ -231,6 +248,26 @@ class FakeDriver:
         else:
             self.state["modal"] = ('<dialog open><h2>Add a note to your invitation?</h2><button>Add a note</button>'
                                    '<button>Send without a note</button><button>Dismiss</button></dialog>')
+
+    async def open_conversation(self, index: int) -> bool:
+        if "/messaging/" not in self.url:
+            return False
+        listed = self.site.listed()
+        if not 0 <= index < len(listed):
+            return False
+        p = listed[index]
+        self.url = p.thread_url
+        self.visited.append(self.url)
+        self.opened.append(p.slug)
+        self.site.unread.discard(p.slug)        # opening it marks it read, as LinkedIn does
+        return True
+
+    async def load_more_conversations(self) -> bool:
+        if not self.site.list_page or len(self.site.listed()) >= len(
+                [p for p in self.site.people.values() if p.thread]):
+            return False
+        self.site.loaded_pages += 1
+        return True
 
     async def click_connect_for(self, name: str) -> bool:
         from harvey.linkedin.pages import names_match
