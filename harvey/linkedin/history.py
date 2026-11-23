@@ -264,6 +264,10 @@ async def backfill(state, config, progress=None, max_threads: int = MAX_THREADS,
                 report["new_messages"] += await record_history(state, lead, thread, url)
                 done.update((url, key))
                 if report["threads"] % 5 == 0:
+                    # Still busy: an old stamp reads as a stale run, and the
+                    # heartbeat's run then fails on the profile this holds
+                    # (live, 2026-11-23: "LinkedIn error" on the owner's phone).
+                    await state.set_setting(RUNNING_KEY, _utcnow().isoformat())
                     await state.set_setting(DONE_KEY, json.dumps(sorted(done)))
                     if progress:
                         await progress(dict(report))

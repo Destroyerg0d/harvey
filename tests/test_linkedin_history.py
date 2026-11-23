@@ -114,3 +114,22 @@ def test_a_thread_gives_each_message_its_date_and_time():
     assert thread_day("Monday", date(2026, 11, 23)) == date(2026, 11, 16)        # a week back, not today
     assert thread_day("Yesterday", date(2026, 11, 23)) == date(2026, 11, 22)
     assert thread_day("Someday", date(2026, 11, 23)) is None
+
+
+def test_a_long_read_keeps_linkedin_marked_busy(tmp_path):
+    # Live, 2026-11-23: a 2.5-hour read let its busy mark go stale; the
+    # heartbeat's run then failed on the profile and told the owner, every 10 minutes.
+    from harvey.agents.linkedin_agent import RUNNING_KEY
+    people = [Person(slug=f"q-{i}", name=f"Quinn {chr(65 + i)}lpha", connected=True,
+                     thread=[(f"Quinn {chr(65 + i)}lpha", "A call on Monday?")]) for i in range(6)]
+    w = World(tmp_path, people)
+    stamps = []
+    real = w.state.set_setting
+
+    async def spy(key, value):
+        if key == RUNNING_KEY:
+            stamps.append(value)
+        return await real(key, value)
+    w.state.set_setting = spy
+    run(history.backfill(w.state, w.config, driver_factory=DriverFactory(w.driver), agent_options=_quiet()))
+    assert len([s for s in stamps if s]) >= 2 and stamps[-1] == ""        # refreshed, then let go
