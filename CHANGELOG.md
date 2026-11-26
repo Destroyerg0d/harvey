@@ -18,7 +18,8 @@ minor versions can still change behaviour.
       own pace, with no proxies;
     - a brand with its own website becomes a company with source `social:<platform>` and its
       bio as the description;
-    - prospecting then finds its people from the site like any other company.
+    - prospecting then finds its people from the site like any other company, taking these
+      brands before the bulk map imports (after warm intent companies).
   - **Instagram hides a profile's link from visitors who aren't signed in.** Its site is found
     by a search for the brand's name and kept only when the site's own page links back to that
     profile.

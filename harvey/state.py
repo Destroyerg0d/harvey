@@ -2538,6 +2538,9 @@ class StateManager(LinkedInStateMixin, WhatsAppStateMixin):
                    HAVING COUNT(p.id) = 0
                    ORDER BY c.prospects_checked_at IS NOT NULL,
                             COALESCE(c.source, '') LIKE 'intent:%' DESC,
+                            -- Brands picked from social profiles (harvey/social_leads.py)
+                            -- before the bulk map imports (owner, 2026-11-27).
+                            COALESCE(c.source, '') LIKE 'social:%' DESC,
                             c.prospects_checked_at
                    LIMIT ?""",
                 (f"-{int(stale_days)} days", int(limit)),

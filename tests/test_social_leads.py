@@ -248,3 +248,13 @@ def test_a_profile_with_no_name_is_looked_up_by_its_handle():
     assert sl.lookup_name("  ", "@lone_maker") == "lone maker"
     assert sl.lookup_name("Glow Candles Ltd", "glow.candles") == "Glow Candles Ltd"
     assert sl.not_a_site("find-and-update.company-information.service.gov.uk")
+
+
+def test_the_backfill_takes_social_brands_before_bulk_imports(state):
+    from harvey.models.company import Company
+    for i in range(3):
+        run(state.add_company(Company(name=f"Plain {i}", domain=f"plain{i}.example", source="discover:overture")))
+    run(state.add_company(Company(name="Glow", domain="glowcandles.example", source="social:pinterest")))
+    run(state.add_company(Company(name="Warm", domain="warm.example", source="intent:shopify_community")))
+    order = [c["domain"] for c in run(state.companies_needing_prospects(limit=2))]
+    assert order == ["warm.example", "glowcandles.example"]          # intent first, then social
