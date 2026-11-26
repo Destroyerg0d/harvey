@@ -371,7 +371,21 @@ harvey reviews promised      # Who a sent reply promised a write-up to and hasn'
 harvey reviews write [NAME]  # Write those reviews; each waits for approval (unless reviews autopilot is on)
 harvey owner notes          # What the owner asked for on WhatsApp that needs a code change, and answers
 harvey owner ask "TEXT"      # A question to the owner's phone (their answer lands in `harvey owner notes`)
+harvey social run [--dry-run] [--limit N] | status  # New companies from social profiles read with Scout (social_leads)
 ```
+
+Social leads (harvey/social_leads.py, `social_leads`, off by default; owner, 2026-11-27): each
+prospecting cycle, a few web searches find brand profiles. Scout (github.com/kiryano/Scout,
+installed separately at `social_leads.scout_path` with its own .venv) reads them through
+`harvey/collectors/scout_bridge.py`, with its proxy settings cleared and its SMTP step unused.
+A brand with its own website becomes a company (source `social:<platform>`), and the
+known-companies backfill finds its people.
+
+- Instagram's link is hidden from visitors who aren't signed in, so its site comes from a name
+  search, kept only if the site links back to the profile (`find_site`).
+- Never read LinkedIn this way: Scout's LinkedIn scraper needs the owner's session cookie, and
+  that account runs the LinkedIn channel.
+- Don't turn on Scout's free proxies.
 
 Site reviews and job seekers (harvey/site_review.py, harvey/careers.py): a yes to the
 write-up offer gets the review itself, measured in headless Chrome, never a promise of one,

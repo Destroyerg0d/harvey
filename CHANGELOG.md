@@ -9,6 +9,26 @@ minor versions can still change behaviour.
 
 ### Added
 
+- **New companies from social profiles, read with Scout** (`harvey/social_leads.py`; owner,
+  2026-11-27). Scout (github.com/kiryano/Scout, MIT) reads a public profile from its handle.
+  Opt-in with `social_leads.enabled` and `social_leads.scout_path`.
+  - **Each prospecting cycle:**
+    - a couple of web searches (`site:pinterest.com "candle company" "London"`) find handles;
+    - Scout reads those profiles in its own Python (`harvey/collectors/scout_bridge.py`), at its
+      own pace, with no proxies;
+    - a brand with its own website becomes a company with source `social:<platform>` and its
+      bio as the description;
+    - prospecting then finds its people from the site like any other company.
+  - **Instagram hides a profile's link from visitors who aren't signed in.** Its site is found
+    by a search for the brand's name and kept only when the site's own page links back to that
+    profile.
+  - **Defaults:** Pinterest and Instagram. Live, TikTok refused every read, and YouTube and
+    Linktree gave no links.
+  - **Never LinkedIn:** Scout's LinkedIn scraper needs the owner's own session cookie.
+  - **Guards:** three refused reads in a row stop the source for a day; no handle is read twice.
+  - **`harvey social run [--dry-run] [--limit N]`** runs one pass now; **`harvey social
+    status`** shows the settings.
+
 - **A mailbox can pause cold email and keep its replies going** (owner, 2026-11-27: a sending
   domain on a blocklist still answers the people who wrote back).
   - `harvey sending pause --mailbox EMAIL --replies-only [--reason TEXT]`.

@@ -385,6 +385,10 @@ class Scout:
         # prospecting is wanted, and doesn't spend the cycle's query budget.
         if linkedin_search:
             strategies.append(("profile_search", self._prospect_via_profile_search))
+        # Brands on Instagram, TikTok and the like, read with Scout (opt-in:
+        # social_leads.enabled; harvey/social_leads.py). Companies only, like
+        # the footprints below; the backfill finds their people.
+        strategies.append(("social", self._prospect_via_social))
         # Old shops, by the text their software prints (opt-in: icp.legacy_niches
         # or icp.footprint_queries). Companies only; the backfill above finds
         # their people once the profile has read each site.
@@ -551,17 +555,20 @@ class Scout:
 
     # ── Search backend abstraction ──
 
-    async def _web_search(self, query: str) -> list[tuple[str, str]]:
+    async def _web_search(self, query: str, count: bool = True) -> list[tuple[str, str]]:
         """Search the web using the best available backend.
 
         Returns list of (url, snippet) tuples.
         Tries backends in order: Serper API → TinyFish Search API → DuckDuckGo → Bing → Google.
+        ``count=False``: outside the cycle's MAX_QUERIES_PER_CYCLE, for a source
+        with its own allowance (harvey/social_leads.py, searches_per_cycle).
         """
-        if self._queries_this_cycle >= MAX_QUERIES_PER_CYCLE:
+        if count and self._queries_this_cycle >= MAX_QUERIES_PER_CYCLE:
             logger.info("Scout: Query limit reached for this cycle. Will continue next cycle.")
             return []
 
-        self._queries_this_cycle += 1
+        if count:
+            self._queries_this_cycle += 1
 
         # Add a random delay between searches to be polite / avoid throttling.
         if self._queries_this_cycle > 1:
@@ -1333,6 +1340,16 @@ class Scout:
             getattr(icp, "legacy_niches", None) or [],
             getattr(icp, "geography", None) or [],
         )
+
+    async def _prospect_via_social(self) -> int:
+        """New companies from social profiles read with Scout (see
+        harvey/social_leads.py). Adds companies only, so it returns 0."""
+        cfg = getattr(self.config, "social_leads", None)
+        if not cfg or not cfg.enabled:
+            return 0
+        from harvey import social_leads
+        await social_leads.run_cycle(self)
+        return 0
 
     async def _prospect_via_footprints(self) -> int:
         """Old shops found by the text their software prints on every page

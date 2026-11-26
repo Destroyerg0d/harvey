@@ -1402,6 +1402,10 @@ def main():
     from harvey.meeting_finder import add_cli_parser as add_meetings_parser
     add_meetings_parser(subparsers)
 
+    # harvey social run|status (harvey/social_leads.py: profiles read with Scout)
+    from harvey.social_leads import add_cli_parser as add_social_parser
+    add_social_parser(subparsers)
+
     # harvey usage
     sub = subparsers.add_parser("usage", help="Show brain usage and quota (Claude or Codex)")
     sub.add_argument("--days", type=int, default=30, help="Breakdown window (default: 30)")

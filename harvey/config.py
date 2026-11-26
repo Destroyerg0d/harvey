@@ -1180,6 +1180,27 @@ class CareersConfig(BaseModel):
     linkedin_url: str = ""   # the company's LinkedIn page
 
 
+class SocialLeadsConfig(BaseModel):
+    """New companies from social profiles, read with Scout
+    (github.com/kiryano/Scout; harvey/social_leads.py; owner, 2026-11-27).
+    Off by default. Web searches find profiles of brands in your industries;
+    Scout, installed at ``scout_path`` with its own Python, reads each one;
+    a brand with a website becomes a company, and prospecting finds its people
+    from the site like any other. LinkedIn is never read this way."""
+    enabled: bool = False
+    scout_path: str = ""                 # Scout's folder (its .venv holds its Python)
+    # Live, 2026-11-27: Pinterest shows a business's website to anyone, and
+    # Instagram doesn't (its site is found by a search, checked by a link back).
+    # TikTok refused every logged-out read; YouTube and Linktree gave no links.
+    platforms: list[str] = ["pinterest", "instagram"]
+    site_lookups_per_cycle: int = 10     # searches for a brand's site when its profile shows none
+    terms: list[str] = []                # what to search for; empty: short terms from icp.industries
+    places: list[str] = []               # where; empty: cities and countries from icp.geography
+    searches_per_cycle: int = 2          # web searches a prospecting cycle (its own allowance)
+    profiles_per_cycle: int = 15         # profiles Scout reads a cycle
+    companies_per_cycle: int = 15        # new companies a cycle, at most
+
+
 class TargetingConfig(BaseModel):
     """Who cold outreach goes to (harvey/targeting.py; owner, 2026-11-19). Empty
     countries and decision_makers_only false: no rule. Covers cold email,
@@ -1242,6 +1263,7 @@ class HarveyConfig(BaseModel):
     site_review: SiteReviewConfig = SiteReviewConfig()
     dashboard: DashboardConfig = DashboardConfig()
     targeting: TargetingConfig = TargetingConfig()
+    social_leads: SocialLeadsConfig = SocialLeadsConfig()
     # The file it was loaded from, so a running Harvey can re-read the
     # sending mode from that same file (refresh_sending_mode).
     _source_path: str | None = PrivateAttr(default=None)
