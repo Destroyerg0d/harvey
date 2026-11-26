@@ -164,3 +164,29 @@ def test_an_offer_that_passed_unanswered_isnt_counted_as_held(state):
     st = run(meetings.collect(state, config, now=NOW))["stats"]
     assert st["held"] == 1 and st["lapsed"] == 1 and st["proposed"] == 0
     assert st["by_channel"]["linkedin"]["held"] == 1 and st["by_channel"]["linkedin"]["lapsed"] == 1
+
+
+def test_the_daily_scan_stops_when_the_heartbeat_stops(state):
+    # 2026-11-27: a scan left running when its loop closed hung the test suite.
+    _linkedin(state, "ann-lee-1", "Ann Lee", [("us", "A call?"), ("them", "Sure, Tuesday at 3pm EST works")])
+
+    class SlowBrain(Brain):
+        async def think_json(self, prompt, **kw):
+            self.calls.append(prompt)
+            await asyncio.sleep(3600)
+
+    async def go():
+        brain = SlowBrain({})
+        assert await meeting_finder.maybe_daily_scan(state, brain, _config())
+        for _ in range(200):                      # until the scan is reading
+            if brain.calls:
+                break
+            await asyncio.sleep(0.01)
+        task = meeting_finder._daily_task
+        await meeting_finder.shutdown_daily_scan()
+        return brain, task
+
+    brain, task = run(go())
+    assert brain.calls and task.done() and meeting_finder._daily_task is None
+    status = json.loads(run(state.get_setting(meeting_finder.SCAN_KEY)))
+    assert status["running"] is False

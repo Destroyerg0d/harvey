@@ -1816,9 +1816,11 @@ async function loadOutbox() {
     : '') +
     // Several mailboxes: one paused on its own (by hand, or its bounce rate).
     (data.paused_mailboxes || []).map(m =>
-      '<div class="banner bad">' + icon('alert') + '<div><b>Sending from ' + escHtml(m.email) +
-        ' is paused</b><p>' + escHtml(m.reason) + '. Its approved mail waits; the other mailboxes ' +
-        'carry on.</p></div>' +
+      '<div class="banner bad">' + icon('alert') + '<div><b>' +
+        (m.replies_only ? 'Cold email from ' : 'Sending from ') + escHtml(m.email) + ' is paused</b><p>' +
+        escHtml(m.reason) + (m.replies_only
+          ? '. Its replies still go; its approved cold email waits, and the other mailboxes '
+          : '. Its approved mail waits; the other mailboxes ') + 'carry on.</p></div>' +
         '<button class="btn btn-secondary btn-sm" onclick="sendingToggle(\'resume\', ' + jsq(m.email) + ')">' +
         'Resume ' + escHtml(m.email) + '</button></div>').join('');
   // Only once there is mail to warn about: a fresh install sends nothing.
@@ -3060,7 +3062,8 @@ function mbxNum(n) {
 
 function mbxStatusBadge(status) {
   const map = {
-    sending: ['Sending', 'good'], paused: ['Paused', 'bad'], not_connected: ['Not connected', 'bad'],
+    sending: ['Sending', 'good'], paused: ['Paused', 'bad'], replies_only: ['Replies only', 'waiting'],
+    not_connected: ['Not connected', 'bad'],
     failing: ['Failing', 'bad'], untracked: ['Not tracked', 'idle'], not_configured: ['Not in config', 'idle'],
   };
   const m = Object.prototype.hasOwnProperty.call(map, status) ? map[status] : [String(status || 'Unknown'), 'idle'];
@@ -3201,7 +3204,7 @@ function mbxTableHtml(data) {
     const pct = limit ? Math.min(100, Math.round(100 * (m.sent_today || 0) / limit)) : 0;
     const why = [
       m.reason ? escHtml(m.reason) : '',
-      m.status === 'paused' ? mbxResumeLink(m) : '',
+      m.status === 'paused' || m.status === 'replies_only' ? mbxResumeLink(m) : '',
       m.status === 'not_connected' && m.paused ? 'Also paused: ' + escHtml(m.paused) : '',
       m.last_inbox_read && m.status !== 'not_connected' ? 'Inbox read ' + relTime(m.last_inbox_read) : '',
     ].filter(Boolean).map(t => '<div class="cell-sub mbx-why">' + t + '</div>').join('');

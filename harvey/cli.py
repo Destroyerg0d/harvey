@@ -1107,8 +1107,14 @@ def _sending_one_mailbox(args, wanted: str):
         state = StateManager()
         await state.init_db()
         if args.sending_action == "pause":
-            await state.set_setting(mb.paused_key(address), "paused manually")
-            print(f"\n  Sending from {address} paused. The other mailboxes carry on.\n")
+            why = (getattr(args, "reason", "") or "").strip() or "paused manually"
+            if getattr(args, "replies_only", False):
+                await state.set_setting(mb.paused_key(address), mb.REPLIES_ONLY + why)
+                print(f"\n  Cold email from {address} paused; its replies still go. "
+                      "The other mailboxes carry on.\n")
+            else:
+                await state.set_setting(mb.paused_key(address), why)
+                print(f"\n  Sending from {address} paused. The other mailboxes carry on.\n")
         elif args.sending_action == "resume":
             await state.set_setting(mb.paused_key(address), "")
             await state.set_setting(mb.bounce_key(address), "0")
@@ -1118,7 +1124,10 @@ def _sending_one_mailbox(args, wanted: str):
         else:
             paused = await state.get_setting(mb.paused_key(address))
             everything = await state.get_setting("sending_paused")
-            print(f"\n  {address}: {'PAUSED — ' + paused if paused else 'active'}")
+            if mb.replies_only(paused):
+                print(f"\n  {address}: REPLIES ONLY (cold email paused) — {paused[len(mb.REPLIES_ONLY):]}")
+            else:
+                print(f"\n  {address}: {'PAUSED — ' + paused if paused else 'active'}")
             if everything:
                 print(f"  All sending: PAUSED — {everything}")
             print()
@@ -1346,6 +1355,9 @@ def main():
                      choices=["pause", "resume", "status"])
     sub.add_argument("--mailbox", default="", metavar="EMAIL",
                      help="Only this one of channels.email.mailboxes")
+    sub.add_argument("--replies-only", action="store_true",
+                     help="pause --mailbox: hold its cold email only; its replies still go")
+    sub.add_argument("--reason", default="", help="pause --mailbox: why (shown on the dashboard)")
     sub.set_defaults(func=cmd_sending)
 
     sub = subparsers.add_parser(

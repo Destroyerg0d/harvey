@@ -407,3 +407,20 @@ async def maybe_daily_scan(state, brain, config) -> bool:
     await state.set_setting(DAILY_KEY, now.isoformat())
     _daily_task = asyncio.create_task(run_scan(state, brain, config))
     return True
+
+
+async def shutdown_daily_scan() -> None:
+    """Stop the day's scan if it is still running, when the heartbeat stops. A
+    scan left running when its event loop closes is cut off inside a database
+    call, and the database's worker thread then keeps the process from exiting
+    (2026-11-27: the test suite hung on it)."""
+    import asyncio
+    global _daily_task
+    task, _daily_task = _daily_task, None
+    if task is None or task.done():
+        return
+    task.cancel()
+    try:
+        await task
+    except (asyncio.CancelledError, Exception):
+        pass

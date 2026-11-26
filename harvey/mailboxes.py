@@ -42,6 +42,17 @@ def paused_key(email: str) -> str:
     return PAUSED_KEY_PREFIX + _norm(email)
 
 
+# A mailbox paused for cold email only: its replies, and anything else that
+# isn't cold, still go (owner, 2026-11-27: a domain put on a blocklist keeps
+# answering the people who wrote back). Stored as this prefix on the pause
+# reason, so resuming is the same as for any pause.
+REPLIES_ONLY = "replies only: "
+
+
+def replies_only(reason: str | None) -> bool:
+    return (reason or "").startswith(REPLIES_ONLY)
+
+
 def bounce_key(email: str) -> str:
     return BOUNCE_KEY_PREFIX + _norm(email)
 
@@ -247,7 +258,16 @@ async def pause_problem(state, mailbox: Mailbox) -> str:
     if await state.get_setting(GLOBAL_PAUSE_KEY):
         return "all sending is paused"
     paused = await state.get_setting(paused_key(mailbox.email))
+    if replies_only(paused):
+        return ""                 # its replies still go: cold_pause holds the rest
     return f"sending from {mailbox.email} is paused ({paused})" if paused else ""
+
+
+async def cold_pause(state, mailbox: Mailbox) -> str:
+    """Why cold email from ``mailbox`` waits while its replies still go ("" when
+    it doesn't): a replies-only pause (REPLIES_ONLY)."""
+    paused = await state.get_setting(paused_key(mailbox.email))
+    return paused[len(REPLIES_ONLY):] if replies_only(paused) else ""
 
 
 async def takes_new_prospects(state, mailbox: Mailbox, provider) -> str:
@@ -256,6 +276,9 @@ async def takes_new_prospects(state, mailbox: Mailbox, provider) -> str:
     problem = connection_problem(mailbox, provider) or await pause_problem(state, mailbox)
     if problem:
         return problem
+    cold = await cold_pause(state, mailbox)
+    if cold:
+        return f"{mailbox.email} sends replies only ({cold})"
     down = await state.get_setting(down_since_key(mailbox.email))
     return f"{mailbox.email} has been failing since {down}" if down else ""
 

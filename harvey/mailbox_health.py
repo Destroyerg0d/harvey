@@ -477,6 +477,8 @@ async def collect(db_path, config, *, tz_minutes: int = 0, now: datetime | None 
             status, reason = "untracked", why
         elif not connected:
             status, reason = "not_connected", why
+        elif pause and scope == "mailbox" and mb.replies_only(pause):
+            status, reason = "replies_only", "Cold email paused, replies still go: " + pause[len(mb.REPLIES_ONLY):]
         elif pause:
             status, reason = "paused", ("All sending is paused: " if scope == "all" else "") + pause
         elif down:
@@ -550,7 +552,7 @@ async def collect(db_path, config, *, tz_minutes: int = 0, now: datetime | None 
         "reply_rate": _rate(total("replied"), total("contacted")),
         "mailboxes": len(configured_rows),
         "sending": by_status.get("sending", 0),
-        "paused": by_status.get("paused", 0),
+        "paused": by_status.get("paused", 0) + by_status.get("replies_only", 0),
         "not_connected": by_status.get("not_connected", 0),
         "failing": by_status.get("failing", 0),
         "queued": total("queued"),
@@ -567,7 +569,7 @@ async def collect(db_path, config, *, tz_minutes: int = 0, now: datetime | None 
                               "bounces_total", "contacted", "replied", "positive", "opted_out")},
         })
         dom["mailboxes"].append(r["email"])
-        dom["paused"] += r["status"] == "paused"
+        dom["paused"] += r["status"] in ("paused", "replies_only")
         dom["capacity"] += r["daily_limit"]
         for k in ("sent_today", "sent_7d", "sent_total", "bounces_7d", "bounces_total",
                   "contacted", "replied", "positive", "opted_out"):

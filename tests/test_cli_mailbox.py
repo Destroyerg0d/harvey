@@ -145,3 +145,15 @@ def test_gmail_test_checks_every_mailbox(monkeypatch, auth_calls, capsys):
     assert run_cli(monkeypatch, ["gmail", "test", "--mailbox", THIRD]) == 0
     assert [l.strip() for l in capsys.readouterr().out.splitlines() if l.strip()] == [
         f"✓ {THIRD}: OK"]
+
+
+def test_a_mailbox_can_pause_cold_email_only(monkeypatch, cli_db, capsys):
+    config = make_config(MAILBOXES)
+    monkeypatch.setattr(config_mod, "load_config", lambda *a, **k: config)
+    assert run_cli(monkeypatch, ["sending", "pause", "--mailbox", SECOND, "--replies-only",
+                                 "--reason", "domain on a blocklist"]) == 0
+    assert asyncio.run(settings(cli_db, mb.paused_key(SECOND))) == [mb.REPLIES_ONLY + "domain on a blocklist"]
+    assert run_cli(monkeypatch, ["sending", "status", "--mailbox", SECOND]) == 0
+    assert "REPLIES ONLY" in capsys.readouterr().out
+    assert run_cli(monkeypatch, ["sending", "resume", "--mailbox", SECOND]) == 0
+    assert asyncio.run(settings(cli_db, mb.paused_key(SECOND))) == [""]

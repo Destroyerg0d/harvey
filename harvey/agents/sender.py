@@ -36,7 +36,7 @@ from harvey.integrations.mail_provider import NATIVE_PROVIDERS, get_mail_provide
 from harvey.integrations.precleared import PreclearedClient, clear_hold, record_hold
 from harvey.mailboxes import (
     Mailbox, MailboxProviders, companies_of, configured_mailboxes, connection_problem,
-    down_since_key, is_multi, least_loaded, mailbox_for, normalize, pause_problem,
+    cold_pause, down_since_key, is_multi, least_loaded, mailbox_for, normalize, pause_problem,
     primary_mailbox, render_sender, takes_new_prospects,
 )
 from harvey.segment_mix import LEARNED_KEY, build_mix, queued_segments, update_ramp, weights_of
@@ -313,7 +313,7 @@ class Sender:
             primary = primary_mailbox(self.config).email
             due = []
             for lane in lanes.values():
-                if lane.daily_left > 0 and lane.cold_left > 0:
+                if lane.daily_left > 0 and lane.cold_left > 0 and not lane.cold_held:
                     due += await self._quiet_hours_rows(
                         due_before, mailboxes=[lane.mailbox.email], primary=primary)
         else:
@@ -748,6 +748,9 @@ class Sender:
                 midnight, mailbox=m.email, primary=primary, kind="sequence")
             lane = _Lane(mailbox=m, provider=provider,
                          daily_left=m.daily_limit - sent_day, cold_left=cap - sent_cold)
+            cold_paused = await cold_pause(self.state, m)
+            if cold_paused:
+                lane.cold_held = f"it sends replies only ({cold_paused})"
             if m.email in self.hold_mailboxes:
                 lane.cold_held = "its inbox couldn't be read completely"
             lanes[m.email] = lane

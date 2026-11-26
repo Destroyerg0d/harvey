@@ -355,7 +355,7 @@ harvey gmail test            # Verify the Gmail connection (every mailbox, or --
 harvey outbox                # Review queued emails; --approve <id> / --approve-all / --reject <id>
 harvey signals               # The signal vocabulary; --confirm / --reject CODES (or 'free' / 'all')
 harvey discover              # Find businesses; --providers / --estimate / --provider <key>
-harvey sending pause|resume  # Kill switch for all outbound (--mailbox EMAIL: just that mailbox)
+harvey sending pause|resume  # Kill switch for all outbound (--mailbox EMAIL: just that mailbox; --replies-only: its cold email only)
 harvey replies requeue-auto-acks [--dry-run]  # Put back follow-ups that older auto-replies cancelled
 harvey warmup [domain]       # Sending-domain readiness: SPF/DKIM/DMARC, age, blocklists, ramp, TrulyInbox warmup
 harvey trulyinbox [connect|other]  # Warmup service: connect TrulyInbox, or record another service

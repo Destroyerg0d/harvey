@@ -700,3 +700,25 @@ def test_the_pool_builds_each_mailboxs_own_gmail_provider(tokens):
     cfg = config()
     provider = mb.MailboxProviders(cfg, Env()).get(mb.mailbox_for(cfg, SECOND))
     assert isinstance(provider, gmail.GmailProvider) and provider.mailbox.email == SECOND
+
+
+@pytest.mark.asyncio
+async def test_a_replies_only_mailbox_sends_replies_and_holds_cold_email(state, tokens):
+    # Owner, 2026-11-27: a domain on a blocklist stops cold email but keeps
+    # answering the people who wrote back.
+    cfg = config()
+    connect(cfg, PRIMARY, SECOND, THIRD)
+    providers = fakes(PRIMARY, SECOND, THIRD)
+    await state.set_setting(mb.paused_key(SECOND), mb.REPLIES_ONLY + "domain on a blocklist")
+    jo = await person(state, "jo@roofco.test", mailbox=SECOND, status="contacted")
+    reply = await row(state, jo, "jo@roofco.test", mailbox=SECOND, kind="reply", step=0, campaign="")
+    cold = await row(state, await person(state, "new@leads.test", mailbox=SECOND), "new@leads.test",
+                     mailbox=SECOND, campaign="n1")
+    sender = make_sender(state, cfg, providers)
+    await sender._drain_due()
+    assert (await state.get_outbox_item(reply))["status"] == "sent"
+    assert (await state.get_outbox_item(cold))["status"] == "approved"      # waits
+    assert [m.email for m in mb.configured_mailboxes(cfg)                   # no new prospects
+            if not await mb.takes_new_prospects(state, m, sender.mailbox_providers.get(m))] == [PRIMARY, THIRD]
+    assert await mb.pause_problem(state, mb.configured_mailboxes(cfg)[1]) == ""
+    assert await mb.cold_pause(state, mb.configured_mailboxes(cfg)[1]) == "domain on a blocklist"

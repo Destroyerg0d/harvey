@@ -162,7 +162,7 @@ def test_outbox_rows_say_their_mailbox_and_sign_off(client, multi, db):
     rows = {r["id"]: r for r in data["pending"]}
     assert (rows["o1"]["mailbox_address"], rows["o1"]["sender_first_name"]) == (SECOND, "Sam")
     assert (rows["o2"]["mailbox_address"], rows["o2"]["sender_first_name"]) == (PRIMARY, "Alex")
-    assert data["paused_mailboxes"] == [{"email": THIRD, "reason": "paused manually"}]
+    assert data["paused_mailboxes"] == [{"email": THIRD, "reason": "paused manually", "replies_only": False}]
 
 
 def test_with_one_mailbox_the_outbox_is_as_before(client, tokens, db, monkeypatch):

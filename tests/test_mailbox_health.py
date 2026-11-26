@@ -647,3 +647,11 @@ def test_the_results_panel(client, seeded):
                   "Interested", "Ready to meet", "Opted out", "Not interested"):
         assert label in html
     assert "71%" in html                       # 5 of 7 contacted replied
+
+
+def test_a_replies_only_mailbox_says_so(seeded, multi):
+    setting(seeded, mb.paused_key(SECOND), mb.REPLIES_ONLY + "domain on a blocklist")
+    box = by_email(run_collect(seeded, multi))[SECOND]
+    assert box["status"] == "replies_only"
+    assert box["reason"] == "Cold email paused, replies still go: domain on a blocklist"
+    assert run_collect(seeded, multi)["summary"]["paused"] == 1

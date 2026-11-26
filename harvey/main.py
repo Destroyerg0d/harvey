@@ -718,6 +718,8 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
     await whatsapp.shutdown()
     await learner.shutdown()
     await inbound.shutdown()
+    from harvey.meeting_finder import shutdown_daily_scan
+    await shutdown_daily_scan()
     logger.info("Harvey shutting down. Deals don't close themselves, but I need a break.")
 
 

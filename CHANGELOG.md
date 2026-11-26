@@ -9,6 +9,12 @@ minor versions can still change behaviour.
 
 ### Added
 
+- **A mailbox can pause cold email and keep its replies going** (owner, 2026-11-27: a sending
+  domain on a blocklist still answers the people who wrote back).
+  - `harvey sending pause --mailbox EMAIL --replies-only [--reason TEXT]`.
+  - Its first emails and follow-ups wait, and it gets no new prospects. Replies still go.
+  - The Mailboxes tab shows it as "Replies only" with the reason. Resume works as for any pause.
+
 - **Every meeting, found in every conversation** (harvey/meeting_finder.py). The Meetings tab
   showed only meetings a stage said were booked; agreed ones elsewhere never reached it.
   - **What is read:** each LinkedIn, WhatsApp and email conversation with a sign of a meeting (a
@@ -84,6 +90,9 @@ minor versions can still change behaviour.
 
 ### Fixed
 
+- **The daily meeting scan stops when the heartbeat stops** (`meeting_finder.shutdown_daily_scan`).
+  Left running as its loop closed, it was cut off inside a database call and the process could
+  not exit: the test suite hung on it.
 - **A short "okay, thanks" is never a no.** Live, 2026-11-23: one sent after a confirmed meeting
   was read as not interested, and the lead was declined.
   - On LinkedIn and WhatsApp, a message of only thanks and okays is now `ack`: no reply, no

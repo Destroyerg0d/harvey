@@ -1072,9 +1072,10 @@ async def get_outbox_api():
             for key in ("pending", "approved", "sent", "failed"):
                 for row in out[key]:
                     _add_mailbox(row, names)
-            from harvey.mailboxes import paused_key
+            from harvey.mailboxes import REPLIES_ONLY, paused_key, replies_only
             out["paused_mailboxes"] = [
-                {"email": address, "reason": reason}
+                {"email": address, "replies_only": replies_only(reason),
+                 "reason": reason[len(REPLIES_ONLY):] if replies_only(reason) else reason}
                 for address in names
                 if (reason := await state.get_setting(paused_key(address)))]
         return out
